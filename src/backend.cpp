@@ -1,41 +1,65 @@
 #include "backend.hpp"
-#include "chess.hpp"
 
-using namespace backend;
+#include <stdexcept>
 
-Board::Board() : impl(std::make_unique<chess::Board>()) {}
+namespace backend {
 
-Board::Board(const std::string& fen) : impl(std::make_unique<chess::Board>(fen)) {}
-
-std::string Board::get_fen() const {
-    return impl->fen();
+Board::Board(const std::string& fen)
+    : board_(std::make_unique<chess::Board>(fen)) {
+    // chess::Board ctor parses FEN; if bad FEN is passed, it still constructs,
+    // but you can validate via setFen if needed later.
 }
 
-void Board::set_fen(const std::string& fen) {
-    impl = std::make_unique<chess::Board>(fen);
+std::string Board::fen(bool include_counters) const {
+    return board_->getFen(include_counters);
 }
 
-std::vector<Move> Board::legal_moves() const {
-    std::vector<Move> out;
-    chess::Movelist moves;
-    chess::movegen::legalmoves(moves, *impl, 0);
-    out.reserve(moves.size());
-    for (auto const &m : moves) {
-        out.push_back({ m.from(), m.to(), -1 }); // no promotion mapping yet
+std::string Board::turn() const {
+    return board_->sideToMove() == chess::Color::WHITE ? "white" : "black";
+}
+
+bool Board::is_game_over() const {
+    auto [reason, result] = board_->isGameOver();
+    return reason != chess::GameResultReason::NONE;
+}
+
+void Board::push_uci(const std::string& uci) {
+    // Translate UCI -> chess::Move using current board state.
+    chess::Move mv = chess::uci::uciToMove(*board_, uci);
+    if (mv == chess::Move::NO_MOVE) {
+        throw std::invalid_argument("Invalid UCI for current position: " + uci);
+    }
+    board_->makeMove(mv);
+    history_.push_back(mv);
+}
+
+void Board::pop() {
+    if (history_.empty()) return;
+    chess::Move last = history_.back();
+    history_.pop_back();
+    board_->unmakeMove(last);
+}
+
+std::vector<std::string> Board::legal_moves() const {
+    chess::Movelist ml;
+    // Third arg is the piece mask; passing all piece types avoids MSVC template deduction issues.
+    chess::movegen::legalmoves(
+        ml,
+        *board_,
+        chess::PieceGenType::PAWN   |
+        chess::PieceGenType::KNIGHT |
+        chess::PieceGenType::BISHOP |
+        chess::PieceGenType::ROOK   |
+        chess::PieceGenType::QUEEN  |
+        chess::PieceGenType::KING
+    );
+
+    std::vector<std::string> out;
+    out.reserve(static_cast<size_t>(ml.size()));
+    for (const auto& m : ml) {
+        out.emplace_back(chess::uci::moveToUci(*board_, m));
     }
     return out;
 }
 
-void Board::push(const Move& m) {
-    impl->makeMove(chess::Move(m.from, m.to));
-}
-
-void Board::pop() {
-    impl->unmakeMove();
-}
-
-PieceOn Board::piece_on(int sq) const {
-    auto p = impl->at(chess::Square(sq));
-    if (!p) return { -1, -1 };
-    return { static_cast<int>(p.type()), static_cast<int>(p.color()) };
-}
+}  // namespace backend

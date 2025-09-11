@@ -1,29 +1,27 @@
-// src/binding.cpp
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+
 #include "backend.hpp"
 
 namespace py = pybind11;
-using namespace backend;
 
 PYBIND11_MODULE(pyfastchess, m) {
-    py::class_<Move>(m, "Move")
-        .def(py::init<>())
-        .def_readwrite("from", &Move::from)
-        .def_readwrite("to", &Move::to)
-        .def_readwrite("promotion", &Move::promotion);
+    m.doc() = "Minimal Python bindings over Disservin chess-library";
 
-    py::class_<PieceOn>(m, "PieceOn")
-        .def_readwrite("piece", &PieceOn::piece)
-        .def_readwrite("color", &PieceOn::color);
-
-    py::class_<Board>(m, "Board")
-        .def(py::init<>())
-        .def(py::init<const std::string&>())
-        .def("get_fen", &Board::get_fen)
-        .def("set_fen", &Board::set_fen)
-        .def("legal_moves", &Board::legal_moves)
-        .def("push", &Board::push)
-        .def("pop", &Board::pop)
-        .def("piece_on", &Board::piece_on);
+    py::class_<backend::Board>(m, "Board")
+        .def(py::init<const std::string&>(),
+             py::arg("fen") = std::string(chess::constants::STARTPOS),
+             "Create a board from a FEN (defaults to the standard start position).")
+        .def("fen", &backend::Board::fen, py::arg("include_counters") = true,
+             "Return FEN string of the current position.")
+        .def("turn", &backend::Board::turn,
+             "Return side to move as 'white' or 'black'.")
+        .def("is_game_over", &backend::Board::is_game_over,
+             "Return True if the game is over.")
+        .def("legal_moves", &backend::Board::legal_moves,
+             "Return a list of legal moves as UCI strings.")
+        .def("push_uci", &backend::Board::push_uci, py::arg("uci"),
+             "Play a move given in UCI on the current position.")
+        .def("pop", &backend::Board::pop,
+             "Undo the last move played via push_uci.");
 }

@@ -1,43 +1,41 @@
-// src/backend.hpp
 #pragma once
+
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
-#include <optional>
 
-namespace chess { class Board; class Move; }
+#include "chess.hpp"  // CMake should add extern/chess-library/include to includes
 
 namespace backend {
 
-// simple move wrapper
-struct Move {
-    int from;
-    int to;
-    int promotion; // -1 = none
-};
-
-// piece on square
-struct PieceOn {
-    int piece; // piece type id
-    int color; // 0=white, 1=black
-};
-
+// Minimal wrapper around chess::Board for Python bindings.
 class Board {
 public:
-    Board();
-    Board(const std::string& fen);
+    // Construct from FEN (defaults to chess start position).
+    explicit Board(const std::string& fen = std::string(chess::constants::STARTPOS));
 
-    std::string get_fen() const;
-    void set_fen(const std::string& fen);
+    // Current FEN. If you ever want to drop counters, you can do it in Python.
+    std::string fen(bool include_counters = true) const;
 
-    std::vector<Move> legal_moves() const;
-    void push(const Move& m);
+    // "white" or "black".
+    std::string turn() const;
+
+    // True if game is over (by any reason).
+    bool is_game_over() const;
+
+    // Push a move given in UCI (e.g., "e2e4", "a7a8q").
+    // Throws std::invalid_argument if UCI is invalid in current position.
+    void push_uci(const std::string& uci);
+
+    // Undo the last move that was pushed via push_uci. No-op if history is empty.
     void pop();
 
-    PieceOn piece_on(int sq) const;
+    // All legal moves as UCI strings in the current position.
+    std::vector<std::string> legal_moves() const;
 
 private:
-    std::unique_ptr<chess::Board> impl;
+    std::unique_ptr<chess::Board> board_;
+    std::vector<chess::Move>      history_;  // to support pop()
 };
 
-} // namespace backend
+}  // namespace backend

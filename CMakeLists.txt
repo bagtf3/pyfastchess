@@ -21,9 +21,10 @@ add_library(pyfastchess MODULE
 )
 
 target_include_directories(pyfastchess PRIVATE
-  ${NumPy_INCLUDE_DIR}
-  ${Python3_INCLUDE_DIRS}
-  src
+    ${NumPy_INCLUDE_DIR}
+    ${Python3_INCLUDE_DIRS}
+    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/extern/chess-library/include
 )
 
 target_link_libraries(pyfastchess PRIVATE pybind11::module)
