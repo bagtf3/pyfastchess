@@ -1,70 +1,41 @@
-// backend.cpp
-
 #include "backend.hpp"
-#include "extern/chess-library/include/chess.hpp"   // adjust path
+#include "chess.hpp"
 
-using namespace chess;  // their namespace
 using namespace backend;
 
-Board::Board() {
-  // default constructor => start pos
-  board = chess::Board();  // or chess::make_start_position(), depending on API
-}
+Board::Board() : impl(std::make_unique<chess::Board>()) {}
 
-Board::Board(const std::string& fen) {
-  board = chess::Board(fen);  // if that API exists
-}
+Board::Board(const std::string& fen) : impl(std::make_unique<chess::Board>(fen)) {}
 
-std::string Board::fen() const {
-  return board.to_fen();  // whatever their function is
+std::string Board::get_fen() const {
+    return impl->fen();
 }
 
 void Board::set_fen(const std::string& fen) {
-  board = chess::Board(fen);
-}
-
-Color Board::turn() const {
-  return board.turn() == chess::Color::White
-         ? Color::White
-         : Color::Black;
-}
-
-bool Board::is_game_over() const {
-  return board.is_game_over();
+    impl = std::make_unique<chess::Board>(fen);
 }
 
 std::vector<Move> Board::legal_moves() const {
-  auto mv = board.legal_moves();  // whatever their method returns
-  std::vector<Move> out;
-  out.reserve(mv.size());
-  for (auto const &m : mv) {
-    Move mm;
-    mm.from = m.source();   // inspect what their move type is
-    mm.to   = m.dest();
-    if (m.is_promotion()) {
-      mm.promo = /* map their promotion piece to your Piece enum */;
+    std::vector<Move> out;
+    chess::Movelist moves;
+    chess::movegen::legalmoves(moves, *impl, 0);
+    out.reserve(moves.size());
+    for (auto const &m : moves) {
+        out.push_back({ m.from(), m.to(), -1 }); // no promotion mapping yet
     }
-    out.push_back(mm);
-  }
-  return out;
+    return out;
 }
 
 void Board::push(const Move& m) {
-  board.make_move(chess::Move{ m.from, m.to, /*promotion*/ m.promo });
+    impl->makeMove(chess::Move(m.from, m.to));
 }
 
 void Board::pop() {
-  board.unmake_move();  // if they have that
+    impl->unmakeMove();
 }
 
-PieceOn Board::piece_on(Square sq) const {
-  auto p = board.piece_on(sq);
-  if (!p) return PieceOn{};
-  // p->piece_type(), p->color()
-  return PieceOn{ /* map */ };
-}
-
-std::optional<uint64_t> Board::bitboard(Color c, Piece p) const {
-  // if the library has bitboards per piece/color
-  return board.bitboard(/*map c, p*/);
+PieceOn Board::piece_on(int sq) const {
+    auto p = impl->at(chess::Square(sq));
+    if (!p) return { -1, -1 };
+    return { static_cast<int>(p.type()), static_cast<int>(p.color()) };
 }
