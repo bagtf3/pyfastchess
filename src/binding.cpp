@@ -26,7 +26,6 @@ PYBIND11_MODULE(_core, m) {
         .def("unmake", &backend::Board::unmake,
              "Unmake the last move.")
 
-        // ---- New methods ----
         .def("is_capture", &backend::Board::is_capture, py::arg("uci"),
              "Return True if the UCI move is a capture (EP counts as capture).")
 
@@ -56,5 +55,28 @@ PYBIND11_MODULE(_core, m) {
 
         .def("is_game_over", &backend::Board::is_game_over,
              "Return (reason, result) strings for game over status; "
-             "('none','none') if the game is not over.");
+             "('none','none') if the game is not over.")
+
+        .def("history_size", &backend::Board::history_size)
+        .def("history_uci",  &backend::Board::history_uci)
+        .def("clear_history", &backend::Board::clear_history)
+
+        // allow copy-construct from Python: Board(other_board)
+        .def(py::init<const backend::Board&>(),
+            "Copy-construct a new board from another Board.")
+
+        // explicit clone()
+        .def("clone", &backend::Board::clone,
+            "Return a copy of this board (board state and history).")
+
+        // Python's copy.copy(x)
+        .def("__copy__", [](const backend::Board& self) {
+            return backend::Board(self);  // uses default copy ctor
+        })
+
+        // Python's copy.deepcopy(x, memo)
+        .def("__deepcopy__", [](const backend::Board& self, py::dict /*memo*/) {
+            return backend::Board(self);  // deep == shallow here; Board owns no Py refs
+        });
+
 }

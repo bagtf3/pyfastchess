@@ -138,4 +138,15 @@ std::pair<std::string, std::string> Board::is_game_over() const {
     return { reason_to_string(pr.first), result_to_string(pr.second) };
 }
 
+size_t Board::history_size() const { return history_.size(); }
+
+std::vector<std::string> Board::history_uci() const {
+    std::vector<std::string> out;
+    out.reserve(history_.size());
+    for (const auto& m : history_) out.emplace_back(chess::uci::moveToUci(m));
+    return out;
+}
+
+void Board::clear_history() { history_.clear(); }  // optional
+
 } // namespace backend

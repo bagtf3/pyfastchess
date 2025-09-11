@@ -10,6 +10,12 @@ public:
     Board();
     explicit Board(const std::string& fen);
 
+    // Use default copy/move; fast if chess::Board is trivially copyable
+    Board(const Board&) = default;
+    Board& operator=(const Board&) = default;
+    
+    Board clone() const { return *this; }  // helper for pybind
+
     // Core API
     std::string fen(bool include_counters = true) const;
     std::vector<std::string> legal_moves() const;
@@ -27,6 +33,10 @@ public:
     bool in_check() const;
     bool gives_check(const std::string& uci) const;
     std::pair<std::string, std::string> is_game_over() const;
+    // move history
+    size_t history_size() const;
+    std::vector<std::string> history_uci() const;
+    void clear_history();  // optional
 
 private:
     static std::string color_to_char(chess::Color c);
