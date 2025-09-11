@@ -1,0 +1,34 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Packaging artifacts
+/build/
+dist/
+*.egg-info/
+
+# scikit-build / CMake build trees
+/_skbuild/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# VS/MSVC intermediates
+.vs/
+*.vcxproj*
+*.sln
+*.obj
+*.pdb
+*.idb
+*.tlog
+*.log
+
+# Local OS/editor junk
+.DS_Store
+Thumbs.db
+
+# If someone accidentally builds the extension in-tree
+src/pyfastchess/_core*.pyd
+src/pyfastchess/_core*.so

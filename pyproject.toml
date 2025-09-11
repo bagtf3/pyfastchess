@@ -1,15 +1,19 @@
 [build-system]
-requires = ["scikit-build-core>=0.9", "pybind11", "numpy"]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "pyfastchess"
 version = "0.1.0"
-description = "Fast C++ movegen/boardstate with a Pythonic wrapper"
-requires-python = ">=3.9"
-dependencies = ["numpy"]
+description = "MVP pybind11 wrapper around Disservin chess-library"
+requires-python = ">=3.8"
 
 [tool.scikit-build]
-cmake.minimum-version = "3.18"
-cmake.build-type = "Release"
-wheel.packages = ["."]
+minimum-version = "0.10"
+build.verbose = true
+
+[tool.scikit-build.wheel]
+packages = ["src/pyfastchess"]
+
+[tool.scikit-build.sdist]
+include = ["CMakeLists.txt", "src/**", "extern/**", "README.md", "pyproject.toml"]

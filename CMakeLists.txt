@@ -1,43 +1,36 @@
 cmake_minimum_required(VERSION 3.18)
 project(pyfastchess LANGUAGES CXX)
 
-# Find Python & NumPy
-find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
-execute_process(
-  COMMAND "${Python3_EXECUTABLE}" -c "import numpy; print(numpy.get_include())"
-  OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE NumPy_INCLUDE_DIR
+# Tell pybind11 to use modern FindPython
+set(PYBIND11_FINDPYTHON ON)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(pybind11 REQUIRED CONFIG)
+
+pybind11_add_module(pyfastchess._core
+    src/backend.cpp
+    src/binding.cpp
 )
 
-# Find pybind11
-find_package(pybind11 CONFIG QUIET)
-if(NOT pybind11_FOUND)
-  message(STATUS "pybind11 not found via CONFIG; trying module mode")
-  find_package(pybind11 REQUIRED)
-endif()
-
-add_library(pyfastchess MODULE
-  src/binding.cpp
-  src/backend.cpp
-)
-
-target_include_directories(pyfastchess PRIVATE
-    ${NumPy_INCLUDE_DIR}
-    ${Python3_INCLUDE_DIRS}
-    src
+target_include_directories(pyfastchess._core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/extern/chess-library/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(pyfastchess PRIVATE pybind11::module)
-target_compile_features(pyfastchess PRIVATE cxx_std_17)
-
-# Optimize
+target_compile_features(pyfastchess._core PRIVATE cxx_std_17)
 if (MSVC)
-  target_compile_options(pyfastchess PRIVATE /O2 /DNOMINMAX)
-else()
-  target_compile_options(pyfastchess PRIVATE -O3 -march=native)
+  target_compile_options(pyfastchess._core PRIVATE /permissive- /Zc:__cplusplus)
 endif()
 
-# Proper Python extension name
-pybind11_extension(pyfastchess)
-pybind11_strip(pyfastchess)
-set_target_properties(pyfastchess PROPERTIES OUTPUT_NAME "pyfastchess")
+# Make the binary name be _core*.pyd (so import pyfastchess._core works)
+set_target_properties(pyfastchess._core PROPERTIES OUTPUT_NAME "_core")
+
+# Install the extension into the pyfastchess package directory
+if (WIN32)
+  install(TARGETS pyfastchess._core
+    RUNTIME DESTINATION pyfastchess
+    LIBRARY DESTINATION pyfastchess
+    ARCHIVE DESTINATION pyfastchess)
+else()
+  install(TARGETS pyfastchess._core
+    LIBRARY DESTINATION pyfastchess)
+endif()
