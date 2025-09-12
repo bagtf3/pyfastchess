@@ -1,5 +1,8 @@
 #include "backend.hpp"
 #include <sstream>
+#include <stdexcept>
+#include <tuple>
+#include <string>
 #include <cctype>   // tolower
 
 namespace backend {
@@ -190,31 +193,53 @@ int Board::piece_count() const {
 }
 
 std::tuple<int,int,int,int> Board::move_to_labels(const std::string& uci) const {
-    chess::Move m = chess::uci::uciToMove(board_, uci);
-    if (m == chess::Move::NO_MOVE) {
-        throw std::runtime_error("Invalid UCI for current position: " + uci);
-    }
+  chess::Move m = chess::uci::uciToMove(board_, uci);
+  if (m == chess::Move::NO_MOVE) {
+      throw std::runtime_error("Invalid UCI for current position: " + uci);
+  }
 
-    const int from_idx = m.from().index();   // Square -> 0..63
-    const int to_idx   = m.to().index();
+  const int from_idx = m.from().index();
 
-    // piece_idx: P,N,B,R,Q,K -> 0..5 (color-collapsed)
-    const chess::PieceType pt = board_.at(m.from()).type();
-    int piece_idx = static_cast<int>(pt);    // PAWN=0 ... KING=5
+  // Default to the engine's target square (rook square for castling in this lib)
+  int to_idx = m.to().index();
 
-    // collapsed promo: 0=no/queen, 1=n, 2=b, 3=r
-    int promo_idx = 0;
-    if (uci.size() > 4) {
-        switch (std::tolower(static_cast<unsigned char>(uci[4]))) {
-            case 'n': promo_idx = 1; break;
-            case 'b': promo_idx = 2; break;
-            case 'r': promo_idx = 3; break;
-            // 'q' and anything else fold to 0
-            default:  promo_idx = 0; break;
-        }
-    }
+  // ---- Robust castling handling ----
+  bool remapped = false;
 
-    return {from_idx, to_idx, piece_idx, promo_idx};
+  // 1) Non-960: detect king two-file jump from UCI literal and use that as king target
+  if (!board_.chess960() && uci.size() >= 4) {
+      chess::Square uci_from(uci.substr(0, 2));
+      chess::Square uci_to  (uci.substr(2, 2));
+      if (board_.at(m.from()).type() == chess::PieceType::KING &&
+          chess::Square::distance(uci_from, uci_to) == 2) {
+          to_idx = uci_to.index();  // king's destination in classical castling
+          remapped = true;
+      }
+  }
+
+  // 2) Fallback: if the engine marked this as castling (covers Chess960, odd parsers)
+  if (!remapped && m.typeOf() == chess::Move::CASTLING) {
+      const bool king_side = m.to() > m.from();  // target rook square H-file => kingside
+      const auto color     = board_.sideToMove();
+      const auto king_to   = chess::Square::castling_king_square(king_side, color);
+      to_idx = king_to.index();
+  }
+
+  // piece_idx as before
+  const chess::PieceType pt = board_.at(m.from()).type();
+  int piece_idx = static_cast<int>(pt); // P..K -> 0..5
+
+  // promo_idx as before (collapsed)
+  int promo_idx = 0;
+  if (uci.size() > 4) {
+      switch (std::tolower(static_cast<unsigned char>(uci[4]))) {
+          case 'n': promo_idx = 1; break;
+          case 'b': promo_idx = 2; break;
+          case 'r': promo_idx = 3; break;
+          default:  promo_idx = 0; break; // q or none -> 0
+      }
+  }
+  return {from_idx, to_idx, piece_idx, promo_idx};
 }
 
 } // namespace backend
