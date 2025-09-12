@@ -18,35 +18,92 @@ static inline int plane_index_from_piece(char ch) {
     }
 }
 
-// Returns a NumPy array (uint8) of shape (8, 8, 12), channels-last (HWC)
+// Returns a NumPy array (uint8) of shape (8, 8, 14), channels-last (HWC)
 static pybind11::array_t<uint8_t> board_planes_conv(const backend::Board& b) {
     namespace py = pybind11;
 
-    // Allocate HWC array (8,8,12)
-    py::array_t<uint8_t> arr({8, 8, 12});
-
-    // Zero the buffer (works across pybind11 versions)
+    // Allocate HWC array (8,8,14)
+    py::array_t<uint8_t> arr({8, 8, 14});
     uint8_t* buf = arr.mutable_data();
-    std::fill(buf, buf + (8 * 8 * 12), static_cast<uint8_t>(0));
+    std::fill(buf, buf + (8 * 8 * 14), static_cast<uint8_t>(0));
 
     auto a = arr.mutable_unchecked<3>();
 
-    // parse only the first FEN field (piece placement)
+    // -----------------------
+    // 1–12: piece planes
+    // -----------------------
     std::string fen = b.fen(true);
     const auto sp = fen.find(' ');
     const std::string pieces = (sp == std::string::npos) ? fen : fen.substr(0, sp);
 
-    int row = 0, col = 0;  // row 0 = rank 8, col 0 = file a
+    int row = 0, col = 0;
     for (char ch : pieces) {
         if (ch == '/') { ++row; col = 0; }
         else if (ch >= '1' && ch <= '8') { col += (ch - '0'); }
         else {
             int p = plane_index_from_piece(ch);
-            if (p >= 0 && row >= 0 && row < 8 && col >= 0 && col < 8) {
+            if (p >= 0 && row >= 0 && row < 8 && col >= 0 && col < 8)
                 a(row, col, p) = 1;
-            }
             ++col;
         }
+    }
+
+    // -----------------------
+    // 13th plane: side to move
+    // -----------------------
+    bool white_to_move = (b.side_to_move() == "w");  // or directly Color check
+    for (int r = 0; r < 8; ++r)
+        for (int c = 0; c < 8; ++c)
+            a(r, c, 12) = white_to_move ? 1 : 0;
+
+    // -----------------------
+    // 14th plane: castling rights encoded as 4 quadrants
+    // -----------------------
+    std::string castling = b.castling_rights(); // e.g. "KQkq" or "-"
+    bool wk = castling.find('K') != std::string::npos;
+    bool wq = castling.find('Q') != std::string::npos;
+    bool bk = castling.find('k') != std::string::npos;
+    bool bq = castling.find('q') != std::string::npos;
+
+    for (int r = 0; r < 8; ++r) {
+        for (int c = 0; c < 8; ++c) {
+            int val = 0;
+            if (r < 4 && c < 4) val = wk ? 1 : 0;  // top-left quadrant = white kingside
+            if (r < 4 && c >= 4) val = wq ? 1 : 0; // top-right quadrant = white queenside
+            if (r >= 4 && c < 4) val = bk ? 1 : 0; // bottom-left quadrant = black kingside
+            if (r >= 4 && c >= 4) val = bq ? 1 : 0;// bottom-right quadrant = black queenside
+            a(r, c, 13) = val;
+        }
+    }
+
+    return arr;
+}
+
+// At the top of binding.cpp with your other helpers
+static pybind11::array_t<uint8_t>
+stacked_planes(const backend::Board& b, int num_frames=5) {
+    namespace py = pybind11;
+    const int C = 14;
+    const int F = num_frames;
+
+    py::array_t<uint8_t> arr({8, 8, C*F});
+    uint8_t* buf = arr.mutable_data();
+    std::fill(buf, buf + (8*8*C*F), static_cast<uint8_t>(0));
+
+    auto a = arr.mutable_unchecked<3>();
+
+    backend::Board temp = b;  // safe copy
+
+    for (int f = F-1; f >= 0; --f) {
+        auto planes = board_planes_conv(temp);
+        auto p = planes.unchecked<3>();
+
+        for (int r=0; r<8; ++r)
+            for (int c=0; c<8; ++c)
+                for (int k=0; k<C; ++k)
+                    a(r, c, f*C + k) = p(r,c,k);
+
+        if (!temp.unmake()) break;  // stop if no more history
     }
     return arr;
 }
@@ -129,5 +186,11 @@ PYBIND11_MODULE(_core, m) {
         .def("get_piece_planes", &board_planes_conv,
             "Return 8x8x12 uint8 NumPy array (channels-last) with piece planes.\n"
             "Plane order: [P,N,B,R,Q,K, p,n,b,r,q,k].")
+        
+         // if move history is a model input
+        .def("stacked_planes", &stacked_planes,
+            py::arg("num_frames")=5,
+            "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
+            "Earlier frames are zero if not enough history is available.")          
       ;
 }
