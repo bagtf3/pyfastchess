@@ -149,4 +149,36 @@ std::vector<std::string> Board::history_uci() const {
 
 void Board::clear_history() { history_.clear(); }  // optional
 
+int backend::Board::material_count() const {
+    static const int piece_values[6] = {1, 3, 3, 5, 9, 0}; // pawn..king
+    int sum = 0;
+
+    for (int sq = 0; sq < 64; ++sq) {
+        chess::Piece p = board_.at(sq);
+
+        auto t = p.type();
+        if (t == chess::PieceType::NONE) continue;  // skip empties
+
+        int type = static_cast<int>(t);
+        if (type < 0 || type >= 6) continue;  // safety guard
+
+        int value = piece_values[type];
+        if (p.color() == chess::Color::WHITE) sum += value;
+        else sum -= value;
+    }
+    return sum;
+}
+
+int Board::piece_count() const {
+    int count = 0;
+    for (int sq = 0; sq < 64; ++sq) {
+        chess::Piece pc = board_.at(sq);
+        if (pc.type() != chess::PieceType::NONE) {
+            count++;
+        }
+    }
+    return count;
+}
+
+
 } // namespace backend

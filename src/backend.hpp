@@ -13,7 +13,7 @@ public:
     // Use default copy/move; fast if chess::Board is trivially copyable
     Board(const Board&) = default;
     Board& operator=(const Board&) = default;
-    
+
     Board clone() const { return *this; }  // helper for pybind
 
     // Core API
@@ -37,6 +37,8 @@ public:
     size_t history_size() const;
     std::vector<std::string> history_uci() const;
     void clear_history();  // optional
+    int material_count() const;
+    int piece_count() const;
 
 private:
     static std::string color_to_char(chess::Color c);

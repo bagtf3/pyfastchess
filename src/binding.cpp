@@ -182,6 +182,12 @@ PYBIND11_MODULE(_core, m) {
             return backend::Board(self);  // deep == shallow here; Board owns no Py refs
         })
 
+        .def("material_count", &backend::Board::material_count,
+             "Return simple material evaluation (White positive, Black negative).")
+             
+        .def("piece_count", &backend::Board::piece_count,
+             "Return total number of pieces currently on the board.")
+
         // ... your existing .def(...) calls ...
         .def("get_piece_planes", &board_planes_conv,
             "Return 8x8x12 uint8 NumPy array (channels-last) with piece planes.\n"
