@@ -149,6 +149,14 @@ std::vector<std::string> Board::history_uci() const {
 
 void Board::clear_history() { history_.clear(); }  // optional
 
+std::string Board::san(const std::string& uci) const {
+    chess::Move move = chess::uci::uciToMove(board_, uci);
+    if (move == chess::Move::NO_MOVE) {
+        throw std::runtime_error("Invalid UCI string: " + uci);
+    }
+    return chess::uci::moveToSan(board_, move);
+}
+
 int backend::Board::material_count() const {
     static const int piece_values[6] = {1, 3, 3, 5, 9, 0}; // pawn..king
     int sum = 0;

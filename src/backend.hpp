@@ -37,6 +37,7 @@ public:
     size_t history_size() const;
     std::vector<std::string> history_uci() const;
     void clear_history();  // optional
+    std::string san(const std::string& uci) const;
     int material_count() const;
     int piece_count() const;
 
