@@ -1,5 +1,6 @@
 #include "backend.hpp"
 #include <sstream>
+#include <cctype>   // tolower
 
 namespace backend {
 
@@ -188,5 +189,32 @@ int Board::piece_count() const {
     return count;
 }
 
+std::tuple<int,int,int,int> Board::move_to_labels(const std::string& uci) const {
+    chess::Move m = chess::uci::uciToMove(board_, uci);
+    if (m == chess::Move::NO_MOVE) {
+        throw std::runtime_error("Invalid UCI for current position: " + uci);
+    }
+
+    const int from_idx = m.from().index();   // Square -> 0..63
+    const int to_idx   = m.to().index();
+
+    // piece_idx: P,N,B,R,Q,K -> 0..5 (color-collapsed)
+    const chess::PieceType pt = board_.at(m.from()).type();
+    int piece_idx = static_cast<int>(pt);    // PAWN=0 ... KING=5
+
+    // collapsed promo: 0=no/queen, 1=n, 2=b, 3=r
+    int promo_idx = 0;
+    if (uci.size() > 4) {
+        switch (std::tolower(static_cast<unsigned char>(uci[4]))) {
+            case 'n': promo_idx = 1; break;
+            case 'b': promo_idx = 2; break;
+            case 'r': promo_idx = 3; break;
+            // 'q' and anything else fold to 0
+            default:  promo_idx = 0; break;
+        }
+    }
+
+    return {from_idx, to_idx, piece_idx, promo_idx};
+}
 
 } // namespace backend

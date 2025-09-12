@@ -200,6 +200,10 @@ PYBIND11_MODULE(_core, m) {
         .def("stacked_planes", &stacked_planes,
             py::arg("num_frames")=5,
             "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
-            "Earlier frames are zero if not enough history is available.")          
+            "Earlier frames are zero if not enough history is available.")
+
+        .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
+             "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")
+
       ;
 }

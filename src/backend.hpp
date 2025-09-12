@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <tuple>
+#include <stdexcept>
 #include "chess.hpp"  // whatever header exposes chess::Board, Move, etc.
 
 namespace backend {
@@ -40,6 +42,8 @@ public:
     std::string san(const std::string& uci) const;
     int material_count() const;
     int piece_count() const;
+    // Returns (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme
+    std::tuple<int,int,int,int> move_to_labels(const std::string& uci) const;
 
 private:
     static std::string color_to_char(chess::Color c);
