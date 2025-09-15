@@ -205,5 +205,8 @@ PYBIND11_MODULE(_core, m) {
         .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
              "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")
 
+        .def("moves_to_labels", &backend::Board::moves_to_labels, py::arg("ucis"),
+             "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
+            "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
       ;
 }

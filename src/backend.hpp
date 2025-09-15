@@ -44,7 +44,10 @@ public:
     int piece_count() const;
     // Returns (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme
     std::tuple<int,int,int,int> move_to_labels(const std::string& uci) const;
-
+    // Returns four vectors: from, to, piece, promo (collapsed promo scheme)
+    std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
+    moves_to_labels(const std::vector<std::string>& ucis) const;
+    
 private:
     static std::string color_to_char(chess::Color c);
     static std::string reason_to_string(chess::GameResultReason r);

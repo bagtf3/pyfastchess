@@ -242,4 +242,22 @@ std::tuple<int,int,int,int> Board::move_to_labels(const std::string& uci) const 
   return {from_idx, to_idx, piece_idx, promo_idx};
 }
 
+std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
+Board::moves_to_labels(const std::vector<std::string>& ucis) const {
+    const size_t N = ucis.size();
+    std::vector<int> froms; froms.reserve(N);
+    std::vector<int> tos;   tos.reserve(N);
+    std::vector<int> pcs;   pcs.reserve(N);
+    std::vector<int> pros;  pros.reserve(N);
+
+    for (const auto& u : ucis) {
+        auto [f, t, pc, pr] = move_to_labels(u);
+        froms.push_back(f);
+        tos.push_back(t);
+        pcs.push_back(pc);
+        pros.push_back(pr);
+    }
+    return {froms, tos, pcs, pros};
+}
+
 } // namespace backend
