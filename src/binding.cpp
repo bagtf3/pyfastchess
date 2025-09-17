@@ -308,7 +308,7 @@ PYBIND11_MODULE(_core, m) {
                py::arg("p_piece"),
                py::arg("p_promo"),
                py::arg("mix") = 0.5f);
-
+     
      m.def("terminal_value_white_pov",
       [](const backend::Board& b) -> py::object {
           auto v = terminal_value_white_pov(b);

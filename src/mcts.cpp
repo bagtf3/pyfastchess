@@ -213,32 +213,41 @@ priors_from_heads(const backend::Board& board,
                   const std::vector<float>& p_to,
                   const std::vector<float>& p_piece,
                   const std::vector<float>& p_promo,
-                  float mix)
-{
+                  float mix) {
+    return priors_from_heads_views(
+        board, legal,
+        FloatView{p_from.data(),  p_from.size()},
+        FloatView{p_to.data(),    p_to.size()},
+        FloatView{p_piece.data(), p_piece.size()},
+        FloatView{p_promo.data(), p_promo.size()},
+        mix);
+}
+
+std::vector<std::pair<std::string, float>>
+priors_from_heads_views(const backend::Board& board,
+                        const std::vector<std::string>& legal,
+                        FloatView pfv, FloatView ptv,
+                        FloatView pcv, FloatView prv,
+                        float mix) {
     std::vector<std::pair<std::string, float>> out;
     const size_t n = legal.size();
     if (n == 0) return out;
 
-    // Get labels for each legal move
-    // Assumes backend::Board has a C++ moves_to_labels(ucis) that returns the four index arrays.
     auto [fr, to, pc, pr] = board.moves_to_labels(legal);
 
-    // Score: pf * pt * pp * pr
     std::vector<float> pri(n);
     double sum = 0.0;
     for (size_t i = 0; i < n; ++i) {
         const int fi = fr[i], ti = to[i], pci = pc[i], pri_i = pr[i];
-        const float pf = (fi  >= 0 && static_cast<size_t>(fi)  < p_from.size())  ? p_from[fi]  : 0.0f;
-        const float pt = (ti  >= 0 && static_cast<size_t>(ti)  < p_to.size())    ? p_to[ti]    : 0.0f;
-        const float pp = (pci >= 0 && static_cast<size_t>(pci) < p_piece.size()) ? p_piece[pci]: 0.0f;
-        const float ppr= (pri_i>= 0 && static_cast<size_t>(pri_i)< p_promo.size())? p_promo[pri_i]: 0.0f;
-
-        const float s = std::max(0.0f, pf * pt * pp * ppr);
+        const float s = std::max(0.0f,
+            pfv.get(static_cast<size_t>(fi)) *
+            ptv.get(static_cast<size_t>(ti)) *
+            pcv.get(static_cast<size_t>(pci)) *
+            prv.get(static_cast<size_t>(pri_i)));
         pri[i] = s;
         sum += s;
     }
 
-    // Normalize or uniform if degenerate
     if (sum > 0.0) {
         const float inv = static_cast<float>(1.0 / sum);
         for (auto& p : pri) p *= inv;
@@ -247,8 +256,7 @@ priors_from_heads(const backend::Board& board,
         for (auto& p : pri) p = u;
     }
 
-    // Mix with uniform, then renormalize (to match Python exactly)
-    const float m = std::clamp(static_cast<float>(mix), 0.0f, 1.0f);
+    const float m = std::clamp(mix, 0.0f, 1.0f);
     if (m > 0.0f) {
         const float u = 1.0f / static_cast<float>(n);
         double t = 0.0;

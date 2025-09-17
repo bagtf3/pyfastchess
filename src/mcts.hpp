@@ -108,3 +108,19 @@ priors_from_heads(const backend::Board& board,
 // Simple terminal eval in white-POV, mirroring your Python utility:
 //   None -> std::optional<float>() empty; win=+1, loss=-1, draw=0
 std::optional<float> terminal_value_white_pov(const backend::Board& b);
+
+struct FloatView {
+    const float* data;
+    size_t size;
+    inline float get(size_t i) const {
+        return (i < size) ? data[i] : 0.0f;
+    }
+};
+
+// Single core impl used by all public overloads
+std::vector<std::pair<std::string, float>>
+priors_from_heads_views(const backend::Board& board,
+                        const std::vector<std::string>& legal,
+                        FloatView p_from, FloatView p_to,
+                        FloatView p_piece, FloatView p_promo,
+                        float mix = 0.5f);
