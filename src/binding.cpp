@@ -2,8 +2,9 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <cstdint>
-#include <algorithm>  // <-- add this
+#include <algorithm>
 #include "backend.hpp"
+#include "mcts.hpp"
 
 namespace py = pybind11;
 
@@ -209,4 +210,43 @@ PYBIND11_MODULE(_core, m) {
              "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
             "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
       ;
+     // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
+     py::class_<MCTSNode>(m, "MCTSNode")
+          .def_property_readonly("N",    [](const MCTSNode& n){ return n.N; })
+          .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
+          .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
+          .def_property_readonly("vloss",[](const MCTSNode& n){ return n.vloss; })
+          .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
+          .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
+                                   py::return_value_policy::copy);
+
+     // --- MCTSTree ---
+     py::class_<MCTSTree>(m, "MCTSTree")
+          .def(py::init<const backend::Board&, float>(), py::arg("board"), py::arg("c_puct") = 1.5f)
+          .def("collect_one_leaf", &MCTSTree::collect_one_leaf, py::return_value_policy::reference)
+          .def("apply_result",
+               [](MCTSTree& t,
+                    MCTSNode* node,
+                    const std::vector<std::pair<std::string, float>>& move_priors,
+                    float value_white_pov) {
+                    t.apply_result(node, move_priors, value_white_pov);
+               },
+               py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"))
+          .def("root_child_visits", &MCTSTree::root_child_visits)
+          .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
+          .def("root", [](MCTSTree& t){ return t.root(); }, py::return_value_policy::reference)
+          .def("best", [](const MCTSTree& t){
+               auto [mv, n] = t.best();
+               return py::make_tuple(mv, n ? n->Q : 0.0f);
+          });
+
+     // free helpers
+     m.def("priors_from_heads",
+          &priors_from_heads,
+          py::arg("legal_moves"),
+          py::arg("policy_per_legal"));
+
+     m.def("terminal_value_white_pov",
+          &terminal_value_white_pov,
+          py::arg("board"));
 }

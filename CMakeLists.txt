@@ -9,6 +9,7 @@ find_package(pybind11 REQUIRED CONFIG)
 pybind11_add_module(pyfastchess._core
     src/backend.cpp
     src/binding.cpp
+    src/mcts.cpp
 )
 
 target_include_directories(pyfastchess._core PRIVATE
