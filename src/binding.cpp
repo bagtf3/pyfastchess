@@ -1,11 +1,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <pybind11/optional.h>
 #include <cstdint>
 #include <algorithm>
 #include "backend.hpp"
 #include "mcts.hpp"
+#include <sstream>
 
 namespace py = pybind11;
 
@@ -213,11 +213,21 @@ PYBIND11_MODULE(_core, m) {
       ;
      // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
      py::class_<MCTSNode>(m, "MCTSNode")
+          .def("__repr__", [](const MCTSNode& n){
+               std::ostringstream oss;
+               oss << "<MCTSNode uci=" << (n.uci.empty() ? "\"<root>\"" : n.uci)
+                    << " N=" << n.N
+                    << " Q=" << n.Q
+                    << " expanded=" << (n.is_expanded ? "1" : "0")
+                    << ">";
+               return oss.str();
+               })
           .def_property_readonly("N",    [](const MCTSNode& n){ return n.N; })
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
           .def_property_readonly("vloss",[](const MCTSNode& n){ return n.vloss; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
+          .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
           // returns a dict[str, float]
@@ -229,8 +239,27 @@ PYBIND11_MODULE(_core, m) {
 
      // --- MCTSTree ---
      py::class_<MCTSTree>(m, "MCTSTree")
+          .def("__repr__", [](const MCTSTree& t){
+               const MCTSNode* r = t.root();
+               int    N   = r ? r->N : 0;
+               float  Q   = r ? r->Q : 0.0f;
+               size_t kids= r ? r->children.size() : 0;
+               std::string stm = r ? r->board.side_to_move() : "?";
+
+               std::ostringstream oss;
+               oss << "<MCTSTree epoch=" << t.epoch()
+                    << " root_stm=" << stm
+                    << " root_N=" << N
+                    << " root_Q=" << Q
+                    << " children=" << kids
+                    << ">";
+               return oss.str();
+          })
           .def(py::init<const backend::Board&, float>(), py::arg("board"), py::arg("c_puct") = 1.5f)
-          .def("collect_one_leaf", &MCTSTree::collect_one_leaf, py::return_value_policy::reference)
+          .def("collect_one_leaf",
+               &MCTSTree::collect_one_leaf,
+               py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
+
           .def("apply_result",
                [](MCTSTree& t,
                     MCTSNode* node,
@@ -241,12 +270,13 @@ PYBIND11_MODULE(_core, m) {
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"))
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
-          .def("root", [](MCTSTree& t){ return t.root(); }, py::return_value_policy::reference)
+          .def("root", [](MCTSTree& t){
+               return t.root(); }, py::return_value_policy::reference_internal)
+
           .def("best", [](const MCTSTree& t){
                auto [mv, n] = t.best();
                return py::make_tuple(mv, n ? n->Q : 0.0f);
           })
-
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
@@ -257,6 +287,10 @@ PYBIND11_MODULE(_core, m) {
           py::arg("policy_per_legal"));
 
      m.def("terminal_value_white_pov",
-          &terminal_value_white_pov,
-          py::arg("board"));
+      [](const backend::Board& b) -> py::object {
+          auto v = terminal_value_white_pov(b);
+          if (v.has_value()) return py::float_(*v);
+          return py::none();
+      },
+      py::arg("board"));
 }
