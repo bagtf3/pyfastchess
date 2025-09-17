@@ -78,12 +78,14 @@ public:
     MCTSNode* root() { return root_.get(); }
     const MCTSNode* root() const { return root_.get(); }
 
+    bool advance_root(const std::string& move_uci);
+    int  epoch() const { return epoch_; }
+
 private:
     std::unique_ptr<MCTSNode> root_;
     float c_puct_;
-
-    // Last traversal path retained between collect_one_leaf() and apply_result()
     std::vector<MCTSNode*> last_path_;
+    int epoch_ = 0;
 };
 
 // --------- Helpers ---------

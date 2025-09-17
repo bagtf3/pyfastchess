@@ -151,6 +151,39 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     return {it->first, it->second.get()};
 }
 
+bool MCTSTree::advance_root(const std::string& mv) {
+    last_path_.clear();
+    // Take ownership of the current root so we can safely move out of it
+    auto old_root = std::move(root_);
+
+    // Case 1: reuse existing child subtree
+    if (old_root) {
+        auto it = old_root->children.find(mv);
+        if (it != old_root->children.end()) {
+            auto new_root = std::move(it->second);
+            new_root->parent = nullptr;
+            root_ = std::move(new_root);
+            // old_root (and all other branches) are destroyed here
+            ++epoch_;
+            return true;
+        }
+
+        // Case 2: no child — create a fresh root after pushing the move
+        backend::Board nb = old_root->board;
+        if (!nb.push_uci(mv)) {
+            // invalid move for this position
+            // restore old root to avoid leaving tree empty
+            root_ = std::move(old_root);
+            return false;
+        }
+        root_ = std::make_unique<MCTSNode>(nb, nullptr, "");
+        ++epoch_;
+        return true;
+    }
+
+    return false;
+}
+
 // ------------------------- Helpers -------------------------
 
 std::vector<std::pair<std::string, float>>

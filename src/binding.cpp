@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <pybind11/optional.h>
 #include <cstdint>
 #include <algorithm>
 #include "backend.hpp"
@@ -218,7 +219,13 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("vloss",[](const MCTSNode& n){ return n.vloss; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
-                                   py::return_value_policy::copy);
+                                   py::return_value_policy::copy)
+          // returns a dict[str, float]
+          .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
+          .def("get_prior", [](const MCTSNode& n, const std::string& uci){
+               auto it = n.P.find(uci);
+               return (it == n.P.end()) ? 0.0f : it->second;
+          }, py::arg("move_uci"));
 
      // --- MCTSTree ---
      py::class_<MCTSTree>(m, "MCTSTree")
@@ -238,7 +245,10 @@ PYBIND11_MODULE(_core, m) {
           .def("best", [](const MCTSTree& t){
                auto [mv, n] = t.best();
                return py::make_tuple(mv, n ? n->Q : 0.0f);
-          });
+          })
+
+          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
+          .def_property_readonly("epoch", &MCTSTree::epoch);
 
      // free helpers
      m.def("priors_from_heads",
