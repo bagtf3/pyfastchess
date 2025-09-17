@@ -280,11 +280,34 @@ PYBIND11_MODULE(_core, m) {
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
-     // free helpers
-     m.def("priors_from_heads",
-          &priors_from_heads,
-          py::arg("legal_moves"),
-          py::arg("policy_per_legal"));
+          // free helpers
+          // already-scored per-legal version (yours today)
+          m.def("priors_from_heads",
+               py::overload_cast<
+                    const std::vector<std::string>&,
+                    const std::vector<float>&
+               >(&priors_from_heads),
+               py::arg("legal_moves"),
+               py::arg("policy_per_legal"));
+
+          // factorized version to match your Python helper
+          m.def("priors_from_heads",
+               py::overload_cast<
+                    const backend::Board&,
+                    const std::vector<std::string>&,
+                    const std::vector<float>&,
+                    const std::vector<float>&,
+                    const std::vector<float>&,
+                    const std::vector<float>&,
+                    float
+               >(&priors_from_heads),
+               py::arg("board"),
+               py::arg("legal"),
+               py::arg("p_from"),
+               py::arg("p_to"),
+               py::arg("p_piece"),
+               py::arg("p_promo"),
+               py::arg("mix") = 0.5f);
 
      m.def("terminal_value_white_pov",
       [](const backend::Board& b) -> py::object {
