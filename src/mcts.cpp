@@ -184,6 +184,48 @@ bool MCTSTree::advance_root(const std::string& mv) {
     return false;
 }
 
+std::vector<ChildDetail> MCTSTree::root_child_details() const {
+    std::vector<ChildDetail> out;
+    const MCTSNode* r = root_.get();   // <-- .get()
+    if (!r) return out;
+
+    out.reserve(r->children.size());
+    for (const auto& kv : r->children) {
+        const std::string& mv = kv.first;
+        const MCTSNode* ch = kv.second.get();
+        float prior = 0.0f;
+        if (auto it = r->P.find(mv); it != r->P.end()) prior = it->second;
+        out.push_back(ChildDetail{mv, ch->N, ch->Q, ch->vloss, prior});
+    }
+    std::sort(out.begin(), out.end(),
+              [](const ChildDetail& a, const ChildDetail& b){ return a.N > b.N; });
+    return out;
+}
+
+std::pair<float,int> MCTSTree::depth_stats() const {
+    const MCTSNode* r = root_.get();   // <-- .get()
+    if (!r) return {0.0f, 0};
+
+    float sum_vd = 0.0f;
+    int total_v = 0, dmax = 0;
+
+    std::vector<std::pair<const MCTSNode*, int>> st;
+    st.emplace_back(r, 0);
+    while (!st.empty()) {
+        auto [n, d] = st.back(); st.pop_back();
+        if (n != r && n->N > 0) {
+            total_v += n->N;
+            sum_vd  += static_cast<float>(d) * n->N;
+            if (d > dmax) dmax = d;
+        }
+        for (const auto& kv : n->children) {
+            st.emplace_back(kv.second.get(), d + 1);
+        }
+    }
+    float avg = (total_v > 0) ? (sum_vd / total_v) : 0.0f;
+    return {avg, dmax};
+}
+
 // ------------------------- Helpers -------------------------
 
 std::vector<std::pair<std::string, float>>

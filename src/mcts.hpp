@@ -9,6 +9,14 @@
 #include <cmath>
 #include "backend.hpp"
 
+struct ChildDetail {
+    std::string uci;
+    int   N;
+    float Q;
+    float vloss;
+    float prior;
+};
+
 // Forward decl
 class MCTSTree;
 
@@ -80,6 +88,9 @@ public:
 
     bool advance_root(const std::string& move_uci);
     int  epoch() const { return epoch_; }
+
+    std::vector<ChildDetail> root_child_details() const;
+    std::pair<float,int>     depth_stats() const; // (avg_depth_by_visits, max_depth)
 
 private:
     std::unique_ptr<MCTSNode> root_;

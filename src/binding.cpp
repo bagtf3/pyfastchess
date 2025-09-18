@@ -211,6 +211,14 @@ PYBIND11_MODULE(_core, m) {
              "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
             "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
       ;
+
+      py::class_<ChildDetail>(m, "ChildDetail")
+          .def_readonly("uci",   &ChildDetail::uci)
+          .def_readonly("N",     &ChildDetail::N)
+          .def_readonly("Q",     &ChildDetail::Q)
+          .def_readonly("vloss", &ChildDetail::vloss)
+          .def_readonly("prior", &ChildDetail::prior);
+
      // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
      py::class_<MCTSNode>(m, "MCTSNode")
           .def("__repr__", [](const MCTSNode& n){
@@ -277,6 +285,8 @@ PYBIND11_MODULE(_core, m) {
                auto [mv, n] = t.best();
                return py::make_tuple(mv, n ? n->Q : 0.0f);
           })
+          .def("root_child_details", &MCTSTree::root_child_details)
+          .def("depth_stats",        &MCTSTree::depth_stats)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
