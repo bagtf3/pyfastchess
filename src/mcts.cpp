@@ -69,7 +69,7 @@ MCTSNode* MCTSTree::collect_one_leaf() {
 }
 
 // Expand node using priors; create children; apply white-POV value;
-// pop virtual losses and backup along the stored path (white-POV, no sign flip).
+// pop virtual losses and backup along the actual parent chain (robust to batching).
 void MCTSTree::apply_result(
     MCTSNode* node,
     const std::vector<std::pair<std::string, float>>& move_priors,
@@ -77,7 +77,7 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // If terminal, we won't create children
+    // 1) Expand (or mark terminal)
     if (auto tv = terminal_value_white_pov(node->board)) {
         node->value = *tv;
         node->is_expanded = true;
@@ -85,39 +85,52 @@ void MCTSTree::apply_result(
         // Attach priors
         node->P.clear();
         node->P.reserve(move_priors.size());
-        for (auto&& mp : move_priors) node->P.emplace(mp.first, mp.second);
+        for (const auto& mp : move_priors) node->P.emplace(mp.first, mp.second);
 
-        // Expand children from legal/priors
+        // Create children from priors (skip illegal just in case)
         node->children.clear();
         node->children.reserve(move_priors.size());
-
-        for (auto&& mp : move_priors) {
+        for (const auto& mp : move_priors) {
             const std::string& mv = mp.first;
-            backend::Board childb = node->board;     // copy then push
-            if (!childb.push_uci(mv)) continue;      // safety
-            auto child = std::make_unique<MCTSNode>(childb, node, mv);
-            node->children.emplace(mv, std::move(child));
+            backend::Board childb = node->board;
+            if (!childb.push_uci(mv)) continue;
+            node->children.emplace(mv, std::make_unique<MCTSNode>(childb, node, mv));
         }
 
         node->value = value_white_pov;
         node->is_expanded = true;
     }
 
-    // Pop virtual loss along the path
-    for (auto* n : last_path_) n->vloss -= 1.0f;
+    // 2) Build the path by walking parents: leaf -> ... -> root
+    std::vector<MCTSNode*> path;
+    path.reserve(64); // upper bound on plies you'd see
+    {
+        MCTSNode* p = node;
+        while (p) {
+            path.push_back(p);
+            p = p->parent;
+        }
+    }
 
-    // Backup white-POV value *without* sign flip (your Python does this).
-    // Note: Python backs up reversed(path) adding v to W and recomputing Q.
+    // Safety: ensure this leaf still belongs to THIS tree's current root
+    if (path.empty() || path.back() != root_.get()) {
+        // Root advanced since selection; ignore to avoid corrupting another tree.
+        return;
+    }
+
+    // 3) Pop one unit of virtual loss along THIS path
+    for (MCTSNode* n : path) {
+        n->vloss -= 1.0f;
+    }
+
+    // 4) Backup white-POV value along root->leaf (no sign flip)
     const float v = node->value;
-    for (auto it = last_path_.rbegin(); it != last_path_.rend(); ++it) {
-        MCTSNode* n = *it;
+    for (auto it = path.rbegin(); it != path.rend(); ++it) {
+        MCTSNode* n = *it; // starts at root
         n->N += 1;
         n->W += v;
         n->Q  = n->W / std::max(1, n->N);
     }
-
-    // Clear path cache after applying
-    last_path_.clear();
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
