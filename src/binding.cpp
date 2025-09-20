@@ -114,102 +114,105 @@ PYBIND11_MODULE(_core, m) {
     m.doc() = "pyfastchess core bindings (MVP + query helpers)";
 
     py::class_<backend::Board>(m, "Board")
-        .def(py::init<>(), "Create a board at the standard start position.")
-        .def(py::init<const std::string&>(), py::arg("fen"),
-             "Create a board from a FEN string.")
+          .def(py::init<>(), "Create a board at the standard start position.")
+          .def(py::init<const std::string&>(), py::arg("fen"),
+               "Create a board from a FEN string.")
+          .def("fen", &backend::Board::fen, py::arg("include_counters") = true,
+               "Return the position as a FEN string. If include_counters is False,\n"
+               "omits the halfmove and fullmove counters.")
 
-        .def("fen", &backend::Board::fen, py::arg("include_counters") = true,
-             "Return the position as a FEN string. If include_counters is False,\n"
-             "omits the halfmove and fullmove counters.")
+          .def("legal_moves", &backend::Board::legal_moves,
+               "Return legal moves as a list of UCI strings.")
 
-        .def("legal_moves", &backend::Board::legal_moves,
-             "Return legal moves as a list of UCI strings.")
+          .def("push_uci", &backend::Board::push_uci, py::arg("uci"),
+               "Play a UCI move on the board. Returns False if invalid.")
 
-        .def("push_uci", &backend::Board::push_uci, py::arg("uci"),
-             "Play a UCI move on the board. Returns False if invalid.")
+          .def("unmake", &backend::Board::unmake,
+               "Unmake the last move.")
 
-        .def("unmake", &backend::Board::unmake,
-             "Unmake the last move.")
+          .def("is_capture", &backend::Board::is_capture, py::arg("uci"),
+               "Return True if the UCI move is a capture (EP counts as capture).")
+          .def("is_pawn_move", &backend::Board::is_pawn_move, py::arg("uci"),
+               "True if the move is made by a pawn.")
+          .def("would_be_repetition", &backend::Board::would_be_repetition,
+               py::arg("uci"), py::arg("count") = 3,
+               "True if making this move would create a position repeated ≥ count times.")
+          .def("side_to_move", &backend::Board::side_to_move,
+               "Return 'w' or 'b' for the side to move.")
 
-        .def("is_capture", &backend::Board::is_capture, py::arg("uci"),
-             "Return True if the UCI move is a capture (EP counts as capture).")
+          .def("enpassant_sq", &backend::Board::enpassant_sq,
+               "Return the en passant target square like 'e3' or '-'.")
 
-        .def("side_to_move", &backend::Board::side_to_move,
-             "Return 'w' or 'b' for the side to move.")
+          .def("castling_rights", &backend::Board::castling_rights,
+               "Return castling rights string like 'KQkq' or '-'.")
 
-        .def("enpassant_sq", &backend::Board::enpassant_sq,
-             "Return the en passant target square like 'e3' or '-'.")
+          .def("halfmove_clock", &backend::Board::halfmove_clock,
+               "Return the halfmove clock.")
 
-        .def("castling_rights", &backend::Board::castling_rights,
-             "Return castling rights string like 'KQkq' or '-'.")
+          .def("fullmove_number", &backend::Board::fullmove_number,
+               "Return the fullmove number.")
 
-        .def("halfmove_clock", &backend::Board::halfmove_clock,
-             "Return the halfmove clock.")
+          .def("is_repetition", &backend::Board::is_repetition, py::arg("count") = 2,
+               "Return True if this position is a repetition (default: 2 for threefold).")
 
-        .def("fullmove_number", &backend::Board::fullmove_number,
-             "Return the fullmove number.")
+          .def("in_check", &backend::Board::in_check,
+               "Return True if the side to move is in check.")
 
-        .def("is_repetition", &backend::Board::is_repetition, py::arg("count") = 2,
-             "Return True if this position is a repetition (default: 2 for threefold).")
+          .def("gives_check", &backend::Board::gives_check, py::arg("uci"),
+               "Return True if the given UCI move would give check.")
 
-        .def("in_check", &backend::Board::in_check,
-             "Return True if the side to move is in check.")
+          .def("is_game_over", &backend::Board::is_game_over,
+               "Return (reason, result) strings for game over status; "
+               "('none','none') if the game is not over.")
 
-        .def("gives_check", &backend::Board::gives_check, py::arg("uci"),
-             "Return True if the given UCI move would give check.")
+          .def("history_size", &backend::Board::history_size)
+          .def("history_uci",  &backend::Board::history_uci)
+          .def("clear_history", &backend::Board::clear_history)
 
-        .def("is_game_over", &backend::Board::is_game_over,
-             "Return (reason, result) strings for game over status; "
-             "('none','none') if the game is not over.")
+          // allow copy-construct from Python: Board(other_board)
+          .def(py::init<const backend::Board&>(),
+               "Copy-construct a new board from another Board.")
 
-        .def("history_size", &backend::Board::history_size)
-        .def("history_uci",  &backend::Board::history_uci)
-        .def("clear_history", &backend::Board::clear_history)
+          // explicit clone()
+          .def("clone", &backend::Board::clone,
+               "Return a copy of this board (board state and history).")
 
-        // allow copy-construct from Python: Board(other_board)
-        .def(py::init<const backend::Board&>(),
-            "Copy-construct a new board from another Board.")
+          // Python's copy.copy(x)
+          .def("__copy__", [](const backend::Board& self) {
+               return backend::Board(self);  // uses default copy ctor
+          })
 
-        // explicit clone()
-        .def("clone", &backend::Board::clone,
-            "Return a copy of this board (board state and history).")
+          // Python's copy.deepcopy(x, memo)
+          .def("__deepcopy__", [](const backend::Board& self, py::dict /*memo*/) {
+               return backend::Board(self);  // deep == shallow here; Board owns no Py refs
+          })
 
-        // Python's copy.copy(x)
-        .def("__copy__", [](const backend::Board& self) {
-            return backend::Board(self);  // uses default copy ctor
-        })
+          .def("material_count", &backend::Board::material_count,
+               "Return simple material evaluation (White positive, Black negative).")
 
-        // Python's copy.deepcopy(x, memo)
-        .def("__deepcopy__", [](const backend::Board& self, py::dict /*memo*/) {
-            return backend::Board(self);  // deep == shallow here; Board owns no Py refs
-        })
+          .def("piece_count", &backend::Board::piece_count,
+               "Return total number of pieces currently on the board.")
 
-        .def("material_count", &backend::Board::material_count,
-             "Return simple material evaluation (White positive, Black negative).")
+          .def("san", &backend::Board::san, py::arg("uci"),
+               "Convert a UCI string into SAN for this board's current position.")
+          
+          // ... your existing .def(...) calls ...
+          .def("get_piece_planes", &board_planes_conv,
+               "Return 8x8x12 uint8 NumPy array (channels-last) with piece planes.\n"
+               "Plane order: [P,N,B,R,Q,K, p,n,b,r,q,k].")
+          
+          // if move history is a model input
+          .def("stacked_planes", &stacked_planes,
+               py::arg("num_frames")=5,
+               "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
+               "Earlier frames are zero if not enough history is available.")
 
-        .def("piece_count", &backend::Board::piece_count,
-             "Return total number of pieces currently on the board.")
+          .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
+               "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")
 
-        .def("san", &backend::Board::san, py::arg("uci"),
-             "Convert a UCI string into SAN for this board's current position.")
-        
-        // ... your existing .def(...) calls ...
-        .def("get_piece_planes", &board_planes_conv,
-            "Return 8x8x12 uint8 NumPy array (channels-last) with piece planes.\n"
-            "Plane order: [P,N,B,R,Q,K, p,n,b,r,q,k].")
-        
-         // if move history is a model input
-        .def("stacked_planes", &stacked_planes,
-            py::arg("num_frames")=5,
-            "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
-            "Earlier frames are zero if not enough history is available.")
-
-        .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
-             "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")
-
-        .def("moves_to_labels", &backend::Board::moves_to_labels, py::arg("ucis"),
-             "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
-            "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
+          .def("moves_to_labels", &backend::Board::moves_to_labels, py::arg("ucis"),
+               "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
+               "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
       ;
 
       py::class_<ChildDetail>(m, "ChildDetail")

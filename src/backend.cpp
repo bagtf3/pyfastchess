@@ -91,6 +91,20 @@ bool Board::is_capture(const std::string& uci) const {
     return board_.isCapture(mv);
 }
 
+bool Board::is_pawn_move(const std::string& uci) const {
+    chess::Move mv = chess::uci::uciToMove(board_, uci);
+    if (mv == chess::Move::NO_MOVE) return false;
+    return board_.at(mv.from()).type() == chess::PieceType::PAWN; // PAWN==0
+}
+
+bool Board::would_be_repetition(const std::string& uci, int count) const {
+    chess::Move mv = chess::uci::uciToMove(board_, uci);
+    if (mv == chess::Move::NO_MOVE) return false;
+    chess::Board tmp = board_;      // cheap copy, keeps this method const
+    tmp.makeMove(mv);
+    return tmp.isRepetition(count); // “at least count times” (see note below)
+}
+
 std::string Board::side_to_move() const {
     return color_to_char(board_.sideToMove());
 }

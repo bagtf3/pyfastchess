@@ -24,14 +24,15 @@ public:
     bool push_uci(const std::string& uci);
     bool unmake();  // <-- CHANGED from void to bool
 
-    // New methods
-    bool is_capture(const std::string& uci) const;
     std::string side_to_move() const;
     std::string enpassant_sq() const;
     std::string castling_rights() const;
     int halfmove_clock() const;
     int fullmove_number() const;
     bool is_repetition(int count) const;
+    bool would_be_repetition(const std::string& uci, int count = 3) const;
+    bool is_capture(const std::string& uci) const;
+    bool is_pawn_move(const std::string& uci) const;
     bool in_check() const;
     bool gives_check(const std::string& uci) const;
     std::pair<std::string, std::string> is_game_over() const;
