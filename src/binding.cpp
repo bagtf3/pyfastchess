@@ -283,7 +283,10 @@ PYBIND11_MODULE(_core, m) {
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
                return t.root(); }, py::return_value_policy::reference_internal)
-
+          .def_property_readonly("root_stm", [](const MCTSTree& t){
+               const MCTSNode* r = t.root();
+               return r ? r->board.side_to_move() : std::string("?");
+          })
           .def("best", [](const MCTSTree& t){
                auto [mv, n] = t.best();
                return py::make_tuple(mv, n ? n->Q : 0.0f);
