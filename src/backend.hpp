@@ -23,10 +23,14 @@ public:
     std::vector<std::string> legal_moves() const;
     bool push_uci(const std::string& uci);
     bool unmake();  // <-- CHANGED from void to bool
+    // in class backend::Board (public)
+    std::uint64_t hash() const;
 
+    std::uint64_t zobrist_full() const;
     std::string side_to_move() const;
     std::string enpassant_sq() const;
     std::string castling_rights() const;
+    
     int halfmove_clock() const;
     int fullmove_number() const;
     bool is_repetition(int count) const;

@@ -120,7 +120,10 @@ PYBIND11_MODULE(_core, m) {
           .def("fen", &backend::Board::fen, py::arg("include_counters") = true,
                "Return the position as a FEN string. If include_counters is False,\n"
                "omits the halfmove and fullmove counters.")
-
+          .def("hash", &backend::Board::hash,
+               "Return the 64-bit incremental Zobrist key (fast).")
+          .def("zobrist_full", &backend::Board::zobrist_full,
+               "Recompute the 64-bit Zobrist key from scratch (slow).")
           .def("legal_moves", &backend::Board::legal_moves,
                "Return legal moves as a list of UCI strings.")
 

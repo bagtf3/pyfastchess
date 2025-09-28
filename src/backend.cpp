@@ -83,6 +83,14 @@ bool Board::unmake() {
     return true;
 }
 
+std::uint64_t Board::hash() const {
+    return board_.hash();
+}
+
+std::uint64_t Board::zobrist_full() const {
+    return board_.zobrist();
+}
+
 // ----------------- New methods -----------------
 
 bool Board::is_capture(const std::string& uci) const {
