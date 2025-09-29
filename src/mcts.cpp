@@ -61,9 +61,9 @@ MCTSNode* MCTSTree::collect_one_leaf() {
         last_path_.push_back(node);
     }
 
-    // Known terminal: each time we reach it, count a full sim and return.
+    // Known terminal
     if (node->is_terminal) {
-        const float v = node->value;  // already white-POV
+        const float v = node->value;
         back_up_along_path(node, v, /*add_visit=*/true);
         return node;
     }
@@ -77,24 +77,25 @@ MCTSNode* MCTSTree::collect_one_leaf() {
         return node;
     }
 
-    // Awaiting NN and still provisional -> credit another q' sim.
-    if (node->has_qprime) {
-        back_up_along_path(node, node->qprime, /*add_visit=*/true);
-        node->qprime_visits += 1;
+    // Awaiting NN and still provisional -> credit another V' sim.
+    if (node->has_vprime) {
+        back_up_along_path(node, node->v_prime, /*add_visit=*/true);
+        node->vprime_visits += 1;
         return node;
     }
 
-    // Fresh non-terminal leaf: expand with uniform priors and start q'
+    // Fresh non-terminal leaf: expand with uniform priors and start V'
     expand_with_uniform_priors(node);
 
     const bool stm_white = (node->board.side_to_move() == "w");
-    node->qprime        = stm_white ? -1.0f :  1.0f;  // white POV worst-case
-    node->has_qprime    = true;
-    node->qprime_visits = 1;
-    node->is_expanded   = true;
+    node->v_prime        = stm_white ? -1.0f :  1.0f;  // white POV worst-case
+    node->has_vprime     = true;
+    node->vprime_visits  = 1;
+    node->is_expanded    = true;
 
-    back_up_along_path(node, node->qprime, /*add_visit=*/true);
+    back_up_along_path(node, node->v_prime, /*add_visit=*/true);
     return node;
+
 }
 
 void MCTSTree::apply_result(
@@ -104,21 +105,21 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // Overwrite priors with NN priors (children were already created on expand)
+    // Overwrite priors with NN priors (unchanged)
     node->P.clear();
     node->P.reserve(move_priors.size());
     for (const auto& mp : move_priors) node->P.emplace(mp.first, mp.second);
 
-    // Total delta to correct all provisional sims made with q'
-    int   k           = node->has_qprime ? std::max(1, node->qprime_visits) : 0;
-    float base        = node->has_qprime ? node->qprime : node->value;
+    // Total delta to correct all provisional sims made with V'
+    int   k           = node->has_vprime ? std::max(1, node->vprime_visits) : 0;
+    float base        = node->has_vprime ? node->v_prime : node->value;
     float delta_total = (value_white_pov - base) * static_cast<float>(std::max(1, k));
 
-    node->value         = value_white_pov;
-    node->has_qprime    = false;
-    node->qprime_visits = 0;
+    node->value          = value_white_pov;
+    node->has_vprime     = false;
+    node->vprime_visits  = 0;
 
-    // Apply delta along the actual parent chain; do NOT change N here
+    // Apply delta along the path; do NOT change N (unchanged)
     if (delta_total != 0.0f) {
         std::vector<MCTSNode*> path;
         for (MCTSNode* p = node; p; p = p->parent) path.push_back(p);
@@ -230,21 +231,32 @@ bool MCTSTree::advance_root(const std::string& mv) {
 
 std::vector<ChildDetail> MCTSTree::root_child_details() const {
     std::vector<ChildDetail> out;
-    const MCTSNode* r = root_.get();   // <-- .get()
+    const MCTSNode* r = root_.get();
     if (!r) return out;
 
     out.reserve(r->children.size());
     for (const auto& kv : r->children) {
         const std::string& mv = kv.first;
         const MCTSNode* ch = kv.second.get();
+
         float prior = 0.0f;
         if (auto it = r->P.find(mv); it != r->P.end()) prior = it->second;
-        out.push_back(ChildDetail{mv, ch->N, ch->Q, ch->vloss, prior});
+
+        out.push_back(ChildDetail{
+            mv,
+            ch->N,
+            ch->Q,
+            ch->vprime_visits,   // replaces vloss
+            prior,
+            ch->is_terminal,
+            ch->value
+        });
     }
     std::sort(out.begin(), out.end(),
               [](const ChildDetail& a, const ChildDetail& b){ return a.N > b.N; });
     return out;
 }
+
 
 std::pair<float,int> MCTSTree::depth_stats() const {
     const MCTSNode* r = root_.get();   // <-- .get()

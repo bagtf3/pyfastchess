@@ -13,9 +13,12 @@ struct ChildDetail {
     std::string uci;
     int   N;
     float Q;
-    float vloss;
+    int   vprime_visits;
     float prior;
+    bool  is_terminal;
+    float value;
 };
+
 
 // Forward decl
 class MCTSTree;
@@ -34,10 +37,11 @@ struct MCTSNode {
     float vloss = 0.0f;   // virtual loss for parallel sims
 
     // --- Provisional eval & terminal bookkeeping ---
-    bool  is_terminal   = false;  // true if this position is terminal
-    bool  has_qprime    = false;  // true while we use provisional value
-    float qprime        = 0.0f;   // provisional value (white POV)
-    int   qprime_visits = 0;      // number of sims already backed up with q'
+    bool  is_terminal     = false;
+    bool  has_vprime      = false;  // was has_qprime
+    float v_prime         = 0.0f;   // was qprime (white POV)
+    int   vprime_visits   = 0;      // was qprime_visits
+
 
     // --- Priors / children ---
     // P: move -> prior (root stores priors for its children)
