@@ -39,7 +39,6 @@ std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
             best_score = score;
             best = {mv, const_cast<MCTSNode*>(ch)};
         }
-        // note: no vloss anywhere
     }
     return best;
 }

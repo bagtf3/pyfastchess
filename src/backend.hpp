@@ -40,13 +40,13 @@ public:
     bool in_check() const;
     bool gives_check(const std::string& uci) const;
     std::pair<std::string, std::string> is_game_over() const;
-    // move history
     size_t history_size() const;
     std::vector<std::string> history_uci() const;
     void clear_history();  // optional
     std::string san(const std::string& uci) const;
     int material_count() const;
     int piece_count() const;
+    int mvvlva(const std::string& uci) const;
     // Returns (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme
     std::tuple<int,int,int,int> move_to_labels(const std::string& uci) const;
     // Returns four vectors: from, to, piece, promo (collapsed promo scheme)

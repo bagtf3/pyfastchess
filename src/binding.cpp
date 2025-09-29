@@ -196,6 +196,10 @@ PYBIND11_MODULE(_core, m) {
           .def("piece_count", &backend::Board::piece_count,
                "Return total number of pieces currently on the board.")
 
+          // binding.cpp (add alongside the other .def(...) calls for backend::Board)
+          .def("mvvlva", &backend::Board::mvvlva, py::arg("uci"),
+               "Return MVV-LVA integer score for the given UCI move.")
+
           .def("san", &backend::Board::san, py::arg("uci"),
                "Convert a UCI string into SAN for this board's current position.")
           

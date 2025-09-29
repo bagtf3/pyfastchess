@@ -214,6 +214,53 @@ int Board::piece_count() const {
     return count;
 }
 
+int Board::mvvlva(const std::string& uci) const {
+    using chess::PieceType;
+    using chess::Square;
+
+    // Use move_to_labels to get robust from/to indices (handles castling remap)
+    int from_idx = -1, to_idx = -1;
+    try {
+        auto tup = move_to_labels(uci);
+        from_idx = std::get<0>(tup);
+        to_idx   = std::get<1>(tup);
+    } catch (const std::exception&) {
+        // invalid UCI for this position
+        return 0;
+    }
+
+    // Convert indices to Square (Square underlying enum matches index values)
+    Square from_sq = Square(static_cast<Square::underlying>(from_idx));
+    Square to_sq   = Square(static_cast<Square::underlying>(to_idx));
+
+    // attacker piece type (0..5 for PAWN..KING)
+    const chess::PieceType attacker_pt = board_.at(from_sq).type();
+    if (attacker_pt == PieceType::NONE) return 0; // shouldn't happen for legal move
+    int attacker = static_cast<int>(attacker_pt) + 1; // -> 1..6
+
+    // victim piece type: follow Python behavior — if target square is empty, treat as pawn (1)
+    const chess::PieceType victim_pt = board_.at(to_sq).type();
+    int victim;
+    if (victim_pt == PieceType::NONE) {
+        victim = 1;
+    } else {
+        victim = static_cast<int>(victim_pt) + 1; // -> 1..6
+    }
+
+    static constexpr int MVVLVA[7][7] = {
+        {0,   0,   0,   0,   0,   0,   0  },
+        {0, 105, 104, 103, 102, 101, 100},
+        {0, 205, 204, 203, 202, 201, 200},
+        {0, 305, 304, 303, 302, 301, 300},
+        {0, 405, 404, 403, 402, 401, 400},
+        {0, 505, 504, 503, 502, 501, 500},
+        {0, 605, 604, 603, 602, 601, 600}
+    };
+
+    if (victim < 0 || victim > 6 || attacker < 0 || attacker > 6) return 0;
+    return MVVLVA[victim][attacker];
+}
+
 std::tuple<int,int,int,int> Board::move_to_labels(const std::string& uci) const {
   chess::Move m = chess::uci::uciToMove(board_, uci);
   if (m == chess::Move::NO_MOVE) {
