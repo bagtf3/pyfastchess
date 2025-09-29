@@ -9,14 +9,16 @@
 #include <cmath>
 #include "backend.hpp"
 
+// ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
     std::string uci;
     int   N;
     float Q;
     int   vprime_visits;
     float prior;
-    bool  is_terminal;
-    float value;
+    float U;
+    bool  is_terminal = false;
+    float value       = 0.0f;
 };
 
 
@@ -139,6 +141,42 @@ struct FloatView {
     inline float get(size_t i) const {
         return (i < size) ? data[i] : 0.0f;
     }
+};
+
+struct PriorConfig {
+    float anytime_uniform_mix = 0.5f;
+    float endgame_uniform_mix = 0.5f;
+    float opponent_uniform_mix = 0.5f;
+
+    bool  use_prior_boosts = true;
+    float anytime_gives_check = 0.15f;
+    float anytime_repetition_sub = 0.25f;
+
+    float endgame_pawn_push = 0.15f;
+    float endgame_capture = 0.15f;
+    float endgame_repetition_sub = 0.40f;
+
+    bool  clip_enabled = true;
+    float clip_min = 1e-6f;
+    float clip_max = 1.0f;
+};
+
+class PriorEngine {
+public:
+    explicit PriorEngine(const PriorConfig& cfg) : cfg_(cfg) {}
+
+    std::vector<std::pair<std::string, float>>
+    build(const backend::Board& board,
+          const std::vector<std::string>& legal,
+          FloatView p_from, FloatView p_to,
+          FloatView p_piece, FloatView p_promo,
+          const std::string& root_stm,
+          const std::string& stm_leaf,
+          int history_size,
+          int piece_count) const;
+
+private:
+    PriorConfig cfg_;
 };
 
 // Single core impl used by all public overloads

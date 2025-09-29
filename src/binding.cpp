@@ -217,6 +217,22 @@ PYBIND11_MODULE(_core, m) {
                "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
                "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
       ;
+     py::class_<PriorConfig>(m, "PriorConfig")
+          .def(py::init<>())
+          .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
+          .def_readwrite("endgame_uniform_mix", &PriorConfig::endgame_uniform_mix)
+          .def_readwrite("opponent_uniform_mix", &PriorConfig::opponent_uniform_mix)
+          .def_readwrite("use_prior_boosts", &PriorConfig::use_prior_boosts)
+          .def_readwrite("anytime_gives_check", &PriorConfig::anytime_gives_check)
+          .def_readwrite("anytime_repetition_sub",
+                         &PriorConfig::anytime_repetition_sub)
+          .def_readwrite("endgame_pawn_push", &PriorConfig::endgame_pawn_push)
+          .def_readwrite("endgame_capture", &PriorConfig::endgame_capture)
+          .def_readwrite("endgame_repetition_sub",
+                         &PriorConfig::endgame_repetition_sub)
+          .def_readwrite("clip_enabled", &PriorConfig::clip_enabled)
+          .def_readwrite("clip_min", &PriorConfig::clip_min)
+          .def_readwrite("clip_max", &PriorConfig::clip_max);
 
      py::class_<ChildDetail>(m, "ChildDetail")
           .def_readonly("uci",            &ChildDetail::uci)
@@ -226,7 +242,35 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
           .def_readonly("value",          &ChildDetail::value);
-
+     py::class_<PriorEngine>(m, "PriorEngine")
+          .def(py::init<const PriorConfig&>(), py::arg("cfg"))
+          .def("build",
+               [](const PriorEngine& eng,
+                    const backend::Board& board,
+                    const std::vector<std::string>& legal,
+                    py::array_t<float> p_from,
+                    py::array_t<float> p_to,
+                    py::array_t<float> p_piece,
+                    py::array_t<float> p_promo,
+                    const std::string& root_stm,
+                    const std::string& stm_leaf) {
+                    auto vf = p_from.unchecked<1>();
+                    auto vt = p_to.unchecked<1>();
+                    auto vp = p_piece.unchecked<1>();
+                    auto vr = p_promo.unchecked<1>();
+                    FloatView ff{vf.data(0), (size_t)vf.shape(0)};
+                    FloatView ft{vt.data(0), (size_t)vt.shape(0)};
+                    FloatView fp{vp.data(0), (size_t)vp.shape(0)};
+                    FloatView fr{vr.data(0), (size_t)vr.shape(0)};
+                    return eng.build(board, legal, ff, ft, fp, fr,
+                                        root_stm, stm_leaf,
+                                        board.history_size(),
+                                        board.piece_count());
+               },
+               py::arg("board"), py::arg("legal"),
+               py::arg("p_from"), py::arg("p_to"),
+               py::arg("p_piece"), py::arg("p_promo"),
+               py::arg("root_stm"), py::arg("stm_leaf"));
      // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
      py::class_<MCTSNode>(m, "MCTSNode")
           .def("__repr__", [](const MCTSNode& n){

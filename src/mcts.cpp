@@ -3,6 +3,12 @@
 #include <numeric>
 #include <stdexcept>
 
+
+static inline float clampf(float x, float lo, float hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+
+
 // ------------------------- MCTSNode -------------------------
 
 MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_from_parent)
@@ -242,15 +248,15 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
         float prior = 0.0f;
         if (auto it = r->P.find(mv); it != r->P.end()) prior = it->second;
 
-        out.push_back(ChildDetail{
-            mv,
-            ch->N,
-            ch->Q,
-            ch->vprime_visits,   // replaces vloss
-            prior,
-            ch->is_terminal,
-            ch->value
-        });
+        ChildDetail cd;
+        cd.uci = mv;
+        cd.N = ch->N;
+        cd.Q = ch->Q;
+        cd.vprime_visits = ch->vprime_visits;
+        cd.prior = prior;
+        cd.is_terminal = ch->is_terminal;
+        cd.value = ch->value;
+        out.push_back(std::move(cd));
     }
     std::sort(out.begin(), out.end(),
               [](const ChildDetail& a, const ChildDetail& b){ return a.N > b.N; });
@@ -338,38 +344,92 @@ priors_from_heads_views(const backend::Board& board,
     for (size_t i = 0; i < n; ++i) {
         const int fi = fr[i], ti = to[i], pci = pc[i], pri_i = pr[i];
         const float s = std::max(0.0f,
-            pfv.get(static_cast<size_t>(fi)) *
-            ptv.get(static_cast<size_t>(ti)) *
-            pcv.get(static_cast<size_t>(pci)) *
-            prv.get(static_cast<size_t>(pri_i)));
+            pfv.get((size_t)fi) *
+            ptv.get((size_t)ti) *
+            pcv.get((size_t)pci) *
+            prv.get((size_t)pri_i));
         pri[i] = s;
         sum += s;
     }
 
     if (sum > 0.0) {
-        const float inv = static_cast<float>(1.0 / sum);
+        const float inv = (float)(1.0 / sum);
         for (auto& p : pri) p *= inv;
     } else {
-        const float u = 1.0f / static_cast<float>(n);
+        const float u = 1.0f / (float)n;
         for (auto& p : pri) p = u;
     }
 
-    const float m = std::clamp(mix, 0.0f, 1.0f);
-    if (m > 0.0f) {
-        const float u = 1.0f / static_cast<float>(n);
-        double t = 0.0;
-        for (auto& p : pri) { p = (1.0f - m) * p + m * u; t += p; }
-        if (t > 0.0) {
-            const float inv = static_cast<float>(1.0 / t);
-            for (auto& p : pri) p *= inv;
-        } else {
-            for (auto& p : pri) p = u;
-        }
+    if (mix > 0.0f) {
+        const float u = 1.0f / (float)n;
+        for (auto& p : pri) p = (1.0f - mix) * p + mix * u;
     }
 
     out.reserve(n);
     for (size_t i = 0; i < n; ++i) out.emplace_back(legal[i], pri[i]);
     return out;
+}
+
+std::vector<std::pair<std::string, float>>
+PriorEngine::build(const backend::Board& board,
+                   const std::vector<std::string>& legal,
+                   FloatView pfv, FloatView ptv,
+                   FloatView pcv, FloatView prv,
+                   const std::string& root_stm,
+                   const std::string& stm_leaf,
+                   int history_size,
+                   int piece_count) const {
+    std::vector<std::pair<std::string, float>> pri;
+    const size_t n = legal.size();
+    if (n == 0) return pri;
+
+    const bool endgame = (piece_count <= 14);
+    float mix = cfg_.anytime_uniform_mix;
+    if (root_stm != stm_leaf) mix = cfg_.opponent_uniform_mix;
+    else if (endgame)         mix = cfg_.endgame_uniform_mix;
+
+    pri = priors_from_heads_views(board, legal, pfv, ptv, pcv, prv, mix);
+
+    if (cfg_.use_prior_boosts && history_size > 10) {
+        const float gchk = cfg_.anytime_gives_check;
+        const float rep_sub = endgame ? cfg_.endgame_repetition_sub
+                                      : cfg_.anytime_repetition_sub;
+        const float egpp = cfg_.endgame_pawn_push;
+        const float egc  = cfg_.endgame_capture;
+
+        for (auto& mp : pri) {
+            const std::string& mv = mp.first;
+            float p = mp.second;
+
+            if (gchk > 0.0f && board.gives_check(mv)) p += gchk;
+            if (rep_sub > 0.0f && board.would_be_repetition(mv, 1)) p -= rep_sub;
+            if (endgame) {
+                if (egpp > 0.0f && board.is_pawn_move(mv)) p += egpp;
+                if (egc  > 0.0f && board.is_capture(mv))   p += egc;
+            }
+            if (cfg_.clip_enabled) {
+                p = clampf(p, cfg_.clip_min, cfg_.clip_max);
+            }
+            mp.second = p;
+        }
+    } else if (cfg_.clip_enabled) {
+        for (auto& mp : pri) {
+            mp.second = clampf(mp.second, cfg_.clip_min, cfg_.clip_max);
+        }
+    }
+
+    double s = 0.0;
+    for (auto& mp : pri) s += (mp.second > 0.0f ? mp.second : 0.0f);
+    if (s > 0.0) {
+        const float inv = (float)(1.0 / s);
+        for (auto& mp : pri) {
+            mp.second = (mp.second > 0.0f ? mp.second : 0.0f) * inv;
+        }
+    } else {
+        const float u = 1.0f / (float)n;
+        for (auto& mp : pri) mp.second = u;
+    }
+    return pri;
 }
 
 std::optional<float> terminal_value_white_pov(const backend::Board& b) {
