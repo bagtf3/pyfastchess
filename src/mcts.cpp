@@ -11,12 +11,9 @@ MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_f
 std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
     if (children.empty()) return {"", nullptr};
 
-    // sumN is root.N plus the sum of child virtual losses (like Python)
-    // (We mimic your Python: sumN = max(1, node.N + sum(child.vloss)))
-    float sumN = static_cast<float>(std::max(1, N)) ;
-    for (const auto& kv : children) sumN += kv.second->vloss;
+    // Typical PUCT uses parent's visits to scale U
+    const float sumN = static_cast<float>(std::max(1, N));
 
-    // Flip Q at selection time when stm is black (as in Python)
     const bool stm_white = (board.side_to_move() == "w");
 
     std::pair<std::string, MCTSNode*> best = {"", nullptr};
@@ -27,18 +24,20 @@ std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
         const MCTSNode* ch    = kv.second.get();
 
         const float prior = P.count(mv) ? P.at(mv) : 0.0f;
-        const float u     = c_puct * prior * std::sqrt(sumN) / (1.0f + ch->N + ch->vloss);
+        const float u     = c_puct * prior * std::sqrt(sumN) / (1.0f + ch->N);
         float q           = ch->Q;
-        if (!stm_white) q = -q;  // white-POV flip for black-to-move
+        if (!stm_white) q = -q;  // white-POV flip when black to move
 
         const float score = q + u;
         if (score > best_score) {
             best_score = score;
             best = {mv, const_cast<MCTSNode*>(ch)};
         }
+        // note: no vloss anywhere
     }
     return best;
 }
+
 
 // ------------------------- MCTSTree -------------------------
 
@@ -62,14 +61,42 @@ MCTSNode* MCTSTree::collect_one_leaf() {
         last_path_.push_back(node);
     }
 
-    // add virtual loss along the path
-    for (auto* n : last_path_) n->vloss += 1.0f;
+    // Known terminal: each time we reach it, count a full sim and return.
+    if (node->is_terminal) {
+        const float v = node->value;  // already white-POV
+        back_up_along_path(node, v, /*add_visit=*/true);
+        return node;
+    }
 
+    // Fresh terminal?
+    if (auto tv = terminal_value_white_pov(node->board)) {
+        node->is_terminal = true;
+        node->value = *tv;
+        node->is_expanded = true;
+        back_up_along_path(node, node->value, /*add_visit=*/true);
+        return node;
+    }
+
+    // Awaiting NN and still provisional -> credit another q' sim.
+    if (node->has_qprime) {
+        back_up_along_path(node, node->qprime, /*add_visit=*/true);
+        node->qprime_visits += 1;
+        return node;
+    }
+
+    // Fresh non-terminal leaf: expand with uniform priors and start q'
+    expand_with_uniform_priors(node);
+
+    const bool stm_white = (node->board.side_to_move() == "w");
+    node->qprime        = stm_white ? -1.0f :  1.0f;  // white POV worst-case
+    node->has_qprime    = true;
+    node->qprime_visits = 1;
+    node->is_expanded   = true;
+
+    back_up_along_path(node, node->qprime, /*add_visit=*/true);
     return node;
 }
 
-// Expand node using priors; create children; apply white-POV value;
-// pop virtual losses and backup along the actual parent chain (robust to batching).
 void MCTSTree::apply_result(
     MCTSNode* node,
     const std::vector<std::pair<std::string, float>>& move_priors,
@@ -77,59 +104,63 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // 1) Expand (or mark terminal)
-    if (auto tv = terminal_value_white_pov(node->board)) {
-        node->value = *tv;
-        node->is_expanded = true;
-    } else {
-        // Attach priors
-        node->P.clear();
-        node->P.reserve(move_priors.size());
-        for (const auto& mp : move_priors) node->P.emplace(mp.first, mp.second);
+    // Overwrite priors with NN priors (children were already created on expand)
+    node->P.clear();
+    node->P.reserve(move_priors.size());
+    for (const auto& mp : move_priors) node->P.emplace(mp.first, mp.second);
 
-        // Create children from priors (skip illegal just in case)
-        node->children.clear();
-        node->children.reserve(move_priors.size());
-        for (const auto& mp : move_priors) {
-            const std::string& mv = mp.first;
-            backend::Board childb = node->board;
-            if (!childb.push_uci(mv)) continue;
-            node->children.emplace(mv, std::make_unique<MCTSNode>(childb, node, mv));
+    // Total delta to correct all provisional sims made with q'
+    int   k           = node->has_qprime ? std::max(1, node->qprime_visits) : 0;
+    float base        = node->has_qprime ? node->qprime : node->value;
+    float delta_total = (value_white_pov - base) * static_cast<float>(std::max(1, k));
+
+    node->value         = value_white_pov;
+    node->has_qprime    = false;
+    node->qprime_visits = 0;
+
+    // Apply delta along the actual parent chain; do NOT change N here
+    if (delta_total != 0.0f) {
+        std::vector<MCTSNode*> path;
+        for (MCTSNode* p = node; p; p = p->parent) path.push_back(p);
+        if (!path.empty() && path.back() == root_.get()) {
+            for (auto it = path.rbegin(); it != path.rend(); ++it) {
+                MCTSNode* n = *it;
+                n->W += delta_total;
+                n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
+            }
         }
-
-        node->value = value_white_pov;
-        node->is_expanded = true;
     }
+}
 
-    // 2) Build the path by walking parents: leaf -> ... -> root
+void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
     std::vector<MCTSNode*> path;
-    path.reserve(64); // upper bound on plies you'd see
-    {
-        MCTSNode* p = node;
-        while (p) {
-            path.push_back(p);
-            p = p->parent;
-        }
-    }
+    for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
+    if (path.empty() || path.back() != root_.get()) return;
 
-    // Safety: ensure this leaf still belongs to THIS tree's current root
-    if (path.empty() || path.back() != root_.get()) {
-        // Root advanced since selection; ignore to avoid corrupting another tree.
-        return;
-    }
-
-    // 3) Pop one unit of virtual loss along THIS path
-    for (MCTSNode* n : path) {
-        n->vloss -= 1.0f;
-    }
-
-    // 4) Backup white-POV value along root->leaf (no sign flip)
-    const float v = node->value;
     for (auto it = path.rbegin(); it != path.rend(); ++it) {
-        MCTSNode* n = *it; // starts at root
-        n->N += 1;
+        MCTSNode* n = *it;
+        if (add_visit) n->N += 1;
         n->W += v;
-        n->Q  = n->W / std::max(1, n->N);
+        n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
+    }
+}
+
+void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
+    node->P.clear();
+    node->children.clear();
+
+    auto legal = node->board.legal_moves();
+    const size_t n = legal.size();
+    if (n == 0) return;
+
+    const float u = 1.0f / static_cast<float>(n);
+    node->P.reserve(n);
+    node->children.reserve(n);
+    for (const auto& mv : legal) {
+        node->P.emplace(mv, u);
+        backend::Board childb = node->board;
+        if (!childb.push_uci(mv)) continue;
+        node->children.emplace(mv, std::make_unique<MCTSNode>(childb, node, mv));
     }
 }
 

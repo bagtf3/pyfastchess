@@ -239,13 +239,17 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("N",    [](const MCTSNode& n){ return n.N; })
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
+          .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
           .def_property_readonly("vloss",[](const MCTSNode& n){ return n.vloss; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
+          .def_property_readonly("is_terminal", [](const MCTSNode& n){ return n.is_terminal; })
+          .def_property_readonly("has_qprime",  [](const MCTSNode& n){ return n.has_qprime; })
+          .def_property_readonly("qprime",      [](const MCTSNode& n){ return n.qprime; })
+          .def_property_readonly("qprime_visits", [](const MCTSNode& n){ return n.qprime_visits; })
+          .def_property_readonly("value",       [](const MCTSNode& n){ return n.value; })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
-          // returns a dict[str, float]
-          .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
                auto it = n.P.find(uci);
                return (it == n.P.end()) ? 0.0f : it->second;

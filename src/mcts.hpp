@@ -33,6 +33,12 @@ struct MCTSNode {
     float Q     = 0.0f;   // mean value
     float vloss = 0.0f;   // virtual loss for parallel sims
 
+    // --- Provisional eval & terminal bookkeeping ---
+    bool  is_terminal   = false;  // true if this position is terminal
+    bool  has_qprime    = false;  // true while we use provisional value
+    float qprime        = 0.0f;   // provisional value (white POV)
+    int   qprime_visits = 0;      // number of sims already backed up with q'
+
     // --- Priors / children ---
     // P: move -> prior (root stores priors for its children)
     std::unordered_map<std::string, float> P;
@@ -97,6 +103,9 @@ private:
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
+
+    void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
+    void expand_with_uniform_priors(MCTSNode* node);
 };
 
 // --------- Helpers ---------
