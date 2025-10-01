@@ -10,6 +10,7 @@ pybind11_add_module(pyfastchess._core
     src/backend.cpp
     src/binding.cpp
     src/mcts.cpp
+    src/evaluator.cpp 
 )
 
 target_include_directories(pyfastchess._core PRIVATE

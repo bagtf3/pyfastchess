@@ -5,6 +5,7 @@
 #include <algorithm>
 #include "backend.hpp"
 #include "mcts.hpp"
+#include "evaluator.hpp"
 #include <sstream>
 
 namespace py = pybind11;
@@ -391,4 +392,83 @@ PYBIND11_MODULE(_core, m) {
           return py::none();
       },
       py::arg("board"));
+
+     py::class_<evaluator::Weights>(m, "EvalWeights")
+          .def(py::init<>())
+          .def_readwrite("psqt", &evaluator::Weights::psqt)
+          .def_readwrite("mobility_weights", &evaluator::Weights::mobility_weights)
+          .def_readwrite("tactical_weights", &evaluator::Weights::tactical_weights)
+          .def_readwrite("king_weights", &evaluator::Weights::king_weights)
+          .def_readwrite("stm_bias", &evaluator::Weights::stm_bias)
+          .def_readwrite("global_scale", &evaluator::Weights::global_scale);
+
+     py::class_<evaluator::Evaluator>(m, "Evaluator")
+          .def(py::init<>())
+          .def("configure", [](evaluator::Evaluator &ev, py::object wobj) {
+               // Accept either EvalWeights instance or a tuple/dict from Python.
+               // If user passed EvalWeights already, cast directly:
+               if (py::isinstance<evaluator::Weights>(wobj)) {
+                    ev.configure(wobj.cast<evaluator::Weights>());
+                    return;
+               }
+               // Otherwise expect dict-ish with keys. Build a Weights struct.
+               evaluator::Weights w;
+               if (py::hasattr(wobj, "get")) {
+                    // assume dict-like mapping
+                    py::dict d = py::dict(wobj);
+                    if (d.contains("psqt")) {
+                         auto arr = d["psqt"].cast<py::array_t<int32_t>>();
+                         // accept shapes (1536,), (4,384), or (4,6,64)
+                         auto buf = arr.request();
+                         if (buf.ndim == 1 && buf.shape[0] == 1536) {
+                              w.psqt.assign((int32_t*)buf.ptr, (int32_t*)buf.ptr + 1536);
+                         } else if (buf.ndim == 2 && buf.shape[0] == 4 && buf.shape[1] == 384) {
+                              w.psqt.assign((int32_t*)buf.ptr, (int32_t*)buf.ptr + 4*384);
+                         } else if (buf.ndim == 3 && buf.shape[0]==4 && buf.shape[1]==6 && buf.shape[2]==64) {
+                              int32_t* p = (int32_t*)buf.ptr;
+                              w.psqt.assign(p, p + 4*6*64);
+                         } else {
+                              throw std::runtime_error("psqt array must be shape (1536,), (4,384) or (4,6,64)");
+                         }
+                    }
+                    if (d.contains("stm_bias")) w.stm_bias = d["stm_bias"].cast<int32_t>();
+                    if (d.contains("global_scale")) w.global_scale = d["global_scale"].cast<int32_t>();
+                    if (d.contains("mobility_weights")) {
+                         auto m = d["mobility_weights"].cast<std::vector<int32_t>>();
+                         if (m.size()==6) w.mobility_weights = m;
+                    }
+                    if (d.contains("tactical_weights")) {
+                         auto t = d["tactical_weights"].cast<std::vector<int32_t>>();
+                         if (t.size()==18) w.tactical_weights = t;
+                    }
+                    if (d.contains("king_weights")) {
+                         auto k = d["king_weights"].cast<std::vector<int32_t>>();
+                         if (k.size()==3) w.king_weights = k;
+                    }
+                    ev.configure(w);
+                    return;
+               }
+               throw std::runtime_error("configure expects EvalWeights instance or dict-like object");
+          }, py::arg("weights"))
+
+          .def("evaluate", [](evaluator::Evaluator &ev, const backend::Board &b){
+               return ev.evaluate(b);
+          }, py::arg("board"))
+
+          .def("evaluate_itemized", [](evaluator::Evaluator &ev, const backend::Board &b){
+               auto tup = ev.evaluate_itemized(b);
+               // return a dict for easy use in Python
+               py::dict d;
+               d["material"]  = std::get<0>(tup);
+               d["psqt"]      = std::get<1>(tup);
+               d["mobility"]  = std::get<2>(tup);
+               d["tactical"]  = std::get<3>(tup);
+               d["stm"]       = std::get<4>(tup);
+               d["total"]     = std::get<5>(tup);
+               return d;
+          }, py::arg("board"))
+
+          .def("get_weights", [](evaluator::Evaluator &ev){
+               return ev.get_weights();
+          });
 }

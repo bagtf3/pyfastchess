@@ -8,6 +8,8 @@ priors_from_heads = _core.priors_from_heads
 terminal_value_white_pov = _core.terminal_value_white_pov
 PriorConfig = _core.PriorConfig
 PriorEngine = _core.PriorEngine
+Evaluator = _core.Evaluator
+EvalWeights = _core.EvalWeights
 
 __all__ = [
     "Board",
@@ -16,5 +18,7 @@ __all__ = [
     "priors_from_heads",
     "terminal_value_white_pov",
     "PriorConfig",
-    "PriorEngine"
+    "PriorEngine",
+    "Evaluator",
+    "EvalWeights"
 ]
