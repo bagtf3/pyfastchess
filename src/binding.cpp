@@ -164,10 +164,13 @@ PYBIND11_MODULE(_core, m) {
           .def("gives_check", &backend::Board::gives_check, py::arg("uci"),
                "Return True if the given UCI move would give check.")
 
+          .def("gives_checkmate", &backend::Board::gives_checkmate, py::arg("uci"),
+               "Return True if the given UCI move immediately delivers checkmate.")
+
           .def("is_game_over", &backend::Board::is_game_over,
                "Return (reason, result) strings for game over status; "
                "('none','none') if the game is not over.")
-
+               
           .def("history_size", &backend::Board::history_size)
           .def("history_uci",  &backend::Board::history_uci)
           .def("clear_history", &backend::Board::clear_history)
@@ -329,8 +332,7 @@ PYBIND11_MODULE(_core, m) {
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
 
           .def("apply_result",
-               [](MCTSTree& t,
-                    MCTSNode* node,
+               [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
                     float value_white_pov) {
                     t.apply_result(node, move_priors, value_white_pov);

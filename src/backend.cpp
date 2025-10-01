@@ -159,6 +159,17 @@ bool Board::gives_check(const std::string& uci) const {
     return ct != chess::CheckType::NO_CHECK;  // <-- was ...::NONE
 }
 
+bool backend::Board::gives_checkmate(const std::string& uci) const {
+    chess::Move mv = chess::uci::uciToMove(board_, uci);
+    if (mv == chess::Move::NO_MOVE) return false;
+
+    chess::Board tmp = board_;   // cheap copy; keeps method const
+    tmp.makeMove(mv);
+
+    auto pr = tmp.isGameOver();  // pair<GameResultReason, GameResult>
+    return pr.first == chess::GameResultReason::CHECKMATE;
+}
+
 std::pair<std::string, std::string> Board::is_game_over() const {
     auto pr = board_.isGameOver(); // pair<GameResultReason, GameResult>
     return { reason_to_string(pr.first), result_to_string(pr.second) };

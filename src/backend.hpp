@@ -39,6 +39,7 @@ public:
     bool is_pawn_move(const std::string& uci) const;
     bool in_check() const;
     bool gives_check(const std::string& uci) const;
+    bool gives_checkmate(const std::string& uci) const;
     std::pair<std::string, std::string> is_game_over() const;
     size_t history_size() const;
     std::vector<std::string> history_uci() const;
