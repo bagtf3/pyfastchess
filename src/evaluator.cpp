@@ -154,8 +154,10 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
         black_by_pt[pt] = rb.pieces(pt_e, chess::Color::BLACK).getBits();
     }
 
-    // --- Compute tactical counts per piece-type (attacked_by_lower, defended, hanging) ---
-    int tactical_counts_by_pt[6][3] = {{0}}; // [ptype][feature_index]
+    // --- Compute tactical counts per piece-type (separate white/black counts) ---
+    // We'll collect counts per piece-type and feature for white and black separately.
+    // Feature order: 0 = attacked_by_lower, 1 = defended, 2 = hanging
+    int tactical_white[6][3] = {{0}}, tactical_black[6][3] = {{0}};
 
     for (const auto &pr : pieces) {
         int pidx = pr.pidx;
@@ -175,7 +177,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 
         bool attacked_by_lower = false;
         if (en_prize) {
-            // test intersection with enemy piece-type bitboards quickly
+            // naive per-piece-type check (keeps current semantics)
             for (int atk_pt = 0; atk_pt < 6; ++atk_pt) {
                 uint64_t enemy_pt_bb = is_white ? black_by_pt[atk_pt] : white_by_pt[atk_pt];
                 if ((atk_enemy_mask & enemy_pt_bb) != 0) {
@@ -184,21 +186,34 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
             }
         }
 
-        if (attacked_by_lower) tactical_counts_by_pt[pidx][0] += 1;
-        if (defended)          tactical_counts_by_pt[pidx][1] += 1;
-        if (hanging)           tactical_counts_by_pt[pidx][2] += 1;
+        if (is_white) {
+            if (attacked_by_lower) tactical_white[pidx][0] += 1;
+            if (defended)          tactical_white[pidx][1] += 1;
+            if (hanging)           tactical_white[pidx][2] += 1;
+        } else {
+            if (attacked_by_lower) tactical_black[pidx][0] += 1;
+            if (defended)          tactical_black[pidx][1] += 1;
+            if (hanging)           tactical_black[pidx][2] += 1;
+        }
     }
 
-    // Sum tactical contributions using configured weights
-    for (int p=0;p<6;++p) {
-        int base_index = p*3;
-        int64_t w_att_lower = (base_index+0 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index+0] : 0;
-        int64_t w_def      = (base_index+1 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index+1] : 0;
-        int64_t w_hang     = (base_index+2 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index+2] : 0;
+    // Now sum tactical contributions using configured weights, applying sign at summation:
+    // contribution = weight * (white_count - black_count)
+    for (int p = 0; p < 6; ++p) {
+        int base_index = p * 3;
+        int64_t w_att_lower = (base_index + 0 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 0] : 0;
+        int64_t w_def       = (base_index + 1 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 1] : 0;
+        int64_t w_hang      = (base_index + 2 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 2] : 0;
 
-        tactical_cp += static_cast<int>(w_att_lower * tactical_counts_by_pt[p][0]
-                                      + w_def       * tactical_counts_by_pt[p][1]
-                                      + w_hang      * tactical_counts_by_pt[p][2]);
+        int white_att = tactical_white[p][0], black_att = tactical_black[p][0];
+        int white_def = tactical_white[p][1], black_def = tactical_black[p][1];
+        int white_hg  = tactical_white[p][2], black_hg  = tactical_black[p][2];
+
+        tactical_cp += static_cast<int>(
+            w_att_lower * (white_att - black_att)
+          + w_def       * (white_def - black_def)
+          + w_hang      * (white_hg  - black_hg)
+        );
     }
 
     // stm bias
