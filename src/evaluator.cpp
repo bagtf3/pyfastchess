@@ -95,6 +95,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 
     // occupancy mask (u64)
     uint64_t occ = rb.occ().getBits();
+
     // portable ctz helper (MSVC/GCC)
     auto ctzll_u64 = [](uint64_t x)->int {
 #ifdef _MSC_VER
@@ -123,7 +124,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
     // --- material & PSQT ---
     int material_cp = 0;
     int psqt_cp = 0;
-    int mobility_cp = 0; // placeholder for later passes
+    int mobility_cp = 0; // will fill below
     int tactical_cp = 0;
 
     // Precompute PSQT bucket index once
@@ -146,12 +147,15 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
         psqt_cp += (is_white ? psqt_val : -psqt_val);
     }
 
-    // --- prepare per-piece-type bitboards for quick checks ---
+    // --- prepare per-piece-type bitboards for quick checks & occ by color ---
     uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
+    uint64_t white_occ = 0, black_occ = 0;
     for (int pt = 0; pt < 6; ++pt) {
         auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
         white_by_pt[pt] = rb.pieces(pt_e, chess::Color::WHITE).getBits();
         black_by_pt[pt] = rb.pieces(pt_e, chess::Color::BLACK).getBits();
+        white_occ |= white_by_pt[pt];
+        black_occ |= black_by_pt[pt];
     }
 
     // --- Compute tactical counts per piece-type (separate white/black counts) ---
@@ -177,7 +181,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 
         bool attacked_by_lower = false;
         if (en_prize) {
-            // naive per-piece-type check (keeps current semantics)
+            // per-piece-type check (keeps current semantics)
             for (int atk_pt = 0; atk_pt < 6; ++atk_pt) {
                 uint64_t enemy_pt_bb = is_white ? black_by_pt[atk_pt] : white_by_pt[atk_pt];
                 if ((atk_enemy_mask & enemy_pt_bb) != 0) {
@@ -214,6 +218,92 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
           + w_def       * (white_def - black_def)
           + w_hang      * (white_hg  - black_hg)
         );
+    }
+
+    // --- MOBILITY: compute per-piece non-capture (empty destination) counts ---
+    // We'll count how many empty squares each piece type can move to (non-captures),
+    // using chess::attacks bitboard helpers for knights/bishops/rooks/queens/kings and
+    // simple forward checks for pawns.
+    auto popcount_u64 = [](uint64_t x)->int {
+#ifdef _MSC_VER
+        return static_cast<int>(__popcnt64(x));
+#else
+        return __builtin_popcountll(x);
+#endif
+    };
+
+    int mob_white[6] = {0}, mob_black[6] = {0};
+    uint64_t empty_mask = ~occ; // bits where squares are empty (note: upper bits beyond 64 are okay in u64)
+
+    for (const auto &pr : pieces) {
+        int pidx = pr.pidx;
+        bool is_white = pr.is_white;
+        int sq = pr.sq;
+
+        uint64_t moves_mask = 0ULL;
+
+        switch (pidx) {
+            case 0: { // pawn
+                if (is_white) {
+                    int one = sq + 8;
+                    if (one < 64 && ((occ >> one) & 1ULL) == 0) {
+                        moves_mask |= (1ULL << one);
+                        // two-step from rank2 (squares 8..15)
+                        if (sq >= 8 && sq <= 15) {
+                            int two = sq + 16;
+                            if (two < 64 && ((occ >> two) & 1ULL) == 0) moves_mask |= (1ULL << two);
+                        }
+                    }
+                } else { // black
+                    int one = sq - 8;
+                    if (one >= 0 && ((occ >> one) & 1ULL) == 0) {
+                        moves_mask |= (1ULL << one);
+                        if (sq >= 48 && sq <= 55) { // black pawns initial rank (7th rank -> indices 48..55)
+                            int two = sq - 16;
+                            if (two >= 0 && ((occ >> two) & 1ULL) == 0) moves_mask |= (1ULL << two);
+                        }
+                    }
+                }
+                break;
+            }
+            case 1: { // knight
+                auto bb = chess::attacks::knight(chess::Square(sq)).getBits();
+                moves_mask = bb & empty_mask;
+                break;
+            }
+            case 2: { // bishop
+                auto bb = chess::attacks::bishop(chess::Square(sq), rb.occ()).getBits();
+                moves_mask = bb & empty_mask;
+                break;
+            }
+            case 3: { // rook
+                auto bb = chess::attacks::rook(chess::Square(sq), rb.occ()).getBits();
+                moves_mask = bb & empty_mask;
+                break;
+            }
+            case 4: { // queen
+                auto bb = chess::attacks::queen(chess::Square(sq), rb.occ()).getBits();
+                moves_mask = bb & empty_mask;
+                break;
+            }
+            case 5: { // king
+                auto bb = chess::attacks::king(chess::Square(sq)).getBits();
+                moves_mask = bb & empty_mask;
+                break;
+            }
+            default:
+                moves_mask = 0ULL;
+        }
+
+        int cnt = popcount_u64(moves_mask);
+        if (is_white) mob_white[pidx] += cnt;
+        else          mob_black[pidx] += cnt;
+    }
+
+    // Sum mobility contributions using weights (weight * (white_count - black_count))
+    for (int p = 0; p < 6; ++p) {
+        int64_t w_m = (p < (int)w_.mobility_weights.size()) ? w_.mobility_weights[p] : 0;
+        mobility_cp += static_cast<int>( w_m * (mob_white[p] - mob_black[p]) );
     }
 
     // stm bias
