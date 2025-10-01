@@ -224,7 +224,12 @@ PYBIND11_MODULE(_core, m) {
           .def("moves_to_labels", &backend::Board::moves_to_labels, py::arg("ucis"),
                "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
                "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
-      ;
+          .def("piece_at", &backend::Board::piece_at, py::arg("square_index"))
+          .def("piece_type_at", &backend::Board::piece_type_at)
+          .def("piece_color_at", &backend::Board::piece_color_at)
+          .def("attackers_u64", &backend::Board::attackers_u64, py::arg("color"), py::arg("square_index"))
+          .def("attackers_list", &backend::Board::attackers_list, py::arg("color"), py::arg("square_index"))
+     ;
      py::class_<PriorConfig>(m, "PriorConfig")
           .def(py::init<>())
           .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)

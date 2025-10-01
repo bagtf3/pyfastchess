@@ -1,9 +1,27 @@
 #include "backend.hpp"
+#include "chess.hpp" 
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
 #include <string>
 #include <cctype>   // tolower
+
+#include <cstdint>
+#ifdef _MSC_VER
+  #include <intrin.h>
+#endif
+
+// portable ctz for u64
+static inline int ctzll_u64(uint64_t x) {
+    if (x == 0) return 64;
+#ifdef _MSC_VER
+    unsigned long idx;
+    _BitScanForward64(&idx, x);
+    return static_cast<int>(idx);
+#else
+    return __builtin_ctzll(x);
+#endif
+}
 
 namespace backend {
 
@@ -338,6 +356,52 @@ Board::moves_to_labels(const std::vector<std::string>& ucis) const {
         pros.push_back(pr);
     }
     return {froms, tos, pcs, pros};
+}
+
+int Board::piece_at(int square) const {
+    chess::Square s(static_cast<chess::Square::underlying>(square));
+    chess::Piece p = board_.at(s);
+    if (p.type() == chess::PieceType::NONE) return 0;
+    int t = static_cast<int>(p.type()) + 1; // pawn..king -> 1..6
+    return (p.color() == chess::Color::WHITE) ? t : -t;
+}
+
+int Board::piece_type_at(int square) const {
+    chess::Square s(static_cast<chess::Square::underlying>(square));
+    chess::Piece p = board_.at(s);
+    if (p.type() == chess::PieceType::NONE) return 0;
+    return static_cast<int>(p.type()) + 1; // 1..6
+}
+
+std::string Board::piece_color_at(int square) const {
+    chess::Square s(static_cast<chess::Square::underlying>(square));
+    chess::Piece p = board_.at(s);
+    if (p.type() == chess::PieceType::NONE) return std::string();
+    return (p.color() == chess::Color::WHITE) ? std::string("w") : std::string("b");
+}
+
+// convert chess::Bitboard -> uint64_t using the library accessor
+static inline uint64_t bitboard_to_u64(const chess::Bitboard &bb) {
+    return bb.getBits();   // chess::Bitboard::getBits() returns std::uint64_t
+}
+
+uint64_t Board::attackers_u64(const std::string& color, int square_index) const {
+    chess::Color c = (color.size() && (color[0]=='w' || color[0]=='W')) ? chess::Color::WHITE
+                                                                          : chess::Color::BLACK;
+    chess::Square s(static_cast<int>(square_index));
+    chess::Bitboard bb = chess::attacks::attackers(board_, c, s);  // fully-qualified call
+    return bitboard_to_u64(bb);
+}
+
+std::vector<int> Board::attackers_list(const std::string& color, int square_index) const {
+    uint64_t mask = attackers_u64(color, square_index);
+    std::vector<int> out;
+    while (mask) {
+        int idx = ctzll_u64(mask);
+        out.push_back(idx);
+        mask &= mask - 1ULL;
+    }
+    return out;
 }
 
 } // namespace backend

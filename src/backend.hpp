@@ -53,6 +53,18 @@ public:
     // Returns four vectors: from, to, piece, promo (collapsed promo scheme)
     std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
     moves_to_labels(const std::vector<std::string>& ucis) const;
+    // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
+    int piece_at(int square) const;
+    // convenience: same but returns 0..6 (0 = none, 1..6 pawn..king) and separate color function
+    int piece_type_at(int square) const;           // 0..6
+    std::string piece_color_at(int square) const;  // "w", "b", or ""
+    /// Return attackers of given color on `square`:
+    /// - attackers_u64("w", sq) -> uint64_t bitboard of origin squares (LSB = a1)
+    /// - attackers_list("w", sq) -> std::vector<int> list of origin square indices 0..63
+    uint64_t attackers_u64(const std::string& color, int square) const;
+    std::vector<int> attackers_list(const std::string& color, int square) const;
+    // expose raw chess board if you want direct access:
+    const chess::Board& raw_board() const { return board_; }
     
 private:
     static std::string color_to_char(chess::Color c);
