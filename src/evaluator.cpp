@@ -84,179 +84,109 @@ int Evaluator::evaluate(const backend::Board& b) const {
 }
 
 std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::Board& b) const {
-    // Parse fen to locate pieces (reuse idea from board_planes_conv)
-    std::string fen = b.fen(true);
-    std::istringstream iss(fen);
-    std::string parts[6];
-    for (int i=0;i<6 && (iss >> parts[i]); ++i) {}
-    std::string pieces_field = (parts[0].empty() ? std::string() : parts[0]);
+    // --- prelim / piece collection (use raw bitboards) ---
+    // raw chess board (const ref)
+    const chess::Board &rb = b.raw_board();
 
-    // We'll store piece list for later tactical processing:
+    // build pieces vector by scanning occupancy bitboard
     struct PieceRec { int pidx; bool is_white; int sq; };
     std::vector<PieceRec> pieces;
     pieces.reserve(32);
 
+    // occupancy mask (u64)
+    uint64_t occ = rb.occ().getBits();
+    // portable ctz helper (MSVC/GCC)
+    auto ctzll_u64 = [](uint64_t x)->int {
+#ifdef _MSC_VER
+        if (x == 0) return 64;
+        unsigned long idx;
+        _BitScanForward64(&idx, x);
+        return static_cast<int>(idx);
+#else
+        if (x == 0) return 64;
+        return __builtin_ctzll(x);
+#endif
+    };
+
+    uint64_t occ_copy = occ;
+    while (occ_copy) {
+        int sq = ctzll_u64(occ_copy);
+        occ_copy &= occ_copy - 1ULL;
+        chess::Square csq(sq);
+        chess::Piece p = rb.at(csq);
+        if (p.type() == chess::PieceType::NONE) continue; // defensive
+        int pidx = static_cast<int>(p.type()); // 0..5
+        bool is_white = (p.color() == chess::Color::WHITE);
+        pieces.push_back({pidx, is_white, sq});
+    }
+
+    // --- material & PSQT ---
     int material_cp = 0;
     int psqt_cp = 0;
-    int mobility_cp = 0;  // placeholder for pass1
-    int tactical_cp = 0;  // now computed in pass2
+    int mobility_cp = 0; // placeholder for later passes
+    int tactical_cp = 0;
 
-    int row = 0, col = 0;
-    for (char ch : pieces_field) {
-        if (ch == '/') { ++row; col = 0; continue; }
-        if (ch >= '1' && ch <= '8') { col += (ch - '0'); continue; }
-        bool is_white = true;
-        bool is_piece = false;
-        int pidx = piece_char_to_index(ch, is_white, is_piece);
-        if (!is_piece) { ++col; continue; }
-
-        int sq = square_index_from_fen_rowcol(row, col);
-
-        // record piece
-        pieces.push_back({pidx, is_white, sq});
-
-        // material
-        int mat_val = MATERIAL_CP[pidx];
-        material_cp += (is_white ? mat_val : -mat_val);
-
-        // PSQT lookup:
-        int ply = static_cast<int>(b.history_size()); // half-moves so far
-        int bucket = std::min(ply / 20, 3);
-        int base_idx = bucket * 384 + pidx * 64 + sq;
-        int psqt_val = w_.psqt[base_idx];
-        psqt_cp += (is_white ? psqt_val : -psqt_val);
-
-        ++col;
-    }
-
-    // --- Build pseudo-attack maps using piece attack geometry (counts defenders correctly) ----
-    // occupancy: 0 empty, 1 white, 2 black
-    std::array<int,64> occupancy{};
-    occupancy.fill(0);
-    for (const auto &pr : pieces) {
-        occupancy[pr.sq] = pr.is_white ? 1 : 2;
-    }
-
-    std::vector<std::vector<int>> attackers_white(64), attackers_black(64);
-
-    auto file_of = [](int sq){ return sq % 8; };
-    auto rank_of = [](int sq){ return sq / 8; };
-    auto on_board = [](int sq){ return sq >= 0 && sq < 64; };
-
-    const int KNOFF[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
-    const int KGOFF[8] = { 1, -1, 8, -8, 9, 7, -9, -7 };
-    const int ROOK_DIRS[4] = {8, 1, -8, -1};
-    const int BISH_DIRS[4] = {9, -7, -9, 7};
-
-    for (const auto &pr : pieces) {
-        int ptype = pr.pidx;
-        bool is_white = pr.is_white;
-        int sq = pr.sq;
-
-        auto record_attack = [&](int target_sq){
-            if (!on_board(target_sq)) return;
-            if (is_white) attackers_white[target_sq].push_back(ptype);
-            else attackers_black[target_sq].push_back(ptype);
-        };
-
-        // Pawn pseudo-attacks (attack squares even if occupied by friend)
-        if (ptype == 0) {
-            int f = file_of(sq), r = rank_of(sq);
-            if (is_white) {
-                if (f > 0 && r < 7) record_attack(sq + 7);
-                if (f < 7 && r < 7) record_attack(sq + 9);
-            } else {
-                if (f < 7 && r > 0) record_attack(sq - 7);
-                if (f > 0 && r > 0) record_attack(sq - 9);
-            }
-            continue;
-        }
-
-        // Knight pseudo-attacks
-        if (ptype == 1) {
-            for (int d : KNOFF) {
-                int tsq = sq + d;
-                if (!on_board(tsq)) continue;
-                int df = std::abs(file_of(tsq) - file_of(sq));
-                int dr = std::abs(rank_of(tsq) - rank_of(sq));
-                if ((df == 1 && dr == 2) || (df == 2 && dr == 1)) {
-                    record_attack(tsq);
-                }
-            }
-            continue;
-        }
-
-        // King pseudo-attacks
-        if (ptype == 5) {
-            for (int d : KGOFF) {
-                int tsq = sq + d;
-                if (!on_board(tsq)) continue;
-                int df = std::abs(file_of(tsq) - file_of(sq));
-                int dr = std::abs(rank_of(tsq) - rank_of(sq));
-                if (df <= 1 && dr <= 1) record_attack(tsq);
-            }
-            continue;
-        }
-
-        // Sliders: bishop (2), rook (3), queen (4)
-        if (ptype == 2 || ptype == 3 || ptype == 4) {
-            std::vector<int> dirs;
-            if (ptype == 3) { dirs.assign(ROOK_DIRS, ROOK_DIRS+4); }
-            else if (ptype == 2) { dirs.assign(BISH_DIRS, BISH_DIRS+4); }
-            else {
-                dirs.assign(ROOK_DIRS, ROOK_DIRS+4);
-                dirs.insert(dirs.end(), BISH_DIRS, BISH_DIRS+4);
-            }
-
-            for (int d : dirs) {
-                int tsq = sq;
-                while (true) {
-                    int next = tsq + d;
-                    if (!on_board(next)) break;
-                    // simple wrap guard: file delta between next and tsq should be <= 1 in magnitude
-                    int ff = file_of(next), f0 = file_of(tsq);
-                    if (std::abs(ff - f0) > 1) break;
-
-                    // record attack on next (sliders attack up to and including blocker)
-                    record_attack(next);
-
-                    // stop if blocked
-                    if (occupancy[next] != 0) break;
-
-                    tsq = next;
-                }
-            }
-            continue;
-        }
-    }
-
-    // --- Compute tactical counts per piece-type ---
-    // tactical_weights layout: for p in [0..5]: weights stored as tactical_weights[p*3 + 0..2]
-    // offsets: 0 = attacked_by_lower_value, 1 = defended, 2 = hanging
-    int tactical_counts_by_pt[6][3] = {{0}};
+    // Precompute PSQT bucket index once
+    int ply = static_cast<int>(b.history_size()); // half-moves
+    int bucket = std::min(ply / 20, 3);
 
     for (const auto &pr : pieces) {
         int pidx = pr.pidx;
         bool is_white = pr.is_white;
         int sq = pr.sq;
 
-        const std::vector<int> &atk_enemy = is_white ? attackers_black[sq] : attackers_white[sq];
-        const std::vector<int> &atk_ally  = is_white ? attackers_white[sq] : attackers_black[sq];
+        // material
+        int mat_val = MATERIAL_CP[pidx];
+        material_cp += (is_white ? mat_val : -mat_val);
 
-        bool en_prize = !atk_enemy.empty();
-        bool defended = !atk_ally.empty();
+        // PSQT: layout = 4 * 384 entries (bucket * 384 + pidx*64 + sq)
+        int base_idx = bucket * 384 + pidx * 64 + sq;
+        int psqt_val = 0;
+        if (base_idx >= 0 && base_idx < (int)w_.psqt.size()) psqt_val = w_.psqt[base_idx];
+        psqt_cp += (is_white ? psqt_val : -psqt_val);
+    }
+
+    // --- prepare per-piece-type bitboards for quick checks ---
+    uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
+    for (int pt = 0; pt < 6; ++pt) {
+        auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
+        white_by_pt[pt] = rb.pieces(pt_e, chess::Color::WHITE).getBits();
+        black_by_pt[pt] = rb.pieces(pt_e, chess::Color::BLACK).getBits();
+    }
+
+    // --- Compute tactical counts per piece-type (attacked_by_lower, defended, hanging) ---
+    int tactical_counts_by_pt[6][3] = {{0}}; // [ptype][feature_index]
+
+    for (const auto &pr : pieces) {
+        int pidx = pr.pidx;
+        bool is_white = pr.is_white;
+        int sq = pr.sq;
+
+        // attacker masks using backend wrappers (fast)
+        uint64_t atk_white = b.attackers_u64("w", sq);
+        uint64_t atk_black = b.attackers_u64("b", sq);
+
+        uint64_t atk_enemy_mask = is_white ? atk_black : atk_white;
+        uint64_t atk_ally_mask  = is_white ? atk_white : atk_black;
+
+        bool en_prize = (atk_enemy_mask != 0);
+        bool defended = (atk_ally_mask != 0);
         bool hanging = en_prize && !defended;
 
         bool attacked_by_lower = false;
-        if (!atk_enemy.empty()) {
-            for (int atk_pt : atk_enemy) {
-                if (MATERIAL_CP[atk_pt] < MATERIAL_CP[pidx]) { attacked_by_lower = true; break; }
+        if (en_prize) {
+            // test intersection with enemy piece-type bitboards quickly
+            for (int atk_pt = 0; atk_pt < 6; ++atk_pt) {
+                uint64_t enemy_pt_bb = is_white ? black_by_pt[atk_pt] : white_by_pt[atk_pt];
+                if ((atk_enemy_mask & enemy_pt_bb) != 0) {
+                    if (MATERIAL_CP[atk_pt] < MATERIAL_CP[pidx]) { attacked_by_lower = true; break; }
+                }
             }
         }
 
         if (attacked_by_lower) tactical_counts_by_pt[pidx][0] += 1;
-        if (defended)               tactical_counts_by_pt[pidx][1] += 1;
-        if (hanging)                tactical_counts_by_pt[pidx][2] += 1;
+        if (defended)          tactical_counts_by_pt[pidx][1] += 1;
+        if (hanging)           tactical_counts_by_pt[pidx][2] += 1;
     }
 
     // Sum tactical contributions using configured weights
@@ -271,7 +201,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
                                       + w_hang      * tactical_counts_by_pt[p][2]);
     }
 
-    // stm bias: apply if side to move is white add, if black subtract
+    // stm bias
     int stm_cp = w_.stm_bias;
     if (b.side_to_move() == "b") stm_cp = -stm_cp;
 
