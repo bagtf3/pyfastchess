@@ -90,6 +90,11 @@ public:
     // returns pair(score_cp, stats)
     std::pair<int, QStats> qsearch(int alpha, int beta, evaluator::Evaluator* ev, const QOptions& opts);
     
+    // returns vector of (score, uci_move) sorted descending by score
+    // tt_best is optional UCI string (transposition-table best move) — pass empty optional for none
+    std::vector<std::pair<int, std::string>> ordered_moves(const std::optional<std::string>& tt_best = std::nullopt) const;
+
+    
 private:
     static std::string color_to_char(chess::Color c);
     static std::string reason_to_string(chess::GameResultReason r);

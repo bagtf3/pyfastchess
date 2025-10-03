@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <chrono>
 #include <utility>
+#include <optional>
+#include <vector>
 
 #ifdef _MSC_VER
   #include <intrin.h>
@@ -515,6 +517,33 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     }
 
     return best;
+}
+
+std::vector<std::pair<int, std::string>> Board::ordered_moves(const std::optional<std::string>& tt_best) const {
+    std::vector<std::pair<int, std::string>> out;
+    auto legal = legal_moves();
+    out.reserve(legal.size());
+
+    for (const auto &mv : legal) {
+        int score = 0;
+        if (tt_best && mv == *tt_best) {
+            score = 100000;
+        }
+        else if (is_capture(mv)) {
+            score = 1000 + mvvlva(mv);
+        }
+        else if (gives_check(mv)) {
+            score = 500;
+        }
+        // else score remains 0
+        out.emplace_back(score, mv);
+    }
+
+    std::sort(out.begin(), out.end(), [](const auto &a, const auto &b){
+        return a.first > b.first;
+    });
+
+    return out;
 }
 
 } // namespace backend

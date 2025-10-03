@@ -20,7 +20,6 @@ struct Weights {
     int32_t global_scale = 100;
 };
 
-
 class Evaluator {
 public:
     Evaluator();

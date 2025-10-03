@@ -255,6 +255,19 @@ PYBIND11_MODULE(_core, m) {
           .def("qsearch", &board_qsearch_wrapper,
                py::arg("alpha"), py::arg("beta"), py::arg("evaluator"), py::arg("qopts") = py::none(),
                "Run native qsearch: returns (score_cp, qstats_dict)")
+
+          // binding.cpp — fix: do not call reserve() on py::list
+          .def("ordered_moves", [](backend::Board &b, py::object tt_best_py = py::none()) {
+               std::optional<std::string> tt;
+               if (!tt_best_py.is_none()) tt = tt_best_py.cast<std::string>();
+               auto vec = b.ordered_moves(tt);
+               py::list out;
+               for (const auto &p : vec) {
+                    out.append(py::make_tuple(p.first, p.second));
+               }
+               return out;
+          }, py::arg("tt_best") = py::none(),
+               "Return list of (score, uci_move) sorted descending. tt_best optional UCI string")
      ;
      py::class_<PriorConfig>(m, "PriorConfig")
           .def(py::init<>())
