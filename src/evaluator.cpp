@@ -25,32 +25,28 @@ void Evaluator::configure(const Weights& w) {
 
     // --- PSQT (white POV provided) ---
     if (!w.psqt.empty()) {
-        // sanity check
         if ((int)w.psqt.size() != 4 * 6 * 64) {
             throw std::runtime_error("PSQT expected length 1536 (4×6×64)");
         }
 
-        // store white table as-is
+        // keep a copy for white as provided
         psqt_white_.assign(w.psqt.begin(), w.psqt.end());
 
-        // prepare black-mirrored table same size
+        // prepare the black table (same size)
         psqt_black_.assign(w.psqt.size(), 0);
 
-        // Mirror each 64-square slice vertically (rank flip)
+        // Reverse each 64-square slice (full reverse: 0->63, 1->62, ...).
         // layout: bucket * 384 + piece * 64 + square (sq in [0..63])
-        const int total = static_cast<int>(w.psqt.size());
-        for (int idx = 0; idx < total; ++idx) {
-            int sq   = idx % 64;
-            int base = idx - sq; // start index of the 64-slice
-
-            int rank = sq / 8;
-            int file = sq % 8;
-            int mirror_sq = (7 - rank) * 8 + file; // vertical flip (rank -> 7-rank)
-
-            psqt_black_[base + sq] = w.psqt[base + mirror_sq];
+        const int SLICE = 64;
+        const int TOTAL = static_cast<int>(w.psqt.size());
+        for (int base = 0; base < TOTAL; base += SLICE) {
+            std::reverse_copy(
+                w.psqt.begin() + base,
+                w.psqt.begin() + base + SLICE,
+                psqt_black_.begin() + base
+            );
         }
     } else {
-        // no psqt provided — clear internal copies
         psqt_white_.clear();
         psqt_black_.clear();
     }
@@ -351,7 +347,10 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 }
 
 Weights Evaluator::get_weights() const {
-    return w_;
+    Weights out = w_;
+    out.psqt = psqt_white_;
+    out.psqt_black = psqt_black_;
+    return out;
 }
 
 } // namespace evaluator

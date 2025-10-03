@@ -427,6 +427,7 @@ PYBIND11_MODULE(_core, m) {
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())
           .def_readwrite("psqt", &evaluator::Weights::psqt)
+          .def_readwrite("psqt_black", &evaluator::Weights::psqt_black) 
           .def_readwrite("mobility_weights", &evaluator::Weights::mobility_weights)
           .def_readwrite("tactical_weights", &evaluator::Weights::tactical_weights)
           .def_readwrite("king_weights", &evaluator::Weights::king_weights)

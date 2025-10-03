@@ -11,13 +11,15 @@ namespace backend { class Board; }
 namespace evaluator {
 
 struct Weights {
-    std::vector<int32_t> psqt;              // 4*6*64 = 1536
+    std::vector<int32_t> psqt;              // 4*6*64 = 1536 (white POV)
+    std::vector<int32_t> psqt_black;        // mirrored black POV
     std::vector<int32_t> mobility_weights;  // length 6
     std::vector<int32_t> tactical_weights;  // length 18
     std::vector<int32_t> king_weights;      // length 3
     int32_t stm_bias = 0;
     int32_t global_scale = 100;
 };
+
 
 class Evaluator {
 public:
