@@ -1,5 +1,6 @@
 // evaluator.cpp
 #include "evaluator.hpp"
+#include "backend.hpp"
 #include <sstream>
 #include <algorithm>
 #include <stdexcept>
@@ -19,18 +20,51 @@ Evaluator::Evaluator() {
 }
 
 void Evaluator::configure(const Weights& w) {
+    // keep raw copy in w_
+    w_ = w;
+
+    // --- PSQT (white POV provided) ---
     if (!w.psqt.empty()) {
-        if ((int)w.psqt.size() != 1536) {
+        // sanity check
+        if ((int)w.psqt.size() != 4 * 6 * 64) {
             throw std::runtime_error("PSQT expected length 1536 (4×6×64)");
         }
-        w_.psqt = w.psqt;
+
+        // store white table as-is
+        psqt_white_.assign(w.psqt.begin(), w.psqt.end());
+
+        // prepare black-mirrored table same size
+        psqt_black_.assign(w.psqt.size(), 0);
+
+        // Mirror each 64-square slice vertically (rank flip)
+        // layout: bucket * 384 + piece * 64 + square (sq in [0..63])
+        const int total = static_cast<int>(w.psqt.size());
+        for (int idx = 0; idx < total; ++idx) {
+            int sq   = idx % 64;
+            int base = idx - sq; // start index of the 64-slice
+
+            int rank = sq / 8;
+            int file = sq % 8;
+            int mirror_sq = (7 - rank) * 8 + file; // vertical flip (rank -> 7-rank)
+
+            psqt_black_[base + sq] = w.psqt[base + mirror_sq];
+        }
+    } else {
+        // no psqt provided — clear internal copies
+        psqt_white_.clear();
+        psqt_black_.clear();
     }
-    if (w.mobility_weights.size() == 6) w_.mobility_weights = w.mobility_weights;
+
+    // --- other weights (preserve existing behavior) ---
+    if (w.mobility_weights.size() == 6)  w_.mobility_weights = w.mobility_weights;
     if (w.tactical_weights.size() == 18) w_.tactical_weights = w.tactical_weights;
-    if (w.king_weights.size() == 3) w_.king_weights = w.king_weights;
-    w_.stm_bias = w.stm_bias;
+    if (w.king_weights.size() == 3)      w_.king_weights = w.king_weights;
+
+    // copy scalars
+    w_.stm_bias    = w.stm_bias;
     w_.global_scale = w.global_scale;
 }
+
 
 // --- helpers -----------------------------------------
 int Evaluator::piece_char_to_index(char ch, bool &is_white, bool &is_piece) {
@@ -142,9 +176,8 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 
         // PSQT: layout = 4 * 384 entries (bucket * 384 + pidx*64 + sq)
         int base_idx = bucket * 384 + pidx * 64 + sq;
-        int psqt_val = 0;
-        if (base_idx >= 0 && base_idx < (int)w_.psqt.size()) psqt_val = w_.psqt[base_idx];
-        psqt_cp += (is_white ? psqt_val : -psqt_val);
+        int psqt_val = is_white ? psqt_white_[base_idx] : psqt_black_[base_idx];
+        psqt_cp += psqt_val;
     }
 
     // --- prepare per-piece-type bitboards for quick checks & occ by color ---

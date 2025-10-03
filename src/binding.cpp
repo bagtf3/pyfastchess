@@ -51,17 +51,13 @@ static pybind11::array_t<uint8_t> board_planes_conv(const backend::Board& b) {
         }
     }
 
-    // -----------------------
     // 13th plane: side to move
-    // -----------------------
     bool white_to_move = (b.side_to_move() == "w");  // or directly Color check
     for (int r = 0; r < 8; ++r)
         for (int c = 0; c < 8; ++c)
             a(r, c, 12) = white_to_move ? 1 : 0;
 
-    // -----------------------
     // 14th plane: castling rights encoded as 4 quadrants
-    // -----------------------
     std::string castling = b.castling_rights(); // e.g. "KQkq" or "-"
     bool wk = castling.find('K') != std::string::npos;
     bool wq = castling.find('Q') != std::string::npos;
@@ -82,7 +78,6 @@ static pybind11::array_t<uint8_t> board_planes_conv(const backend::Board& b) {
     return arr;
 }
 
-// At the top of binding.cpp with your other helpers
 static pybind11::array_t<uint8_t>
 stacked_planes(const backend::Board& b, int num_frames=5) {
     namespace py = pybind11;
@@ -109,6 +104,34 @@ stacked_planes(const backend::Board& b, int num_frames=5) {
         if (!temp.unmake()) break;  // stop if no more history
     }
     return arr;
+}
+
+static py::tuple board_qsearch_wrapper(backend::Board &b,
+                                       int alpha,
+                                       int beta,
+                                       evaluator::Evaluator &ev,
+                                       py::object qopts_py = py::none()) {
+    backend::QOptions opts;
+    if (!qopts_py.is_none() && py::isinstance<py::dict>(qopts_py)) {
+        py::dict d = qopts_py.cast<py::dict>();
+        if (d.contains("max_qply"))     opts.max_qply      = d["max_qply"].cast<int>();
+        if (d.contains("max_qcaptures"))opts.max_qcaptures = d["max_qcaptures"].cast<int>();
+        if (d.contains("qdelta"))       opts.qdelta        = d["qdelta"].cast<int>();
+        if (d.contains("time_limit_ms"))opts.time_limit_ms = d["time_limit_ms"].cast<int>();
+        if (d.contains("node_limit"))   opts.node_limit    = d["node_limit"].cast<uint64_t>();
+    }
+
+    auto res = b.qsearch(alpha, beta, &ev, opts);
+    int score = res.first;
+    backend::QStats st = res.second;
+
+    py::dict pd;
+    pd["qnodes"] = st.qnodes;
+    pd["max_qply_seen"] = st.max_qply_seen;
+    pd["captures_considered"] = st.captures_considered;
+    pd["time_used_ms"] = st.time_used_ms;
+
+    return py::make_tuple(score, pd);
 }
 
 PYBIND11_MODULE(_core, m) {
@@ -171,7 +194,7 @@ PYBIND11_MODULE(_core, m) {
           .def("is_game_over", &backend::Board::is_game_over,
                "Return (reason, result) strings for game over status; "
                "('none','none') if the game is not over.")
-               
+          .def("is_terminal", &backend::Board::is_terminal, "Return True if the game is over")
           .def("history_size", &backend::Board::history_size)
           .def("history_uci",  &backend::Board::history_uci)
           .def("clear_history", &backend::Board::clear_history)
@@ -229,6 +252,9 @@ PYBIND11_MODULE(_core, m) {
           .def("piece_color_at", &backend::Board::piece_color_at)
           .def("attackers_u64", &backend::Board::attackers_u64, py::arg("color"), py::arg("square_index"))
           .def("attackers_list", &backend::Board::attackers_list, py::arg("color"), py::arg("square_index"))
+          .def("qsearch", &board_qsearch_wrapper,
+               py::arg("alpha"), py::arg("beta"), py::arg("evaluator"), py::arg("qopts") = py::none(),
+               "Run native qsearch: returns (score_cp, qstats_dict)")
      ;
      py::class_<PriorConfig>(m, "PriorConfig")
           .def(py::init<>())

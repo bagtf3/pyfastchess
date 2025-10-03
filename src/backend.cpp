@@ -1,12 +1,16 @@
-#include "backend.hpp"
 #include "chess.hpp" 
+#include "backend.hpp"
+#include "evaluator.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
 #include <string>
-#include <cctype>   // tolower
-
 #include <cstdint>
+#include <cctype>
+#include <algorithm>
+#include <chrono>
+#include <utility>
+
 #ifdef _MSC_VER
   #include <intrin.h>
 #endif
@@ -191,6 +195,11 @@ bool backend::Board::gives_checkmate(const std::string& uci) const {
 std::pair<std::string, std::string> Board::is_game_over() const {
     auto pr = board_.isGameOver(); // pair<GameResultReason, GameResult>
     return { reason_to_string(pr.first), result_to_string(pr.second) };
+}
+
+bool Board::is_terminal() const {
+    auto [reason, result] = this->is_game_over();
+    return reason != "none";
 }
 
 size_t Board::history_size() const { return history_.size(); }
@@ -402,6 +411,110 @@ std::vector<int> Board::attackers_list(const std::string& color, int square_inde
         mask &= mask - 1ULL;
     }
     return out;
+}
+
+std::pair<int, backend::QStats> Board::qsearch(int alpha, int beta,
+                                               evaluator::Evaluator* ev,
+                                               const QOptions& opts) {
+    QStats stats;
+    using clk = std::chrono::steady_clock;
+    auto start = clk::now();
+
+    int score = this->qsearch_impl(alpha, beta, 0, ev, opts, stats, start);
+
+    stats.time_used_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            clk::now() - start).count()
+    );
+
+    return { score, stats };
+}
+
+// member recursive implementation: has direct access to this-> internals
+int Board::qsearch_impl(int alpha, int beta, int ply,
+                        evaluator::Evaluator* ev,
+                        const QOptions &opts,
+                        QStats &stats,
+                        const std::chrono::steady_clock::time_point &start) {
+    using clk = std::chrono::steady_clock;
+
+    ++stats.qnodes;
+    if (ply > stats.max_qply_seen) stats.max_qply_seen = ply;
+
+    // optional ply cap
+    if (opts.max_qply && ply >= opts.max_qply) {
+        return ev ? ev->evaluate(*this) : this->material_count();
+    }
+
+    // time cutoff
+    if (opts.time_limit_ms) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            clk::now() - start).count();
+        if (elapsed > opts.time_limit_ms) {
+            return ev ? ev->evaluate(*this) : this->material_count();
+        }
+    }
+
+    // node limit cutoff
+    if (opts.node_limit && (uint64_t)stats.qnodes >= opts.node_limit) {
+        return ev ? ev->evaluate(*this) : this->material_count();
+    }
+
+    int stand = ev ? ev->evaluate(*this) : this->material_count();
+
+    if (stand >= beta) return stand;
+    if (alpha < stand) alpha = stand;
+
+    if (this->is_terminal()) return stand;
+
+    // collect captures and score via mvvlva
+    auto moves = this->legal_moves();
+    std::vector<std::pair<int, std::string>> scored;
+    scored.reserve(moves.size());
+    for (const auto &m : moves) {
+        if (this->is_capture(m)) scored.emplace_back(this->mvvlva(m), m);
+    }
+
+    if (scored.empty()) return stand;
+
+    std::sort(scored.begin(), scored.end(),
+              [](const auto &a, const auto &b){ return a.first > b.first; });
+
+    size_t max_c = scored.size();
+    if ((size_t)opts.max_qcaptures < max_c) max_c = opts.max_qcaptures;
+    stats.captures_considered += static_cast<int>(max_c);
+
+    int best = stand;
+
+    for (size_t i = 0; i < max_c; ++i) {
+        const std::string &mv = scored[i].second;
+
+        if (!this->push_uci(mv)) continue;
+
+        int sc = -this->qsearch_impl(-beta, -alpha, ply + 1, ev, opts, stats, start);
+
+        this->unmake();
+
+        if (sc >= beta) return sc;
+        if (sc > best) {
+            best = sc;
+            if (sc > alpha) alpha = sc;
+        }
+
+        // re-check time/node inside loop
+        if (opts.time_limit_ms) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                clk::now() - start).count();
+            if (elapsed > opts.time_limit_ms) {
+                return ev ? ev->evaluate(*this) : this->material_count();
+            }
+        }
+        if (opts.node_limit && (uint64_t)stats.qnodes >= opts.node_limit) {
+            return ev ? ev->evaluate(*this) : this->material_count();
+        }
+    }
+
+    return best;
 }
 
 } // namespace backend

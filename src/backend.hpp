@@ -3,9 +3,28 @@
 #include <vector>
 #include <tuple>
 #include <stdexcept>
-#include "chess.hpp"  // whatever header exposes chess::Board, Move, etc.
+#include <cstdint>
+#include <chrono>
+#include "chess.hpp"
+
+namespace evaluator { class Evaluator; } 
 
 namespace backend {
+
+struct QOptions {
+    int max_qply = 64;         // max quiescence ply to explore
+    int max_qcaptures = 512;   // max total captures to consider (safety)
+    int qdelta = 0;            // optional delta threshold (unused initially)
+    int time_limit_ms = 0;     // 0 => no time limit
+    uint64_t node_limit = 0;   // 0 => no limit
+};
+
+struct QStats {
+    int qnodes = 0;            // number of q-nodes visited
+    int max_qply_seen = 0;
+    int captures_considered = 0;
+    int time_used_ms = 0;
+};
 
 class Board {
 public:
@@ -41,6 +60,7 @@ public:
     bool gives_check(const std::string& uci) const;
     bool gives_checkmate(const std::string& uci) const;
     std::pair<std::string, std::string> is_game_over() const;
+    bool is_terminal() const;
     size_t history_size() const;
     std::vector<std::string> history_uci() const;
     void clear_history();  // optional
@@ -65,6 +85,10 @@ public:
     std::vector<int> attackers_list(const std::string& color, int square) const;
     // expose raw chess board if you want direct access:
     const chess::Board& raw_board() const { return board_; }
+
+    // run a quiescence search rooted at this board, mutating this board via push/unmake
+    // returns pair(score_cp, stats)
+    std::pair<int, QStats> qsearch(int alpha, int beta, evaluator::Evaluator* ev, const QOptions& opts);
     
 private:
     static std::string color_to_char(chess::Color c);
@@ -72,7 +96,13 @@ private:
     static std::string result_to_string(chess::GameResult g);
 
     chess::Board board_{};
-    std::vector<chess::Move> history_;  // <-- ADDED
+    std::vector<chess::Move> history_;
+
+    // recursive quiescence implementation used by Board::qsearch
+    int qsearch_impl(int alpha, int beta, int ply, evaluator::Evaluator* ev,
+                    const QOptions &opts, QStats &stats,
+                    const std::chrono::steady_clock::time_point &start);
+
 };
 
 } // namespace backend
