@@ -172,8 +172,9 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 
         // PSQT: layout = 4 * 384 entries (bucket * 384 + pidx*64 + sq)
         int base_idx = bucket * 384 + pidx * 64 + sq;
-        int psqt_val = is_white ? psqt_white_[base_idx] : psqt_black_[base_idx];
-        psqt_cp += psqt_val;
+        int val = is_white ? psqt_white_[base_idx] : psqt_black_[base_idx];
+        psqt_cp += is_white ? val : -val;
+
     }
 
     // --- prepare per-piece-type bitboards for quick checks & occ by color ---
