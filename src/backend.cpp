@@ -462,14 +462,24 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         return ev ? ev->evaluate(*this) : this->material_count();
     }
 
+    // Stand value is white-POV (Evaluator returns white-positive)
     int stand = ev ? ev->evaluate(*this) : this->material_count();
 
-    if (stand >= beta) return stand;
-    if (alpha < stand) alpha = stand;
+    // Determine which side to move: true => white to move (maximize)
+    const bool stm_white = (this->side_to_move() == "w");
+
+    // Immediate alpha/beta checks use white-POV semantics
+    if (stm_white) {
+        if (stand >= beta) return stand;
+        if (alpha < stand) alpha = stand;
+    } else {
+        if (stand <= alpha) return stand;
+        if (beta > stand) beta = stand;
+    }
 
     if (this->is_terminal()) return stand;
 
-    // collect captures and score via mvvlva
+    // collect captures and score via mvvlva (same ordering as before)
     auto moves = this->legal_moves();
     std::vector<std::pair<int, std::string>> scored;
     scored.reserve(moves.size());
@@ -486,6 +496,8 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     if ((size_t)opts.max_qcaptures < max_c) max_c = opts.max_qcaptures;
     stats.captures_considered += static_cast<int>(max_c);
 
+    // best starts at stand (white-POV). We will either increase it (white stm)
+    // or decrease it (black stm).
     int best = stand;
 
     for (size_t i = 0; i < max_c; ++i) {
@@ -493,14 +505,25 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
 
         if (!this->push_uci(mv)) continue;
 
-        int sc = -this->qsearch_impl(-beta, -alpha, ply + 1, ev, opts, stats, start);
+        // recurse **without** negation: we keep white-POV throughout
+        int sc = this->qsearch_impl(alpha, beta, ply + 1, ev, opts, stats, start);
 
         this->unmake();
 
-        if (sc >= beta) return sc;
-        if (sc > best) {
-            best = sc;
-            if (sc > alpha) alpha = sc;
+        if (stm_white) {
+            // maximizing node semantics
+            if (sc >= beta) return sc;
+            if (sc > best) {
+                best = sc;
+                if (sc > alpha) alpha = sc;
+            }
+        } else {
+            // minimizing node semantics
+            if (sc <= alpha) return sc;
+            if (sc < best) {
+                best = sc;
+                if (sc < beta) beta = sc;
+            }
         }
 
         // re-check time/node inside loop
