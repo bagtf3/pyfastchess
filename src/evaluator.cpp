@@ -61,6 +61,10 @@ void Evaluator::configure(const Weights& w) {
     w_.global_scale = w.global_scale;
 }
 
+bool Evaluator::is_configured() const {
+    // Evaluator::configure populates psqt_white_. If empty => not configured.
+    return !psqt_white_.empty();
+}
 
 // --- helpers -----------------------------------------
 int Evaluator::piece_char_to_index(char ch, bool &is_white, bool &is_piece) {

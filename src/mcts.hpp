@@ -73,9 +73,10 @@ struct MCTSNode {
 
 class MCTSTree {
 public:
+    // Require an evaluator at construction time (fail-fast in ctor if null / unconfigured).
     explicit MCTSTree(const backend::Board& root_board,
-         float c_puct,
-         std::shared_ptr<evaluator::Evaluator> evaluator);
+                      float c_puct,
+                      std::shared_ptr<evaluator::Evaluator> evaluator);
 
     // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
     // and return the leaf. Stores the chosen path internally for apply_result().
@@ -106,18 +107,13 @@ public:
     std::vector<ChildDetail> root_child_details() const;
     std::pair<float,int>     depth_stats() const; // (avg_depth_by_visits, max_depth)
     
-    // The provided evaluator must be non-null and configured; otherwise throws.
+    // Optional runtime updater (you can keep it but if you never swap evaluators it's unused)
     void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
-
-    // Return a shared_ptr copy of the current evaluator (atomic load).
     std::shared_ptr<evaluator::Evaluator> get_evaluator() const;
 
-    backend::QOptions qopts_shallow_;   // prebuilt once in ctor
+    // Prebuilt shallow QOptions used by collect_one_leaf (initialized in ctor)
+    backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
-
-    MCTSTree(const backend::Board& root_board,
-        float c_puct,
-        std::shared_ptr<Evaluator> evaluator = nullptr);
 
 private:
     std::unique_ptr<MCTSNode> root_;
@@ -131,10 +127,13 @@ private:
     // Ownership to keep evaluator alive for lifetime of tree:
     std::shared_ptr<evaluator::Evaluator> evaluator_;
 
-    // Fast raw pointer for hot path (non-owning)
+    // Fast raw pointer for hot path (non-owning). Set in ctor for zero-cost hot calls.
     evaluator::Evaluator* evaluator_raw_ = nullptr;
-    float vprime_scale_ = 1500.0f;   
+
+    // Tunable scale for cp -> [-1,1] mapping
+    float vprime_scale_ = 1500.0f;
 };
+
 
 // --------- Helpers ---------
 

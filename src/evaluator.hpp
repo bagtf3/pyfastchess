@@ -24,6 +24,7 @@ class Evaluator {
 public:
     Evaluator();
     void configure(const Weights& w);
+    bool is_configured() const;
     int evaluate(const backend::Board& b) const;
     std::tuple<int,int,int,int,int,int> evaluate_itemized(
         const backend::Board& b) const;
