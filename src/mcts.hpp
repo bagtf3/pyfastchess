@@ -1,5 +1,4 @@
 #pragma once
-
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -7,7 +6,9 @@
 #include <vector>
 #include <optional>
 #include <cmath>
+#include <memory>
 #include "backend.hpp"
+#include "evaluator.hpp"
 
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
@@ -44,7 +45,6 @@ struct MCTSNode {
     float v_prime         = 0.0f;   // was qprime (white POV)
     int   vprime_visits   = 0;      // was qprime_visits
 
-
     // --- Priors / children ---
     // P: move -> prior (root stores priors for its children)
     std::unordered_map<std::string, float> P;
@@ -73,7 +73,9 @@ struct MCTSNode {
 
 class MCTSTree {
 public:
-    explicit MCTSTree(const backend::Board& root_board, float c_puct);
+    explicit MCTSTree(const backend::Board& root_board,
+         float c_puct,
+         std::shared_ptr<evaluator::Evaluator> evaluator);
 
     // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
     // and return the leaf. Stores the chosen path internally for apply_result().
@@ -103,6 +105,19 @@ public:
 
     std::vector<ChildDetail> root_child_details() const;
     std::pair<float,int>     depth_stats() const; // (avg_depth_by_visits, max_depth)
+    
+    // The provided evaluator must be non-null and configured; otherwise throws.
+    void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
+
+    // Return a shared_ptr copy of the current evaluator (atomic load).
+    std::shared_ptr<evaluator::Evaluator> get_evaluator() const;
+
+    backend::QOptions qopts_shallow_;   // prebuilt once in ctor
+    static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
+
+    MCTSTree(const backend::Board& root_board,
+        float c_puct,
+        std::shared_ptr<Evaluator> evaluator = nullptr);
 
 private:
     std::unique_ptr<MCTSNode> root_;
@@ -112,6 +127,13 @@ private:
 
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
+
+    // Ownership to keep evaluator alive for lifetime of tree:
+    std::shared_ptr<evaluator::Evaluator> evaluator_;
+
+    // Fast raw pointer for hot path (non-owning)
+    evaluator::Evaluator* evaluator_raw_ = nullptr;
+    float vprime_scale_ = 1500.0f;   
 };
 
 // --------- Helpers ---------

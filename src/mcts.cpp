@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
-
+#include <atomic>  
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -46,13 +46,34 @@ std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
 
 // ------------------------- MCTSTree -------------------------
 
-MCTSTree::MCTSTree(const backend::Board& root_board, float c_puct)
-    : root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
-      c_puct_(c_puct) {}
+// mcts.cpp (constructor)
+MCTSTree::MCTSTree(const backend::Board& root_board,
+                   float c_puct,
+                   std::shared_ptr<evaluator::Evaluator> evaluator)
+  : root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
+    c_puct_(c_puct),
+    evaluator_(std::move(evaluator)),
+    evaluator_raw_(nullptr)
+{
+    if (!evaluator_) {
+        throw std::runtime_error("MCTSTree ctor: evaluator must not be null");
+    }
+    if (!evaluator_->is_configured()) {
+        throw std::runtime_error("MCTSTree ctor: evaluator not configured");
+    }
+
+    // stash raw pointer for fastest access in hot-path
+    evaluator_raw_ = evaluator_.get();
+
+    // prebuild QOptions once
+    qopts_shallow_.max_qply = 3;
+    qopts_shallow_.max_qcaptures = 5;
+    qopts_shallow_.time_limit_ms = 1;
+}
+
 
 // Walk to a leaf; add virtual losses along the path (including root),
 // return leaf; keep the path for apply_result() to pop vloss & backup.
-// Mirrors your Python flow (select until !expanded or no children; vloss++; push ucis).
 MCTSNode* MCTSTree::collect_one_leaf() {
     last_path_.clear();
     MCTSNode* node = root_.get();
@@ -92,15 +113,23 @@ MCTSNode* MCTSTree::collect_one_leaf() {
     // Fresh non-terminal leaf: expand with uniform priors and start V'
     expand_with_uniform_priors(node);
 
-    const bool stm_white = (node->board.side_to_move() == "w");
-    node->v_prime        = stm_white ? -1.0f :  1.0f;  // white POV worst-case
-    node->has_vprime     = true;
-    node->vprime_visits  = 1;
-    node->is_expanded    = true;
+    // shallow qsearch using non-owning raw pointer
+    int alpha = -MCTSTree::VALUE_MATE_CP;
+    int beta  =  MCTSTree::VALUE_MATE_CP;
 
+    // use evaluator_raw_ directly
+    auto qres = node->board.qsearch(alpha, beta, evaluator_raw_, qopts_shallow_);
+    int cp = qres.first;
+
+    float vprime = std::clamp(static_cast<float>(cp) / vprime_scale_, -1.0f, 1.0f);
+    node->v_prime = vprime;
+    node->has_vprime = true;
+    node->vprime_visits = 1;
+    node->is_expanded = true;
     back_up_along_path(node, node->v_prime, /*add_visit=*/true);
-    return node;
 
+    return node;
+    
 }
 
 void MCTSTree::apply_result(
@@ -285,6 +314,23 @@ std::pair<float,int> MCTSTree::depth_stats() const {
     }
     float avg = (total_v > 0) ? (sum_vd / total_v) : 0.0f;
     return {avg, dmax};
+}
+
+// Atomically swap in a new evaluator. Thread-safe.
+void MCTSTree::set_evaluator(std::shared_ptr<evaluator::Evaluator> ev) {
+    if (!ev) {
+        throw std::runtime_error("MCTSTree::set_evaluator: ev must not be null");
+    }
+    if (!ev->is_configured()) {
+        throw std::runtime_error("MCTSTree::set_evaluator: evaluator is not configured");
+    }
+    // Atomic store to evaluator_ (lock-free for shared_ptr)
+    std::atomic_store(&evaluator_, ev);
+}
+
+// Atomic load accessor
+std::shared_ptr<evaluator::Evaluator> MCTSTree::get_evaluator() const {
+    return std::atomic_load(&evaluator_);
 }
 
 // ------------------------- Helpers -------------------------

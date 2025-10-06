@@ -371,7 +371,13 @@ PYBIND11_MODULE(_core, m) {
                     << ">";
                return oss.str();
           })
-          .def(py::init<const backend::Board&, float>(), py::arg("board"), py::arg("c_puct") = 1.5f)
+          .def(py::init([](const backend::Board& board, float c_puct,
+               std::shared_ptr<evaluator::Evaluator> ev) {
+               if (!ev) throw std::runtime_error("Evaluator must not be null");
+               if (!ev->is_configured()) throw std::runtime_error("Evaluator is not configured");
+               return new MCTSTree(board, c_puct, ev);
+          }),
+               py::arg("board"), py::arg("c_puct") = 1.5f, py::arg("evaluator"))
           .def("collect_one_leaf",
                &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
