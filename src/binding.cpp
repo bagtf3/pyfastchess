@@ -453,7 +453,7 @@ PYBIND11_MODULE(_core, m) {
           .def_readwrite("stm_bias", &evaluator::Weights::stm_bias)
           .def_readwrite("global_scale", &evaluator::Weights::global_scale);
 
-     py::class_<evaluator::Evaluator>(m, "Evaluator")
+     py::class_<evaluator::Evaluator, std::shared_ptr<evaluator::Evaluator>>(m, "Evaluator")
           .def(py::init<>())
           .def("configure", [](evaluator::Evaluator &ev, py::object wobj) {
                // Accept either EvalWeights instance or a tuple/dict from Python.
