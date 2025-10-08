@@ -479,19 +479,39 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
 
     if (this->is_terminal()) return stand;
 
-    // collect captures and score via mvvlva (same ordering as before)
+    // Build candidate move list:
+    // - if in check: all legal moves (evasions)
+    // - else: only captures, checks, and promotions (stop at quiet)
     auto moves = this->legal_moves();
     std::vector<std::pair<int, std::string>> scored;
     scored.reserve(moves.size());
+
+    const bool in_check = this->in_check();
+
     for (const auto &m : moves) {
-        if (this->is_capture(m)) scored.emplace_back(this->mvvlva(m), m);
+        // score values chosen to keep captures highest, then promotions, then checks
+        if (in_check) {
+            // when in check, every legal move is an evasion we must consider
+            scored.emplace_back(0, m);
+        } else {
+            // not in check: only interested in tactical moves (captures, promos, checks)
+            if (this->is_capture(m)) {
+                scored.emplace_back(this->mvvlva(m), m);
+            } else if (m.size() > 4) { // promotion UCI has 5th char
+                scored.emplace_back(1000, m);
+            } else if (this->gives_check(m)) {
+                scored.emplace_back(0, m);
+            }
+        }
     }
 
-    if (scored.empty()) return stand;
+    if (scored.empty()) return stand; // quiet node (or no evasions found)
 
+    // sort candidates descending by score
     std::sort(scored.begin(), scored.end(),
               [](const auto &a, const auto &b){ return a.first > b.first; });
 
+    // cap by configured max candidates to examine
     size_t max_c = scored.size();
     if ((size_t)opts.max_qcaptures < max_c) max_c = opts.max_qcaptures;
     stats.captures_considered += static_cast<int>(max_c);
@@ -541,6 +561,7 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
 
     return best;
 }
+
 
 std::vector<std::pair<int, std::string>> Board::ordered_moves(const std::optional<std::string>& tt_best) const {
     std::vector<std::pair<int, std::string>> out;

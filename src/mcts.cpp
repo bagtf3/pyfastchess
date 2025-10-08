@@ -68,8 +68,8 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
 
     // prebuild QOptions once
     qopts_shallow_.max_qply = 3;
-    qopts_shallow_.max_qcaptures = 5;
-    qopts_shallow_.time_limit_ms = 1;
+    qopts_shallow_.max_qcaptures = 8;
+    qopts_shallow_.time_limit_ms = 2;
 }
 
 
