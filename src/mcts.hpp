@@ -152,10 +152,6 @@ priors_from_heads(const backend::Board& board,
                   const std::vector<float>& p_promo,
                   float mix = 0.5f);
 
-// Simple terminal eval in white-POV, mirroring your Python utility:
-//   None -> std::optional<float>() empty; win=+1, loss=-1, draw=0
-std::optional<float> terminal_value_white_pov(const backend::Board& b);
-
 struct FloatView {
     const float* data;
     size_t size;

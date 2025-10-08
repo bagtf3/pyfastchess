@@ -269,6 +269,13 @@ PYBIND11_MODULE(_core, m) {
           }, py::arg("tt_best") = py::none(),
                "Return list of (score, uci_move) sorted descending. tt_best optional UCI string")
      ;
+          m.def("terminal_value_white_pov",
+               [](const backend::Board& b) -> py::object {
+                    auto v = terminal_value_white_pov(b);
+                    if (v.has_value()) return py::float_(*v);
+                    return py::none();
+               },
+               py::arg("board"));
      py::class_<PriorConfig>(m, "PriorConfig")
           .def(py::init<>())
           .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
@@ -434,14 +441,6 @@ PYBIND11_MODULE(_core, m) {
                py::arg("p_piece"),
                py::arg("p_promo"),
                py::arg("mix") = 0.5f);
-     
-     m.def("terminal_value_white_pov",
-      [](const backend::Board& b) -> py::object {
-          auto v = terminal_value_white_pov(b);
-          if (v.has_value()) return py::float_(*v);
-          return py::none();
-      },
-      py::arg("board"));
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())

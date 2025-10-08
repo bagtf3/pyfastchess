@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <chrono>
+#include <optional>
 #include "chess.hpp"
 
 namespace evaluator { class Evaluator; } 
@@ -89,10 +90,11 @@ public:
     // run a quiescence search rooted at this board, mutating this board via push/unmake
     // returns pair(score_cp, stats)
     std::pair<int, QStats> qsearch(int alpha, int beta, evaluator::Evaluator* ev, const QOptions& opts);
-    
+
     // returns vector of (score, uci_move) sorted descending by score
     // tt_best is optional UCI string (transposition-table best move) — pass empty optional for none
-    std::vector<std::pair<int, std::string>> ordered_moves(const std::optional<std::string>& tt_best = std::nullopt) const;
+    std::vector<std::pair<int, std::string>> ordered_moves(
+        const std::optional<std::string>& tt_best = std::nullopt) const;
 
     
 private:
@@ -109,5 +111,12 @@ private:
                     const std::chrono::steady_clock::time_point &start);
 
 };
+
+// Normalized: -1 (white losing), 0 (draw), +1 (white winning).
+std::optional<float>terminal_value_white_pov(const Board& b) noexcept;
+
+// Centipawn-scaled: returns ±mate_cp or 0 for draws.
+std::optional<int>
+terminal_value_cp_white_pov(const Board& b, int mate_cp = 32000) noexcept;
 
 } // namespace backend

@@ -1,8 +1,9 @@
 #include "mcts.hpp"
+#include "backend.hpp"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
-#include <atomic>  
+#include <atomic>
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -95,7 +96,7 @@ MCTSNode* MCTSTree::collect_one_leaf() {
     }
 
     // Fresh terminal?
-    if (auto tv = terminal_value_white_pov(node->board)) {
+    if (auto tv = backend::terminal_value_white_pov(node->board)) {
         node->is_terminal = true;
         node->value = *tv;
         node->is_expanded = true;
@@ -475,17 +476,4 @@ PriorEngine::build(const backend::Board& board,
         for (auto& mp : pri) mp.second = u;
     }
     return pri;
-}
-
-std::optional<float> terminal_value_white_pov(const backend::Board& b) {
-    auto [reason, result] = b.is_game_over();
-    if (reason == "none") return std::nullopt;
-    if (reason == "checkmate") {
-        // winner is the side who just delivered mate; stm is now the loser
-        const bool stm_white = (b.side_to_move() == "w");
-        const bool white_wins = !stm_white;
-        return white_wins ? 1.0f : -1.0f;
-    }
-    // stalemate / repetition / 50mr / insufficient material → draw
-    return 0.0f;
 }

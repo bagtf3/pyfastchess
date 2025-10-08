@@ -569,4 +569,26 @@ std::vector<std::pair<int, std::string>> Board::ordered_moves(const std::optiona
     return out;
 }
 
+std::optional<float>
+terminal_value_white_pov(const Board& b) noexcept {
+    auto [reason, result] = b.is_game_over();
+    if (reason == "none") return std::nullopt;
+    if (reason == "checkmate") {
+        // winner is the side who just delivered mate; stm is now the loser
+        const bool stm_white  = (b.side_to_move() == "w");
+        const bool white_wins = !stm_white;
+        return white_wins ? 1.0f : -1.0f;   // white-POV
+    }
+    // stalemate / repetition / 50mr / insufficient material → draw
+    return 0.0f;
+}
+
+std::optional<int>
+terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
+    auto n = terminal_value_white_pov(b);
+    if (!n) return std::nullopt;
+    // n ∈ {-1,0,+1}
+    return static_cast<int>(*n * mate_cp);
+}
+
 } // namespace backend
