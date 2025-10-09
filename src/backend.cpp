@@ -462,6 +462,11 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         return ev ? ev->evaluate(*this) : this->material_count();
     }
 
+    // terminal check
+    if (auto tv = terminal_value_cp_white_pov(*this, 32000)) {
+        return *tv;
+    }
+
     // Stand value is white-POV (Evaluator returns white-positive)
     int stand = ev ? ev->evaluate(*this) : this->material_count();
 
@@ -476,8 +481,6 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         if (stand <= alpha) return stand;
         if (beta > stand) beta = stand;
     }
-
-    if (this->is_terminal()) return stand;
 
     // Build candidate move list:
     // - if in check: all legal moves (evasions)

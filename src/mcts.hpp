@@ -120,7 +120,6 @@ private:
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
-
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
 

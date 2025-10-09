@@ -20,7 +20,6 @@ std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
 
     // Typical PUCT uses parent's visits to scale U
     const float sumN = static_cast<float>(std::max(1, N));
-
     const bool stm_white = (board.side_to_move() == "w");
 
     std::pair<std::string, MCTSNode*> best = {"", nullptr};
