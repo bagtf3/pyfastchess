@@ -316,6 +316,43 @@ std::pair<float,int> MCTSTree::depth_stats() const {
     return {avg, dmax};
 }
 
+std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
+    std::vector<PVItem> pv;
+    const MCTSNode* node = root_.get();
+    if (!node || max_len <= 0) return pv;
+
+    pv.reserve((size_t)max_len);
+
+    for (int depth = 0; depth < max_len; ++depth) {
+        if (node->children.empty()) break;
+
+        // pick child with max visits
+        const std::string* best_mv = nullptr;
+        const MCTSNode*    best_ch = nullptr;
+        int best_N = -1;
+
+        for (const auto& kv : node->children) {
+            const std::string& mv = kv.first;
+            const MCTSNode* ch   = kv.second.get();
+            const int N = ch ? ch->N : 0;
+            if (N > best_N) {
+                best_N  = N;
+                best_mv = &mv;
+                best_ch = ch;
+            }
+        }
+        if (!best_mv || best_N <= 0 || !best_ch) break; // stop if no *visited* child
+
+        // read parent's prior for the chosen move (0 if absent)
+        float prior = 0.0f;
+        if (auto it = node->P.find(*best_mv); it != node->P.end()) prior = it->second;
+        pv.push_back(PVItem{*best_mv, best_N, prior, best_ch->Q});
+
+        node = best_ch; // descend
+    }
+    return pv;
+}
+
 // Atomically swap in a new evaluator. Thread-safe.
 void MCTSTree::set_evaluator(std::shared_ptr<evaluator::Evaluator> ev) {
     if (!ev) {

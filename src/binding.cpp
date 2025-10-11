@@ -164,6 +164,7 @@ PYBIND11_MODULE(_core, m) {
           .def("would_be_repetition", &backend::Board::would_be_repetition,
                py::arg("uci"), py::arg("count") = 3,
                "True if making this move would create a position repeated ≥ count times.")
+
           .def("side_to_move", &backend::Board::side_to_move,
                "Return 'w' or 'b' for the side to move.")
 
@@ -229,12 +230,10 @@ PYBIND11_MODULE(_core, m) {
           .def("san", &backend::Board::san, py::arg("uci"),
                "Convert a UCI string into SAN for this board's current position.")
           
-          // ... your existing .def(...) calls ...
           .def("get_piece_planes", &board_planes_conv,
                "Return 8x8x12 uint8 NumPy array (channels-last) with piece planes.\n"
                "Plane order: [P,N,B,R,Q,K, p,n,b,r,q,k].")
           
-          // if move history is a model input
           .def("stacked_planes", &stacked_planes,
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
@@ -246,6 +245,7 @@ PYBIND11_MODULE(_core, m) {
           .def("moves_to_labels", &backend::Board::moves_to_labels, py::arg("ucis"),
                "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
                "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
+
           .def("piece_at", &backend::Board::piece_at, py::arg("square_index"))
           .def("piece_type_at", &backend::Board::piece_type_at)
           .def("piece_color_at", &backend::Board::piece_color_at)
@@ -254,8 +254,7 @@ PYBIND11_MODULE(_core, m) {
           .def("qsearch", &board_qsearch_wrapper,
                py::arg("alpha"), py::arg("beta"), py::arg("evaluator"), py::arg("qopts") = py::none(),
                "Run native qsearch: returns (score_cp, qstats_dict)")
-
-          // binding.cpp — fix: do not call reserve() on py::list
+          
           .def("ordered_moves", [](backend::Board &b, py::object tt_best_py = py::none()) {
                std::optional<std::string> tt;
                if (!tt_best_py.is_none()) tt = tt_best_py.cast<std::string>();
@@ -266,8 +265,8 @@ PYBIND11_MODULE(_core, m) {
                }
                return out;
           }, py::arg("tt_best") = py::none(),
-               "Return list of (score, uci_move) sorted descending. tt_best optional UCI string")
-     ;
+               "Return list of (score, uci_move) sorted descending. tt_best optional UCI string");
+          
           m.def("terminal_value_white_pov",
                [](const backend::Board& b) -> py::object {
                     auto v = terminal_value_white_pov(b);
@@ -275,6 +274,7 @@ PYBIND11_MODULE(_core, m) {
                     return py::none();
                },
                py::arg("board"));
+
      py::class_<PriorConfig>(m, "PriorConfig")
           .def(py::init<>())
           .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
@@ -292,14 +292,6 @@ PYBIND11_MODULE(_core, m) {
           .def_readwrite("clip_min", &PriorConfig::clip_min)
           .def_readwrite("clip_max", &PriorConfig::clip_max);
 
-     py::class_<ChildDetail>(m, "ChildDetail")
-          .def_readonly("uci",            &ChildDetail::uci)
-          .def_readonly("N",              &ChildDetail::N)
-          .def_readonly("Q",              &ChildDetail::Q)
-          .def_readonly("vprime_visits",  &ChildDetail::vprime_visits)
-          .def_readonly("prior",          &ChildDetail::prior)
-          .def_readonly("is_terminal",    &ChildDetail::is_terminal)
-          .def_readonly("value",          &ChildDetail::value);
      py::class_<PriorEngine>(m, "PriorEngine")
           .def(py::init<const PriorConfig&>(), py::arg("cfg"))
           .def("build",
@@ -329,6 +321,22 @@ PYBIND11_MODULE(_core, m) {
                py::arg("p_from"), py::arg("p_to"),
                py::arg("p_piece"), py::arg("p_promo"),
                py::arg("root_stm"), py::arg("stm_leaf"));
+
+     py::class_<ChildDetail>(m, "ChildDetail")
+          .def_readonly("uci",            &ChildDetail::uci)
+          .def_readonly("N",              &ChildDetail::N)
+          .def_readonly("Q",              &ChildDetail::Q)
+          .def_readonly("vprime_visits",  &ChildDetail::vprime_visits)
+          .def_readonly("prior",          &ChildDetail::prior)
+          .def_readonly("is_terminal",    &ChildDetail::is_terminal)
+          .def_readonly("value",          &ChildDetail::value);
+     
+     py::class_<PVItem>(m, "PVItem")
+          .def_readonly("uci", &PVItem::uci)
+          .def_readonly("visits", &PVItem::visits)
+          .def_readonly("P", &PVItem::P)
+          .def_readonly("Q", &PVItem::Q);
+     
      // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
      py::class_<MCTSNode>(m, "MCTSNode")
           .def("__repr__", [](const MCTSNode& n){
@@ -395,6 +403,7 @@ PYBIND11_MODULE(_core, m) {
                     t.apply_result(node, move_priors, value_white_pov);
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"))
+          
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
@@ -409,6 +418,7 @@ PYBIND11_MODULE(_core, m) {
           })
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
+          .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
           .def_property_readonly("epoch", &MCTSTree::epoch);
 

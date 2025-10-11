@@ -22,6 +22,12 @@ struct ChildDetail {
     float value       = 0.0f;
 };
 
+struct PVItem {
+    std::string uci;
+    int   visits;  // child->N
+    float P;       // parent's prior for this move
+    float Q;       // child->Q (white-POV)
+};
 
 // Forward decl
 class MCTSTree;
@@ -105,8 +111,10 @@ public:
     int  epoch() const { return epoch_; }
 
     std::vector<ChildDetail> root_child_details() const;
-    std::pair<float,int>     depth_stats() const; // (avg_depth_by_visits, max_depth)
+    // (avg_depth_by_visits, max_depth)
+    std::pair<float,int> depth_stats() const;
     
+    std::vector<PVItem> principal_variation(int max_len = 24) const;
     // Optional runtime updater (you can keep it but if you never swap evaluators it's unused)
     void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
     std::shared_ptr<evaluator::Evaluator> get_evaluator() const;
