@@ -72,8 +72,8 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
 }
 
 
-// Walk to a leaf; add virtual losses along the path (including root),
-// return leaf; keep the path for apply_result() to pop vloss & backup.
+// Walk to a leaf; add qsearch vprimes along the path (including root),
+// return leaf; keep the path for apply_result() to pop vprime & backup
 MCTSNode* MCTSTree::collect_one_leaf() {
     last_path_.clear();
     MCTSNode* node = root_.get();
@@ -139,31 +139,36 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // Overwrite priors with NN priors (unchanged)
+    // Overwrite priors with NN priors (unchanged behavior)
     node->P.clear();
     node->P.reserve(move_priors.size());
-    for (const auto& mp : move_priors) node->P.emplace(mp.first, mp.second);
+    for (const auto& mp : move_priors)
+        node->P.emplace(mp.first, mp.second);
 
-    // Total delta to correct all provisional sims made with V'
-    int   k           = node->has_vprime ? std::max(1, node->vprime_visits) : 0;
-    float base        = node->has_vprime ? node->v_prime : node->value;
-    float delta_total = (value_white_pov - base) * static_cast<float>(std::max(1, k));
+    // If we had provisional backups with v′, replace them with V.
+    if (node->has_vprime && node->vprime_visits > 0) {
+        const int   k      = node->vprime_visits;         // exact count of v′ backups
+        const float vprime = node->v_prime;               // placeholder value used
+        const float delta  = (value_white_pov - vprime) * static_cast<float>(k);
 
-    node->value          = value_white_pov;
-    node->has_vprime     = false;
-    node->vprime_visits  = 0;
-
-    // Apply delta along the path; do NOT change N (unchanged)
-    if (delta_total != 0.0f) {
+        // Apply the correction along the path to root; do NOT change N.
         std::vector<MCTSNode*> path;
         for (MCTSNode* p = node; p; p = p->parent) path.push_back(p);
         if (!path.empty() && path.back() == root_.get()) {
             for (auto it = path.rbegin(); it != path.rend(); ++it) {
                 MCTSNode* n = *it;
-                n->W += delta_total;
+                n->W += delta;
                 n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
             }
         }
+
+        // Clear v′ bookkeeping on the leaf where V arrived
+        node->has_vprime    = false;
+        node->vprime_visits = 0;
+        node->value         = value_white_pov;   // cache latest true value
+    } else {
+        // No v′ to replace: just cache the fresh value for introspection.
+        node->value = value_white_pov;
     }
 }
 
