@@ -291,7 +291,6 @@ void MCTSTree::apply_result(
     }
 }
 
-
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
     std::vector<MCTSNode*> path;
     for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
@@ -582,9 +581,6 @@ PriorEngine::build(const backend::Board& board,
                    const std::vector<std::string>& legal,
                    FloatView pfv, FloatView ptv,
                    FloatView pcv, FloatView prv,
-                   const std::string& root_stm,
-                   const std::string& stm_leaf,
-                   int history_size,
                    int piece_count) const {
     std::vector<std::pair<std::string, float>> pri;
     const size_t n = legal.size();
@@ -592,12 +588,11 @@ PriorEngine::build(const backend::Board& board,
 
     const bool endgame = (piece_count <= 14);
     float mix = cfg_.anytime_uniform_mix;
-    if (root_stm != stm_leaf) mix = cfg_.opponent_uniform_mix;
-    else if (endgame)         mix = cfg_.endgame_uniform_mix;
+    if (endgame) mix = cfg_.endgame_uniform_mix;
 
     pri = priors_from_heads_views(board, legal, pfv, ptv, pcv, prv, mix);
 
-    if (cfg_.use_prior_boosts && history_size > 10) {
+    if (cfg_.use_prior_boosts) {
         const float gchk = cfg_.anytime_gives_check;
         const float rep_sub = endgame ? cfg_.endgame_repetition_sub
                                       : cfg_.anytime_repetition_sub;
@@ -638,3 +633,4 @@ PriorEngine::build(const backend::Board& board,
     }
     return pri;
 }
+

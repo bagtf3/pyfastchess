@@ -178,7 +178,6 @@ struct FloatView {
 struct PriorConfig {
     float anytime_uniform_mix = 0.5f;
     float endgame_uniform_mix = 0.5f;
-    float opponent_uniform_mix = 0.5f;
 
     bool  use_prior_boosts = true;
     float anytime_gives_check = 0.15f;
@@ -199,13 +198,10 @@ public:
 
     std::vector<std::pair<std::string, float>>
     build(const backend::Board& board,
-          const std::vector<std::string>& legal,
-          FloatView p_from, FloatView p_to,
-          FloatView p_piece, FloatView p_promo,
-          const std::string& root_stm,
-          const std::string& stm_leaf,
-          int history_size,
-          int piece_count) const;
+        const std::vector<std::string>& legal,
+        FloatView p_from, FloatView p_to,
+        FloatView p_piece, FloatView p_promo,
+        int piece_count) const;
 
 private:
     PriorConfig cfg_;

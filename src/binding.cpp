@@ -280,7 +280,6 @@ PYBIND11_MODULE(_core, m) {
           .def(py::init<>())
           .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
           .def_readwrite("endgame_uniform_mix", &PriorConfig::endgame_uniform_mix)
-          .def_readwrite("opponent_uniform_mix", &PriorConfig::opponent_uniform_mix)
           .def_readwrite("use_prior_boosts", &PriorConfig::use_prior_boosts)
           .def_readwrite("anytime_gives_check", &PriorConfig::anytime_gives_check)
           .def_readwrite("anytime_repetition_sub",
@@ -302,9 +301,7 @@ PYBIND11_MODULE(_core, m) {
                     py::array_t<float> p_from,
                     py::array_t<float> p_to,
                     py::array_t<float> p_piece,
-                    py::array_t<float> p_promo,
-                    const std::string& root_stm,
-                    const std::string& stm_leaf) {
+                    py::array_t<float> p_promo) {
                     auto vf = p_from.unchecked<1>();
                     auto vt = p_to.unchecked<1>();
                     auto vp = p_piece.unchecked<1>();
@@ -313,15 +310,12 @@ PYBIND11_MODULE(_core, m) {
                     FloatView ft{vt.data(0), (size_t)vt.shape(0)};
                     FloatView fp{vp.data(0), (size_t)vp.shape(0)};
                     FloatView fr{vr.data(0), (size_t)vr.shape(0)};
-                    return eng.build(board, legal, ff, ft, fp, fr,
-                                        root_stm, stm_leaf,
-                                        board.history_size(),
-                                        board.piece_count());
+                    return eng.build(board, legal, ff, ft, fp, fr, board.piece_count());
                },
                py::arg("board"), py::arg("legal"),
                py::arg("p_from"), py::arg("p_to"),
-               py::arg("p_piece"), py::arg("p_promo"),
-               py::arg("root_stm"), py::arg("stm_leaf"));
+               py::arg("p_piece"), py::arg("p_promo"));
+
 
      py::class_<ChildDetail>(m, "ChildDetail")
           .def_readonly("uci",            &ChildDetail::uci)
