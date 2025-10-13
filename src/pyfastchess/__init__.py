@@ -10,6 +10,8 @@ PriorConfig = _core.PriorConfig
 PriorEngine = _core.PriorEngine
 Evaluator = _core.Evaluator
 EvalWeights = _core.EvalWeights
+cache_stats = _core.cache_stats
+cache_clear = _core.cache_clear
 
 __all__ = [
     "Board",
@@ -20,5 +22,7 @@ __all__ = [
     "PriorConfig",
     "PriorEngine",
     "Evaluator",
-    "EvalWeights"
+    "EvalWeights",
+    "cache_stats",
+    "cache_clear"
 ]

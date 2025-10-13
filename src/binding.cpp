@@ -3,10 +3,11 @@
 #include <pybind11/numpy.h>
 #include <cstdint>
 #include <algorithm>
+#include <sstream>
 #include "backend.hpp"
 #include "mcts.hpp"
 #include "evaluator.hpp"
-#include <sstream>
+#include "cache.hpp"
 
 namespace py = pybind11;
 
@@ -530,4 +531,23 @@ PYBIND11_MODULE(_core, m) {
           .def("get_weights", [](evaluator::Evaluator &ev){
                return ev.get_weights();
           });
+          
+          // Cache stats + clear (thin, atomic/fast reads)
+          m.def("cache_stats", []() {py::dict d;
+               d["size"]     = Cache::instance().size();
+               d["capacity"] = Cache::instance().capacity();
+               d["evictions"]= Cache::instance().evictions();
+               d["queries"]  = Cache::instance().queries();
+               d["hits"]     = Cache::instance().hits();
+               double hit_rate = 0.0;
+               auto q = Cache::instance().queries();
+               if (q) hit_rate = double(Cache::instance().hits()) / double(q);
+                    d["hit_rate"] = hit_rate;
+               return d;
+               }, "Return cache stats as a dict (size, capacity, evictions, queries, hits, hit_rate)");
+
+          m.def("cache_clear", []() {
+               Cache::instance().clear();
+          }, "Clear the cache and reset counters");
+
 }
