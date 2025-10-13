@@ -393,22 +393,30 @@ PYBIND11_MODULE(_core, m) {
                return new MCTSTree(board, c_puct, ev);
           }),
                py::arg("board"), py::arg("c_puct") = 1.5f, py::arg("evaluator"))
-          .def("collect_one_leaf",
-               &MCTSTree::collect_one_leaf,
+               
+          .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
+
+          .def("collect_many_leaves", &MCTSTree::collect_many_leaves,
+               py::arg("n_new"), py::arg("max_fastpath") = 0,
+               py::return_value_policy::reference_internal)
+
+          .def("set_sims_completed_this_move", &MCTSTree::set_sims_completed_this_move)
+          .def("sims_completed_this_move", &MCTSTree::sims_completed_this_move)
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
-                    float value_white_pov) {
-                    t.apply_result(node, move_priors, value_white_pov);
+                    float value_white_pov, bool cache = true) {
+                    t.apply_result(node, move_priors, value_white_pov, cache);
                },
-               py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"))
+               py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
           
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
                return t.root(); }, py::return_value_policy::reference_internal)
+
           .def_property_readonly("root_stm", [](const MCTSTree& t){
                const MCTSNode* r = t.root();
                return r ? r->board.side_to_move() : std::string("?");

@@ -83,16 +83,22 @@ public:
     explicit MCTSTree(const backend::Board& root_board,
                       float c_puct,
                       std::shared_ptr<evaluator::Evaluator> evaluator);
+    
+    void set_sims_completed_this_move(size_t n) { sims_completed_this_move_ = n; }
+    size_t sims_completed_this_move() const { return sims_completed_this_move_; }
 
     // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
     // and return the leaf. Stores the chosen path internally for apply_result().
     MCTSNode* collect_one_leaf();
+    
+    std::tuple<std::vector<MCTSNode*>, size_t, size_t>
+    collect_many_leaves(size_t n_new, size_t max_fastpath = 0);
 
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
     // Also pops virtual losses along the stored path and calls backup().
     void apply_result(MCTSNode* node,
                       const std::vector<std::pair<std::string, float>>& move_priors,
-                      float value_white_pov);
+                      float value_white_pov, bool cache=true);
 
     // Stats from root (sorted by visits descending): [(uci, N), ...]
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -128,6 +134,7 @@ private:
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
+    size_t sims_completed_this_move_ = 0;
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
 
@@ -139,6 +146,7 @@ private:
 
     // Tunable scale for cp -> [-1,1] mapping
     float vprime_scale_ = 1500.0f;
+    
 };
 
 

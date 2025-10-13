@@ -1,12 +1,14 @@
 #pragma once
 #include <unordered_map>
 #include <list>
+#include <mutex>
 #include <cstdint>
 #include <vector>
-#include <cstddef>
+#include <string>
 
 struct CacheEntry {
-    std::vector<float> priors;
+    // store final move priors as (uci, prob) pairs and the value
+    std::vector<std::pair<std::string, float>> priors;
     float value = 0.0f;
 };
 
@@ -33,7 +35,7 @@ public:
     size_t queries() const;
     size_t hits() const;
 
-    static Cache& instance(); // Meyers singleton
+    static Cache& instance(); // singleton
 
 private:
     using ListIt = std::list<uint64_t>::iterator;
