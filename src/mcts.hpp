@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <tuple>
 #include <optional>
 #include <cmath>
 #include <memory>
@@ -91,6 +92,9 @@ public:
     // and return the leaf. Stores the chosen path internally for apply_result().
     MCTSNode* collect_one_leaf();
 
+    std::tuple<std::vector<MCTSNode*>, size_t, size_t, size_t>
+    collect_many_leaves(size_t n_new, size_t n_fastpath);
+
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
     // Also pops virtual losses along the stored path and calls backup().
     void apply_result(MCTSNode* node,
@@ -127,13 +131,17 @@ public:
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
 
 private:
+    enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
+
     std::unique_ptr<MCTSNode> root_;
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
     size_t sims_completed_this_move_ = 0;
+    
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
+    std::pair<MCTSNode*, CollectTag> collect_one_leaf_tagged();
 
     // Ownership to keep evaluator alive for lifetime of tree:
     std::shared_ptr<evaluator::Evaluator> evaluator_;
