@@ -166,19 +166,15 @@ MCTSNode* MCTSTree::collect_one_leaf() {
 // (cached OR terminal). This version fills pending_nodes_ and returns only
 std::tuple<size_t, size_t, size_t>
 MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
-    pending_nodes_.clear();
-    pending_nodes_.reserve(n_new);
     count_new_ = count_terminal_ = count_cached_ = 0;
 
-    std::vector<MCTSNode*> new_nodes;
-    new_nodes.reserve(n_new);
-
+    size_t new_count = 0;
     size_t cached_count = 0;
-    size_t terminal_count = 0; // terminal hits
+    size_t terminal_count = 0;
     size_t attempts = 0;
     const size_t try_break = 10000;
 
-    while ((new_nodes.size() < n_new) &&
+    while ((new_count < n_new) &&
            (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
            (attempts < try_break)) {
         auto pr = collect_one_leaf_tagged();
@@ -188,7 +184,8 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         if (!node) break;
 
         if (tag == MCTSTree::CollectTag::NEW_LEAF) {
-            new_nodes.push_back(node);
+            (void)this->queue_pending(node);
+            ++new_count;
         } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
         } else if (tag == MCTSTree::CollectTag::TERMINAL) {
@@ -196,18 +193,11 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         }
     }
 
-    pending_nodes_.swap(new_nodes);
-    count_new_      = pending_nodes_.size();
+    count_new_      = new_count;
     count_cached_   = cached_count;
     count_terminal_ = terminal_count;
 
     return { count_new_, count_terminal_, count_cached_ };
-}
-
-
-// Return a copy of the pending nodes (small copy of pointers)
-std::vector<MCTSNode*> MCTSTree::get_pending_nodes() const {
-    return pending_nodes_;
 }
 
 size_t MCTSTree::count_new() const { return count_new_; }
@@ -304,6 +294,37 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
         node->children.emplace(mv, nullptr);
     }
     node->is_expanded = true;
+}
+
+uint64_t MCTSTree::queue_pending(MCTSNode* n) {
+    if (!n) return 0;
+    if (n->token == 0) {
+        uint64_t t = next_token_.fetch_add(1, std::memory_order_relaxed);
+        n->token = t;
+        pending_nodes_.emplace(t, n);
+        return t;
+    }
+    // already queued
+    pending_nodes_[n->token] = n;
+    return n->token;
+}
+
+bool MCTSTree::apply_result_token(
+    uint64_t token,
+    const std::vector<std::pair<std::string, float>>& move_priors,
+    float value_white_pov,
+    bool cache)
+{
+    auto it = pending_nodes_.find(token);
+    if (it == pending_nodes_.end()) return false;
+
+    MCTSNode* node = it->second;
+    pending_nodes_.erase(it);
+    node->token = 0;
+
+    // Your existing node-based apply path likely returns void.
+    this->apply_result(node, move_priors, value_white_pov, cache);
+    return true;
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {

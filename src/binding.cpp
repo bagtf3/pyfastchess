@@ -401,22 +401,22 @@ PYBIND11_MODULE(_core, m) {
           
           // Return a Python list of tuples:
           // (zobrist, stacked_planes(nplanes), piece_count, legal_moves)
-          .def("pending_encoded", [](MCTSTree &t, int nplanes) { 
+          .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               // get a copy of pointers; lifetime tied to 't'
-               auto nodes = t.get_pending_nodes();
-               for (MCTSNode* n : nodes) {
-                    // ensure zobrist exists (lazy compute safety)
-                    uint64_t z = n->zobrist;
-                    auto planes = ::stacked_planes(n->board, nplanes);
-                    auto b = n->board;
+               for (const auto& kv : t.pending_nodes()) {
+                    uint64_t tok = kv.first;
+                    MCTSNode* n  = kv.second;
+                    if (!n) continue;
+                    uint64_t z   = n->zobrist;
+                    auto planes  = ::stacked_planes(n->board, nplanes);
+                    auto pc      = n->board.piece_count();
                     const auto& lm = n->legal_moves;
-                    out.append(py::make_tuple(z, planes, b, lm));
+                    out.append(py::make_tuple(tok, z, planes, pc, lm));
                }
                return out;
-               },
-               py::arg("nplanes") = 5,
-               "Encode all pending nodes as (zobrist, stacked_planes(nplanes), piece_count, legal_moves).")
+          },
+          py::arg("nplanes"),
+          "Encode pending leaves: (token, zobrist, planes, piece_count, legal_moves).")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
@@ -425,6 +425,19 @@ PYBIND11_MODULE(_core, m) {
                     t.apply_result(node, move_priors, value_white_pov, cache);
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+
+          .def("apply_result_token", [](MCTSTree& t, uint64_t token,
+               const std::vector<std::pair<std::string, float>>& move_priors,
+               float value_white_pov,
+               bool cache) {
+               if (!t.apply_result_token(token, move_priors, value_white_pov, cache)) {
+                    throw std::runtime_error("apply_result_token: stale/unknown token");
+               }
+          },
+          py::arg("token"),
+          py::arg("move_priors"),
+          py::arg("value_white_pov"),
+          py::arg("cache") = true)
           
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)

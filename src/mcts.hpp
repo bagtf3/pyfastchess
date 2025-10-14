@@ -8,6 +8,8 @@
 #include <optional>
 #include <cmath>
 #include <memory>
+#include <unordered_map>
+#include <atomic>
 #include "backend.hpp"
 #include "evaluator.hpp"
 
@@ -34,6 +36,8 @@ struct PVItem {
 class MCTSTree;
 
 struct MCTSNode {
+    uint64_t token = 0;  // opaque id for routing predictions
+
     // --- Tree links ---
     MCTSNode* parent = nullptr;
 
@@ -102,6 +106,26 @@ public:
         const std::vector<std::pair<std::string, float>>& move_priors,
         float value_white_pov, bool cache=true);
 
+    // ---- pending/token API (single declarations only) ----
+
+    // Queue a leaf as pending; returns a stable token.
+    uint64_t queue_pending(struct MCTSNode* n);
+
+    // Apply predictions to a queued leaf by token.
+    bool apply_result_token(
+        uint64_t token,
+        const std::vector<std::pair<std::string, float>>& move_priors,
+        float value_white_pov,
+        bool cache);
+
+    // Clear all pending tokens (call on reset / after making a move).
+    void clear_pending();
+
+    // Read-only accessor for bindings. Keep it inline to avoid ODR issues.
+    const std::unordered_map<uint64_t, struct MCTSNode*>& pending_nodes() const {
+        return pending_nodes_;
+    }
+
     // Stats from root (sorted by visits descending): [(uci, N), ...]
     std::vector<std::pair<std::string, int>> root_child_visits() const;
 
@@ -131,15 +155,9 @@ public:
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
 
-    // Accessors to read the latest pending collection
-    std::vector<MCTSNode*> get_pending_nodes() const;
     size_t count_new() const;
     size_t count_terminal() const;
     size_t count_cached() const;
-
-    // Clear pending queue and zero the counters
-    void clear_pending();
-
 
 private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
@@ -162,8 +180,9 @@ private:
     // Tunable scale for cp -> [-1,1] mapping
     float vprime_scale_ = 1500.0f;
 
-    // pending collected nodes and counts (always refreshed on collect_many_leaves)
-    std::vector<MCTSNode*> pending_nodes_;
+    std::atomic<uint64_t> next_token_{1};
+    std::unordered_map<uint64_t, struct MCTSNode*> pending_nodes_;
+
     size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
     size_t count_terminal_ = 0;  // number of terminal hits in last collection
     size_t count_cached_ = 0;    // number of cached hits in last collection
