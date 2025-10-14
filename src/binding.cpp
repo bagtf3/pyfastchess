@@ -409,9 +409,9 @@ PYBIND11_MODULE(_core, m) {
                     // ensure zobrist exists (lazy compute safety)
                     uint64_t z = n->zobrist;
                     auto planes = ::stacked_planes(n->board, nplanes);
-                    auto pc     = n->board.piece_count();
+                    auto b = n->board;
                     const auto& lm = n->legal_moves;
-                    out.append(py::make_tuple(z, planes, pc, lm));
+                    out.append(py::make_tuple(z, planes, b, lm));
                }
                return out;
                },
