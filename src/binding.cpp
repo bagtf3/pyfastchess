@@ -393,31 +393,10 @@ PYBIND11_MODULE(_core, m) {
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
-          .def("collect_many_leaves",
-               [](MCTSTree &t, size_t n_new, size_t n_fastpath) {
-                    auto tup = t.collect_many_leaves(n_new, n_fastpath);
-                    auto &vec = std::get<0>(tup);
-                    size_t new_count   = std::get<1>(tup);
-                    size_t cached_count= std::get<2>(tup);
-                    size_t terminal_count = std::get<3>(tup);
-
-                    py::list nodes;
-                    for (MCTSNode* n : vec) {
-                         // return_value_policy::reference is fine because we use keep_alive below
-                         nodes.append(py::cast(n, py::return_value_policy::reference));
-                    }
-                    return py::make_tuple(nodes,
-                                             py::int_(new_count),
-                                             py::int_(cached_count),
-                                             py::int_(terminal_count));
-               },
-               py::arg("n_new"),
-               py::arg("n_fastpath") = 0,
-               "Collect up to n_new freshly-expanded leaves. Stop after n_fastpath "
-               "fast-path (cached/terminal) results. "
-               "Returns (nodes_list, new_count, cached_count, terminal_count).",
-               // ensure the returned objects (0) keep the MCTSTree (1) alive
-               py::keep_alive<0,1>() )
+          // binding.cpp — replace existing collect_many_leaves binding with this
+          .def("collect_many_leaves", &MCTSTree::collect_many_leaves,
+               py::arg("n_new"), py::arg("n_fastpath") = 0,
+               "Collect up to n_new fresh leaves, fill the tree's pending queue, and return counts.")
 
           .def("set_sims_completed_this_move", &MCTSTree::set_sims_completed_this_move)
           .def("sims_completed_this_move", &MCTSTree::sims_completed_this_move)

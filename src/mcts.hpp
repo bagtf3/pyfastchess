@@ -94,14 +94,15 @@ public:
     // and return the leaf. Stores the chosen path internally for apply_result().
     MCTSNode* collect_one_leaf();
 
-    std::tuple<std::vector<MCTSNode*>, size_t, size_t, size_t>
-    collect_many_leaves(size_t n_new, size_t n_fastpath);
+    // collects many leaves, stores in a pending queue, returns counts
+    std::tuple<size_t, size_t, size_t> collect_many_leaves(size_t n_new, size_t n_fastpath);
 
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
     // Also pops virtual losses along the stored path and calls backup().
-    void apply_result(MCTSNode* node,
-                      const std::vector<std::pair<std::string, float>>& move_priors,
-                      float value_white_pov, bool cache=true);
+    void apply_result(
+        MCTSNode* node,
+        const std::vector<std::pair<std::string, float>>& move_priors,
+        float value_white_pov, bool cache=true);
 
     // Stats from root (sorted by visits descending): [(uci, N), ...]
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -132,6 +133,16 @@ public:
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
 
+    // Accessors to read the latest pending collection
+    std::vector<MCTSNode*> get_pending_nodes() const;
+    size_t count_new() const;
+    size_t count_pending() const;
+    size_t count_cached() const;
+
+    // Clear pending queue and zero the counters
+    void clear_pending();
+
+
 private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
 
@@ -153,7 +164,12 @@ private:
 
     // Tunable scale for cp -> [-1,1] mapping
     float vprime_scale_ = 1500.0f;
-    
+
+    // pending collected nodes and counts (always refreshed on collect_many_leaves)
+    std::vector<MCTSNode*> pending_nodes_;
+    size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
+    size_t count_pending_ = 0;   // number of terminal hits in last collection
+    size_t count_cached_ = 0;    // number of cached hits in last collection
 };
 
 

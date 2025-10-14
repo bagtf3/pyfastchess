@@ -144,20 +144,26 @@ MCTSNode* MCTSTree::collect_one_leaf() {
 
 // collect_many_leaves: collect up to `n_new` new leaves (non-terminal,
 // non-cached) and stop early if we've applied `n_fastpath` fast-path results
-// (cached OR terminal). Returns tuple:
-//   (vector<new_nodes>, new_count, cached_count, terminal_count)
-std::tuple<std::vector<MCTSNode*>, size_t, size_t, size_t>
+// (cached OR terminal). This version fills pending_nodes_ and returns only
+// counts: (new_count, pending_count, cached_count).
+std::tuple<size_t, size_t, size_t>
 MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
+    // reset pending state for this run
+    pending_nodes_.clear();
+    count_new_ = 0;
+    count_pending_ = 0;
+    count_cached_ = 0;
+
     std::vector<MCTSNode*> new_nodes;
     new_nodes.reserve(n_new);
 
     size_t cached_count = 0;
-    size_t terminal_count = 0;
+    size_t pending_count = 0; // terminal hits
     size_t attempts = 0;
     const size_t try_break = 10000; // safety to avoid infinite loops
 
     while ( (new_nodes.size() < n_new) &&
-            ((cached_count + terminal_count) < n_fastpath) &&
+            ((cached_count + pending_count) < n_fastpath) &&
             (attempts < try_break) ) {
         auto pr = collect_one_leaf_tagged();
         MCTSNode* node = pr.first;
@@ -170,13 +176,36 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
         } else if (tag == MCTSTree::CollectTag::TERMINAL) {
-            ++terminal_count;
+            ++pending_count;
         }
     }
 
-    size_t new_count = new_nodes.size();
-    return { std::move(new_nodes), new_count, cached_count, terminal_count };
+    // publish to internal pending queue and counters (no copies returned)
+    pending_nodes_.swap(new_nodes); // efficient move
+    count_new_ = pending_nodes_.size();
+    count_cached_ = cached_count;
+    count_pending_ = pending_count;
+
+    return { count_new_, count_pending_, count_cached_ };
 }
+
+
+// Return a copy of the pending nodes (small copy of pointers)
+std::vector<MCTSNode*> MCTSTree::get_pending_nodes() const {
+    return pending_nodes_;
+}
+
+size_t MCTSTree::count_new() const { return count_new_; }
+size_t MCTSTree::count_pending() const { return count_pending_; }
+size_t MCTSTree::count_cached() const { return count_cached_; }
+
+void MCTSTree::clear_pending() {
+    pending_nodes_.clear();
+    count_new_ = 0;
+    count_pending_ = 0;
+    count_cached_ = 0;
+}
+
 
 void MCTSTree::apply_result(
     MCTSNode* node,
