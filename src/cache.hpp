@@ -37,6 +37,9 @@ public:
 
     static Cache& instance(); // singleton
 
+    // returns pointer to entry & touches LRU; nullptr if miss
+    const CacheEntry* lookup_ptr(uint64_t key);
+
 private:
     using ListIt = std::list<uint64_t>::iterator;
     size_t max_size_;

@@ -44,6 +44,11 @@ std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
     return best;
 }
 
+MCTSNode* MCTSNode::select_child_ptr(float c_puct) const {
+    auto sel = select_child(c_puct); // existing API
+    return sel.second;
+}
+
 
 // ------------------------- MCTSTree -------------------------
 
@@ -72,17 +77,17 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
     qopts_shallow_.time_limit_ms = 2;
 }
 
-
 // Internal variant of collect_one_leaf that reports reason
 std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
     last_path_.clear();
+    if (last_path_.capacity() < 32) last_path_.reserve(32);
+
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
 
     // descend while expanded and has children
     while (node->is_expanded && !node->children.empty()) {
-        auto sel = node->select_child(c_puct_);
-        MCTSNode* child = sel.second;
+        MCTSNode* child = node->select_child_ptr(c_puct_);
         if (!child) break;
         node = child;
         last_path_.push_back(node);
@@ -95,6 +100,16 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
+    // fastpath: check cache for a stored NN result before
+    // expanding or running the shallow qsearch. If present, apply it and return.
+    {
+        const uint64_t key = node->zobrist;
+        if (const CacheEntry* ce = Cache::instance().lookup_ptr(key)) {
+            apply_result(node, ce->priors, ce->value);
+            return { node, MCTSTree::CollectTag::CACHED };
+        }
+    }
+
     // Fresh terminal?
     if (auto tv = backend::terminal_value_white_pov(node->board)) {
         node->is_terminal = true;
@@ -104,33 +119,21 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
-    // SINGLE-THREADED fast-path: check cache for a stored NN result before
-    // expanding or running the shallow qsearch. If present, apply it and return.
-    {
-        uint64_t key = node->board.hash();
-        CacheEntry ce;
-        if (Cache::instance().lookup(key, ce)) {
-            // Cache hit: apply cached priors/value and return as cached fastpath
-            apply_result(node, ce.priors, ce.value);
-            return { node, MCTSTree::CollectTag::CACHED };
-        }
-    }
-
     // Fresh non-terminal leaf: expand with uniform priors and start V'
     expand_with_uniform_priors(node);
 
     // shallow qsearch using non-owning raw pointer
-    int alpha = -MCTSTree::VALUE_MATE_CP;
-    int beta  =  MCTSTree::VALUE_MATE_CP;
+    constexpr int ALPHA = -MCTSTree::VALUE_MATE_CP;
+    constexpr int BETA  =  MCTSTree::VALUE_MATE_CP;
+    int cp = node->board.qsearch(ALPHA, BETA, evaluator_raw_, qopts_shallow_).first;
 
-    auto qres = node->board.qsearch(alpha, beta, evaluator_raw_, qopts_shallow_);
-    int cp = qres.first;
-
-    float vprime = std::clamp(static_cast<float>(cp) / vprime_scale_, -1.0f, 1.0f);
+    float vprime = static_cast<float>(cp) / vprime_scale_;
+    if (vprime < -1.0f) vprime = -1.0f;
+    else if (vprime > 1.0f) vprime = 1.0f;
+    
     node->v_prime = vprime;
     node->has_vprime = true;
     node->vprime_visits = 1;
-    node->is_expanded = true;
     back_up_along_path(node, node->v_prime, /*add_visit=*/true);
 
     // This was a freshly-expanded, non-cached, non-terminal leaf.
@@ -150,9 +153,8 @@ std::tuple<size_t, size_t, size_t>
 MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     // reset pending state for this run
     pending_nodes_.clear();
-    count_new_ = 0;
-    count_pending_ = 0;
-    count_cached_ = 0;
+    pending_nodes_.reserve(n_new);
+    count_new_ = count_pending_ = count_cached_ = 0;
 
     std::vector<MCTSNode*> new_nodes;
     new_nodes.reserve(n_new);
@@ -162,9 +164,9 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t attempts = 0;
     const size_t try_break = 10000; // safety to avoid infinite loops
 
-    while ( (new_nodes.size() < n_new) &&
-            ((cached_count + pending_count) < n_fastpath) &&
-            (attempts < try_break) ) {
+    while ((new_nodes.size() < n_new) &&
+       (n_fastpath == 0 || (cached_count + pending_count) < n_fastpath) &&
+       (attempts < try_break)) {
         auto pr = collect_one_leaf_tagged();
         MCTSNode* node = pr.first;
         MCTSTree::CollectTag tag = pr.second;
@@ -272,18 +274,30 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->P.clear();
     node->children.clear();
 
-    auto legal = node->board.legal_moves();
+    const auto legal = node->board.legal_moves();
     const size_t n = legal.size();
-    if (n == 0) return;
+    if (n == 0) {
+        // Non-terminal should not happen; terminals are handled earlier.
+        // Leave is_expanded=false.
+        return;
+    }
 
     const float u = 1.0f / static_cast<float>(n);
     node->P.reserve(n);
     node->children.reserve(n);
+
+    size_t added = 0;
     for (const auto& mv : legal) {
         node->P.emplace(mv, u);
         backend::Board childb = node->board;
+        // legal_moves() should guarantee success; keep the check for safety
         if (!childb.push_uci(mv)) continue;
         node->children.emplace(mv, std::make_unique<MCTSNode>(childb, node, mv));
+        ++added;
+    }
+
+    if (added > 0) {
+        node->is_expanded = true;
     }
 }
 

@@ -78,6 +78,7 @@ struct MCTSNode {
     // --- Selection (PUCT with virtual loss) ---
     // Returns (move, child) or {"", nullptr} if no children
     std::pair<std::string, MCTSNode*> select_child(float c_puct) const;
+    MCTSNode* select_child_ptr(float c_puct) const;
 };
 
 class MCTSTree {
@@ -171,7 +172,6 @@ private:
     size_t count_pending_ = 0;   // number of terminal hits in last collection
     size_t count_cached_ = 0;    // number of cached hits in last collection
 };
-
 
 // --------- Helpers ---------
 

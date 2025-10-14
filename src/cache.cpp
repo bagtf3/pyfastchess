@@ -27,6 +27,17 @@ bool Cache::lookup(uint64_t key, CacheEntry& out) {
     return true;
 }
 
+const CacheEntry* Cache::lookup_ptr(uint64_t key) {
+    auto it = map_.find(key);
+    if (it == map_.end()) return nullptr;
+    // touch by iterator to avoid a second hash lookup
+    auto list_it = it->second.second;
+    order_.erase(list_it);
+    order_.push_back(key);
+    it->second.second = std::prev(order_.end());
+    return &it->second.first;
+}
+
 void Cache::insert(uint64_t key, CacheEntry entry) {
     auto it = map_.find(key);
     if (it != map_.end()) {
