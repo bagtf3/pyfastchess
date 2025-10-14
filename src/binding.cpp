@@ -398,9 +398,25 @@ PYBIND11_MODULE(_core, m) {
           .def("collect_many_leaves", &MCTSTree::collect_many_leaves,
                py::arg("n_new"), py::arg("n_fastpath") = 0,
                "Collect up to n_new fresh leaves, fill the tree's pending queue, and return counts.")
-
-          .def("set_sims_completed_this_move", &MCTSTree::set_sims_completed_this_move)
-          .def("sims_completed_this_move", &MCTSTree::sims_completed_this_move)
+          
+          // Return a Python list of tuples:
+          // (zobrist, stacked_planes(nplanes), piece_count, legal_moves)
+          .def("pending_encoded", [](MCTSTree &t, int nplanes) { 
+               py::list out;
+               // get a copy of pointers; lifetime tied to 't'
+               auto nodes = t.get_pending_nodes();
+               for (MCTSNode* n : nodes) {
+                    // ensure zobrist exists (lazy compute safety)
+                    uint64_t z = n->zobrist;
+                    auto planes = ::stacked_planes(n->board, nplanes);
+                    auto pc     = n->board.piece_count();
+                    const auto& lm = n->legal_moves;
+                    out.append(py::make_tuple(z, planes, pc, lm));
+               }
+               return out;
+               },
+               py::arg("nplanes") = 5,
+               "Encode all pending nodes as (zobrist, stacked_planes(nplanes), piece_count, legal_moves).")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,

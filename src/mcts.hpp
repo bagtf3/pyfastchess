@@ -87,9 +87,6 @@ public:
     explicit MCTSTree(const backend::Board& root_board,
                       float c_puct,
                       std::shared_ptr<evaluator::Evaluator> evaluator);
-    
-    void set_sims_completed_this_move(size_t n) { sims_completed_this_move_ = n; }
-    size_t sims_completed_this_move() const { return sims_completed_this_move_; }
 
     // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
     // and return the leaf. Stores the chosen path internally for apply_result().
@@ -151,7 +148,6 @@ private:
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
-    size_t sims_completed_this_move_ = 0;
     
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
