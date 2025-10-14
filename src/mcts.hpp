@@ -75,11 +75,10 @@ struct MCTSNode {
 
     // --- Constructors ---
     MCTSNode(const backend::Board& b, MCTSNode* parent_=nullptr, std::string uci_from_parent="");
+    
+    // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
+    MCTSNode* select_child_lazy_ptr(float c_puct);
 
-    // --- Selection (PUCT with virtual loss) ---
-    // Returns (move, child) or {"", nullptr} if no children
-    std::pair<std::string, MCTSNode*> select_child(float c_puct) const;
-    MCTSNode* select_child_ptr(float c_puct) const;
 };
 
 class MCTSTree {
@@ -138,7 +137,7 @@ public:
     // Accessors to read the latest pending collection
     std::vector<MCTSNode*> get_pending_nodes() const;
     size_t count_new() const;
-    size_t count_pending() const;
+    size_t count_terminal() const;
     size_t count_cached() const;
 
     // Clear pending queue and zero the counters
@@ -170,7 +169,7 @@ private:
     // pending collected nodes and counts (always refreshed on collect_many_leaves)
     std::vector<MCTSNode*> pending_nodes_;
     size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
-    size_t count_pending_ = 0;   // number of terminal hits in last collection
+    size_t count_terminal_ = 0;  // number of terminal hits in last collection
     size_t count_cached_ = 0;    // number of cached hits in last collection
 };
 

@@ -28,14 +28,24 @@ bool Cache::lookup(uint64_t key, CacheEntry& out) {
 }
 
 const CacheEntry* Cache::lookup_ptr(uint64_t key) {
+    // count the query
+    ++queries_;
+
     auto it = map_.find(key);
-    if (it == map_.end()) return nullptr;
-    // touch by iterator to avoid a second hash lookup
+    if (it == map_.end()) {
+        return nullptr;  // miss (queries_ already incremented)
+    }
+
+    // hit
+    ++hits_;
+
+    // touch via iterator to avoid second hash lookup
     auto list_it = it->second.second;
     order_.erase(list_it);
     order_.push_back(key);
     it->second.second = std::prev(order_.end());
-    return &it->second.first;
+
+    return &it->second.first;  // pointer to stored entry (no copy)
 }
 
 void Cache::insert(uint64_t key, CacheEntry entry) {

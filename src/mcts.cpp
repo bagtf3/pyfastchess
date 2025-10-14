@@ -16,41 +16,51 @@ MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_f
     zobrist = 0ULL;  // lazy: compute at first selection
 }
 
+MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct) {
+    if (P.empty()) return nullptr;               // no priors / no legal moves known
 
+    const float parentN   = static_cast<float>(std::max(1, N));
+    const float u_scale   = c_puct * std::sqrt(parentN);
+    const float pov_sign  = (board.side_to_move() == "w") ? 1.0f : -1.0f;
 
-std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
-    if (children.empty()) return {"", nullptr};
-
-    // Typical PUCT uses parent's visits to scale U
-    const float sumN = static_cast<float>(std::max(1, N));
-    const bool stm_white = (board.side_to_move() == "w");
-
-    std::pair<std::string, MCTSNode*> best = {"", nullptr};
+    const std::string* best_mv = nullptr;
+    MCTSNode* best_child = nullptr;
     float best_score = -1e30f;
 
-    for (const auto& kv : children) {
+    // Iterate priors (defines candidate moves); use existing child stats if present
+    for (const auto& kv : P) {
         const std::string& mv = kv.first;
-        const MCTSNode* ch    = kv.second.get();
+        const float prior     = kv.second;
 
-        const float prior = P.count(mv) ? P.at(mv) : 0.0f;
-        const float u     = c_puct * prior * std::sqrt(sumN) / (1.0f + ch->N);
-        float q           = ch->Q;
-        if (!stm_white) q = -q;  // white-POV flip when black to move
+        auto it = children.find(mv);
+        const MCTSNode* ch = (it != children.end() ? it->second.get() : nullptr);
 
+        const float n = ch ? static_cast<float>(ch->N) : 0.0f;
+        const float q = ch ? (pov_sign * ch->Q) : 0.0f;     // flip once for side-to-move
+
+        const float u = (prior > 0.0f) ? (u_scale * prior / (1.0f + n)) : 0.0f;
         const float score = q + u;
+
         if (score > best_score) {
             best_score = score;
-            best = {mv, const_cast<MCTSNode*>(ch)};
+            best_mv    = &mv;
+            best_child = const_cast<MCTSNode*>(ch);
         }
     }
-    return best;
-}
 
-MCTSNode* MCTSNode::select_child_ptr(float c_puct) const {
-    auto sel = select_child(c_puct); // existing API
-    return sel.second;
-}
+    if (!best_mv) return nullptr;  // defensive
 
+    // lazily instantiate if not built yet
+    if (!best_child) {
+        backend::Board childb = board;
+        if (!childb.push_uci(*best_mv)) return nullptr;
+        auto up = std::make_unique<MCTSNode>(childb, this, *best_mv);
+        best_child = up.get();
+        children[*best_mv] = std::move(up);
+    }
+
+    return best_child;
+}
 
 // ------------------------- MCTSTree -------------------------
 
@@ -89,7 +99,7 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
 
     // descend while expanded and has children
     while (node->is_expanded && !node->children.empty()) {
-        MCTSNode* child = node->select_child_ptr(c_puct_);
+        MCTSNode* child = node->select_child_lazy_ptr(c_puct_);
         if (!child) break;
         node = child;
         last_path_.push_back(node);
@@ -154,47 +164,44 @@ MCTSNode* MCTSTree::collect_one_leaf() {
 // collect_many_leaves: collect up to `n_new` new leaves (non-terminal,
 // non-cached) and stop early if we've applied `n_fastpath` fast-path results
 // (cached OR terminal). This version fills pending_nodes_ and returns only
-// counts: (new_count, pending_count, cached_count).
 std::tuple<size_t, size_t, size_t>
 MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
-    // reset pending state for this run
     pending_nodes_.clear();
     pending_nodes_.reserve(n_new);
-    count_new_ = count_pending_ = count_cached_ = 0;
+    count_new_ = count_terminal_ = count_cached_ = 0;
 
     std::vector<MCTSNode*> new_nodes;
     new_nodes.reserve(n_new);
 
     size_t cached_count = 0;
-    size_t pending_count = 0; // terminal hits
+    size_t terminal_count = 0; // terminal hits
     size_t attempts = 0;
-    const size_t try_break = 10000; // safety to avoid infinite loops
+    const size_t try_break = 10000;
 
     while ((new_nodes.size() < n_new) &&
-       (n_fastpath == 0 || (cached_count + pending_count) < n_fastpath) &&
-       (attempts < try_break)) {
+           (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
+           (attempts < try_break)) {
         auto pr = collect_one_leaf_tagged();
         MCTSNode* node = pr.first;
         MCTSTree::CollectTag tag = pr.second;
         ++attempts;
-        if (!node) break; // defensive
+        if (!node) break;
 
         if (tag == MCTSTree::CollectTag::NEW_LEAF) {
             new_nodes.push_back(node);
         } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
         } else if (tag == MCTSTree::CollectTag::TERMINAL) {
-            ++pending_count;
+            ++terminal_count;
         }
     }
 
-    // publish to internal pending queue and counters (no copies returned)
-    pending_nodes_.swap(new_nodes); // efficient move
-    count_new_ = pending_nodes_.size();
-    count_cached_ = cached_count;
-    count_pending_ = pending_count;
+    pending_nodes_.swap(new_nodes);
+    count_new_      = pending_nodes_.size();
+    count_cached_   = cached_count;
+    count_terminal_ = terminal_count;
 
-    return { count_new_, count_pending_, count_cached_ };
+    return { count_new_, count_terminal_, count_cached_ };
 }
 
 
@@ -204,16 +211,15 @@ std::vector<MCTSNode*> MCTSTree::get_pending_nodes() const {
 }
 
 size_t MCTSTree::count_new() const { return count_new_; }
-size_t MCTSTree::count_pending() const { return count_pending_; }
+size_t MCTSTree::count_terminal() const { return count_terminal_; }
 size_t MCTSTree::count_cached() const { return count_cached_; }
 
 void MCTSTree::clear_pending() {
     pending_nodes_.clear();
     count_new_ = 0;
-    count_pending_ = 0;
+    count_terminal_ = 0;
     count_cached_ = 0;
 }
-
 
 void MCTSTree::apply_result(
     MCTSNode* node,
@@ -284,8 +290,7 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->legal_moves = legal;   // caching here. will need them later
     const size_t n = legal.size();
     if (n == 0) {
-        // Non-terminal should not happen; terminals are handled earlier.
-        // Leave is_expanded=false.
+        node->is_expanded = false;
         return;
     }
 
@@ -293,19 +298,12 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->P.reserve(n);
     node->children.reserve(n);
 
-    size_t added = 0;
     for (const auto& mv : legal) {
         node->P.emplace(mv, u);
-        backend::Board childb = node->board;
-        // legal_moves() should guarantee success; keep the check for safety
-        if (!childb.push_uci(mv)) continue;
-        node->children.emplace(mv, std::make_unique<MCTSNode>(childb, node, mv));
-        ++added;
+        // Lazy child creation: mark slot but don't build board yet
+        node->children.emplace(mv, nullptr);
     }
-
-    if (added > 0) {
-        node->is_expanded = true;
-    }
+    node->is_expanded = true;
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
