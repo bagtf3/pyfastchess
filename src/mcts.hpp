@@ -60,7 +60,8 @@ struct MCTSNode {
 
     // --- State ---
     backend::Board board;   // exact position at this node
-    uint64_t zobrist = 0;   // incremental zobrist key snapshot for this node
+    uint64_t zobrist = 0;   // computed lazily when the node is first selected
+    std::vector<std::string> legal_moves;  // filled on expand; reused later
 
     bool is_expanded = false;
     float value = 0.0f;     // cached leaf value when expanded (optional)

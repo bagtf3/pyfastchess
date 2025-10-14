@@ -11,9 +11,11 @@ static inline float clampf(float x, float lo, float hi) {
 }
 
 // ------------------------- MCTSNode -------------------------
-
 MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_from_parent)
-    : parent(parent_), uci(std::move(uci_from_parent)), board(b) {zobrist = board.hash();}
+    : parent(parent_), uci(std::move(uci_from_parent)), board(b) {
+    zobrist = 0ULL;  // lazy: compute at first selection
+}
+
 
 
 std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
@@ -100,6 +102,10 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
+    if (node->zobrist == 0ULL) {
+        node->zobrist = node->board.hash();
+    }
+    
     // fastpath: check cache for a stored NN result before
     // expanding or running the shallow qsearch. If present, apply it and return.
     {
@@ -275,6 +281,7 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->children.clear();
 
     const auto legal = node->board.legal_moves();
+    node->legal_moves = legal;   // caching here. will need them later
     const size_t n = legal.size();
     if (n == 0) {
         // Non-terminal should not happen; terminals are handled earlier.

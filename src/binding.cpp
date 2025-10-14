@@ -358,6 +358,7 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
           .def_property_readonly("zobrist", [](const MCTSNode& n){ return n.zobrist; })
+          .def_property_readonly("legal_moves", [](const MCTSNode& n){ return n.legal_moves; })
 
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
                auto it = n.P.find(uci);
