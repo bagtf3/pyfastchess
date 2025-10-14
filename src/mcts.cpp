@@ -10,12 +10,11 @@ static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-enum class CollectTag { CACHED, TERMINAL, NEW_LEAF };
-
 // ------------------------- MCTSNode -------------------------
 
 MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_from_parent)
-    : parent(parent_), uci(std::move(uci_from_parent)), board(b) {}
+    : parent(parent_), uci(std::move(uci_from_parent)), board(b) {zobrist = board.hash();}
+
 
 std::pair<std::string, MCTSNode*> MCTSNode::select_child(float c_puct) const {
     if (children.empty()) return {"", nullptr};
@@ -73,15 +72,17 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
     qopts_shallow_.time_limit_ms = 2;
 }
 
+
 // Internal variant of collect_one_leaf that reports reason
-std::pair<MCTSNode*, CollectTag> MCTSTree::collect_one_leaf_tagged() {
+std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
     last_path_.clear();
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
 
     // descend while expanded and has children
     while (node->is_expanded && !node->children.empty()) {
-        auto [mv, child] = node->select_child(c_puct_);
+        auto sel = node->select_child(c_puct_);
+        MCTSNode* child = sel.second;
         if (!child) break;
         node = child;
         last_path_.push_back(node);
@@ -91,7 +92,7 @@ std::pair<MCTSNode*, CollectTag> MCTSTree::collect_one_leaf_tagged() {
     if (node->is_terminal) {
         const float v = node->value;
         back_up_along_path(node, v, /*add_visit=*/true);
-        return { node, CollectTag::TERMINAL };
+        return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
     // Fresh terminal?
@@ -100,7 +101,7 @@ std::pair<MCTSNode*, CollectTag> MCTSTree::collect_one_leaf_tagged() {
         node->value = *tv;
         node->is_expanded = true;
         back_up_along_path(node, node->value, /*add_visit=*/true);
-        return { node, CollectTag::TERMINAL };
+        return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
     // SINGLE-THREADED fast-path: check cache for a stored NN result before
@@ -109,20 +110,19 @@ std::pair<MCTSNode*, CollectTag> MCTSTree::collect_one_leaf_tagged() {
         uint64_t key = node->board.hash();
         CacheEntry ce;
         if (Cache::instance().lookup(key, ce)) {
-            // cache hit: apply cached priors/value and return as a fastpath
+            // Cache hit: apply cached priors/value and return as cached fastpath
             apply_result(node, ce.priors, ce.value);
-            return { node, CollectTag::CACHED };
+            return { node, MCTSTree::CollectTag::CACHED };
         }
     }
 
-    // Not cached: expand and run shallow qsearch as before.
+    // Fresh non-terminal leaf: expand with uniform priors and start V'
     expand_with_uniform_priors(node);
 
     // shallow qsearch using non-owning raw pointer
     int alpha = -MCTSTree::VALUE_MATE_CP;
     int beta  =  MCTSTree::VALUE_MATE_CP;
 
-    // use evaluator_raw_ directly
     auto qres = node->board.qsearch(alpha, beta, evaluator_raw_, qopts_shallow_);
     int cp = qres.first;
 
@@ -134,7 +134,7 @@ std::pair<MCTSNode*, CollectTag> MCTSTree::collect_one_leaf_tagged() {
     back_up_along_path(node, node->v_prime, /*add_visit=*/true);
 
     // This was a freshly-expanded, non-cached, non-terminal leaf.
-    return { node, CollectTag::NEW_LEAF };
+    return { node, MCTSTree::CollectTag::NEW_LEAF };
 }
 
 // Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
@@ -159,15 +159,17 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     while ( (new_nodes.size() < n_new) &&
             ((cached_count + terminal_count) < n_fastpath) &&
             (attempts < try_break) ) {
-        auto [node, tag] = collect_one_leaf_tagged();
+        auto pr = collect_one_leaf_tagged();
+        MCTSNode* node = pr.first;
+        MCTSTree::CollectTag tag = pr.second;
         ++attempts;
         if (!node) break; // defensive
 
-        if (tag == CollectTag::NEW_LEAF) {
+        if (tag == MCTSTree::CollectTag::NEW_LEAF) {
             new_nodes.push_back(node);
-        } else if (tag == CollectTag::CACHED) {
+        } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
-        } else if (tag == CollectTag::TERMINAL) {
+        } else if (tag == MCTSTree::CollectTag::TERMINAL) {
             ++terminal_count;
         }
     }
@@ -175,7 +177,6 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t new_count = new_nodes.size();
     return { std::move(new_nodes), new_count, cached_count, terminal_count };
 }
-
 
 void MCTSTree::apply_result(
     MCTSNode* node,
