@@ -90,9 +90,6 @@ public:
     // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
     // and return the leaf. Stores the chosen path internally for apply_result().
     MCTSNode* collect_one_leaf();
-    
-    std::tuple<std::vector<MCTSNode*>, size_t, size_t>
-    collect_many_leaves(size_t n_new, size_t max_fastpath = 0);
 
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
     // Also pops virtual losses along the stored path and calls backup().

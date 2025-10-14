@@ -12,6 +12,8 @@ Evaluator = _core.Evaluator
 EvalWeights = _core.EvalWeights
 cache_stats = _core.cache_stats
 cache_clear = _core.cache_clear
+cache_insert = _core.cache_insert
+cache_lookup = _core.cache_lookup
 
 __all__ = [
     "Board",
@@ -24,5 +26,7 @@ __all__ = [
     "Evaluator",
     "EvalWeights",
     "cache_stats",
-    "cache_clear"
+    "cache_clear",
+    "cache_insert",
+    "cache_lookup"
 ]

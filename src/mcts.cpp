@@ -10,6 +10,7 @@ static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
+enum class CollectTag { CACHED, TERMINAL, NEW_LEAF };
 
 // ------------------------- MCTSNode -------------------------
 
@@ -72,10 +73,8 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
     qopts_shallow_.time_limit_ms = 2;
 }
 
-
-// Walk to a leaf; add qsearch vprimes along the path (including root),
-// return leaf; keep the path for apply_result() to pop vprime & backup
-MCTSNode* MCTSTree::collect_one_leaf() {
+// Internal variant of collect_one_leaf that reports reason
+std::pair<MCTSNode*, CollectTag> MCTSTree::collect_one_leaf_tagged() {
     last_path_.clear();
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
@@ -92,7 +91,7 @@ MCTSNode* MCTSTree::collect_one_leaf() {
     if (node->is_terminal) {
         const float v = node->value;
         back_up_along_path(node, v, /*add_visit=*/true);
-        return node;
+        return { node, CollectTag::TERMINAL };
     }
 
     // Fresh terminal?
@@ -101,17 +100,22 @@ MCTSNode* MCTSTree::collect_one_leaf() {
         node->value = *tv;
         node->is_expanded = true;
         back_up_along_path(node, node->value, /*add_visit=*/true);
-        return node;
+        return { node, CollectTag::TERMINAL };
     }
 
-    // Awaiting NN and still provisional -> credit another V' sim.
-    if (node->has_vprime) {
-        back_up_along_path(node, node->v_prime, /*add_visit=*/true);
-        node->vprime_visits += 1;
-        return node;
+    // SINGLE-THREADED fast-path: check cache for a stored NN result before
+    // expanding or running the shallow qsearch. If present, apply it and return.
+    {
+        uint64_t key = node->board.hash();
+        CacheEntry ce;
+        if (Cache::instance().lookup(key, ce)) {
+            // cache hit: apply cached priors/value and return as a fastpath
+            apply_result(node, ce.priors, ce.value);
+            return { node, CollectTag::CACHED };
+        }
     }
 
-    // Fresh non-terminal leaf: expand with uniform priors and start V'
+    // Not cached: expand and run shallow qsearch as before.
     expand_with_uniform_priors(node);
 
     // shallow qsearch using non-owning raw pointer
@@ -129,119 +133,49 @@ MCTSNode* MCTSTree::collect_one_leaf() {
     node->is_expanded = true;
     back_up_along_path(node, node->v_prime, /*add_visit=*/true);
 
-    return node;
-    
+    // This was a freshly-expanded, non-cached, non-terminal leaf.
+    return { node, CollectTag::NEW_LEAF };
 }
 
-std::tuple<std::vector<MCTSNode*>, size_t, size_t>
-MCTSTree::collect_many_leaves(size_t n_new, size_t max_fastpath) {
-    std::vector<MCTSNode*> pending;
-    pending.reserve(n_new ? n_new : 16);
+// Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
+MCTSNode* MCTSTree::collect_one_leaf() {
+    return collect_one_leaf_tagged().first;
+}
 
-    size_t n_collected = 0;
-    size_t fastpath = 0;
-    size_t tries = 0;
-    const size_t try_break = 10000;
+// collect_many_leaves: collect up to `n_new` new leaves (non-terminal,
+// non-cached) and stop early if we've applied `n_fastpath` fast-path results
+// (cached OR terminal). Returns tuple:
+//   (vector<new_nodes>, new_count, cached_count, terminal_count)
+std::tuple<std::vector<MCTSNode*>, size_t, size_t, size_t>
+MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
+    std::vector<MCTSNode*> new_nodes;
+    new_nodes.reserve(n_new);
 
-    while (true) {
-        // 1) descend from root to a leaf
-        last_path_.clear();
-        MCTSNode* node = root_.get();
-        last_path_.push_back(node);
+    size_t cached_count = 0;
+    size_t terminal_count = 0;
+    size_t attempts = 0;
+    const size_t try_break = 10000; // safety to avoid infinite loops
 
-        while (node->is_expanded && !node->children.empty()) {
-            auto [mv, child] = node->select_child(c_puct_);
-            if (!child) break;
-            node = child;
-            last_path_.push_back(node);
+    while ( (new_nodes.size() < n_new) &&
+            ((cached_count + terminal_count) < n_fastpath) &&
+            (attempts < try_break) ) {
+        auto [node, tag] = collect_one_leaf_tagged();
+        ++attempts;
+        if (!node) break; // defensive
+
+        if (tag == CollectTag::NEW_LEAF) {
+            new_nodes.push_back(node);
+        } else if (tag == CollectTag::CACHED) {
+            ++cached_count;
+        } else if (tag == CollectTag::TERMINAL) {
+            ++terminal_count;
         }
-
-        uint64_t key = node->board.hash();
-        // 2) CACHE CHECK first (apply immediately on hit)
-        {
-            CacheEntry ce;
-            if (Cache::instance().lookup(key, ce)) {
-                // apply cached priors/value directly in C++
-                this->apply_result(node, ce.priors, ce.value, false); // pass false
-                ++sims_completed_this_move_;
-                ++fastpath;
-                ++tries;
-                goto after_checks;
-            }
-        }
-
-        // 3) TERMINAL CHECK (fresh / known terminals)
-        if (node->is_terminal) {
-            back_up_along_path(node, node->value, /*add_visit=*/true);
-            // cache terminal value (so future hits are fast)
-            CacheEntry e;
-            e.priors = {};           // no priors for terminal
-            e.value = node->value;
-            Cache::instance().insert(key, std::move(e));  // reuse key
-
-            ++sims_completed_this_move_;
-            ++fastpath;
-            ++tries;
-            goto after_checks;
-        }
-
-        if (auto tv = backend::terminal_value_white_pov(node->board)) {
-            node->is_terminal = true;
-            node->value = *tv;
-            node->is_expanded = true;
-            back_up_along_path(node, node->value, /*add_visit=*/true);
-            // cache terminal
-            CacheEntry e;
-            e.priors = {};
-            e.value = node->value;
-            Cache::instance().insert(key, std::move(e));
-
-            ++sims_completed_this_move_;
-            ++fastpath;
-            ++tries;
-            goto after_checks;
-        }
-
-        // 4) provisional v' handling
-        if (node->has_vprime) {
-            back_up_along_path(node, node->v_prime, /*add_visit=*/true);
-            node->vprime_visits += 1;
-            ++sims_completed_this_move_;
-            ++fastpath;
-            ++tries;
-            goto after_checks;
-        }
-
-        // 5) Expand + qsearch + start v'
-        expand_with_uniform_priors(node);
-
-        {
-            int alpha = -MCTSTree::VALUE_MATE_CP;
-            int beta  =  MCTSTree::VALUE_MATE_CP;
-            auto qres = node->board.qsearch(alpha, beta, evaluator_raw_, qopts_shallow_);
-            int cp = qres.first;
-            float vprime = std::clamp(static_cast<float>(cp) / vprime_scale_, -1.0f, 1.0f);
-            node->v_prime = vprime;
-            node->has_vprime = true;
-            node->vprime_visits = 1;
-            node->is_expanded = true;
-            back_up_along_path(node, node->v_prime, /*add_visit=*/true);
-        }
-
-        // After expansion/qsearch this is a fresh leaf that needs NN -> collect it
-        pending.push_back(node);
-        ++n_collected;
-        ++tries;
-
-    after_checks:
-        // stop conditions
-        if (tries >= try_break) break;
-        if (n_collected >= n_new) break;
-        if (max_fastpath && fastpath >= max_fastpath) break;
     }
 
-    return { pending, n_collected, fastpath };
+    size_t new_count = new_nodes.size();
+    return { std::move(new_nodes), new_count, cached_count, terminal_count };
 }
+
 
 void MCTSTree::apply_result(
     MCTSNode* node,

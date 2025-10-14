@@ -391,10 +391,6 @@ PYBIND11_MODULE(_core, m) {
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
 
-          .def("collect_many_leaves", &MCTSTree::collect_many_leaves,
-               py::arg("n_new"), py::arg("max_fastpath") = 0,
-               py::return_value_policy::reference_internal)
-
           .def("set_sims_completed_this_move", &MCTSTree::set_sims_completed_this_move)
           .def("sims_completed_this_move", &MCTSTree::sims_completed_this_move)
 
@@ -551,5 +547,34 @@ PYBIND11_MODULE(_core, m) {
           m.def("cache_clear", []() {
                Cache::instance().clear();
           }, "Clear the cache and reset counters");
+
+          m.def("cache_lookup", [](uint64_t key)->py::object {
+               CacheEntry e;
+               if (!Cache::instance().lookup(key, e)) return py::none();
+               py::dict out;
+               out["value"] = e.value;
+               // priors is vector<pair<string,float>>
+               py::list pri;
+               for (auto &p : e.priors) pri.append(py::make_tuple(p.first, p.second));
+               out["priors"] = pri;
+               return out;
+          });
+
+          m.def("cache_insert", [](uint64_t key, py::object entry_py){
+               CacheEntry e;
+               if (py::isinstance<py::dict>(entry_py)) {
+               py::dict d = entry_py.cast<py::dict>();
+               if (d.contains("value")) e.value = d["value"].cast<float>();
+               if (d.contains("priors")) {
+                    for (auto item : d["priors"].cast<py::list>()) {
+                         auto t = item.cast<py::tuple>();
+                         e.priors.emplace_back(t[0].cast<std::string>(), t[1].cast<float>());
+                    }
+               }
+          } else {
+               throw std::runtime_error("cache_insert expects dict {value:, priors:}");
+          }
+          Cache::instance().insert(key, std::move(e));
+     });
 
 }
