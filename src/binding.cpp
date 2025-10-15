@@ -8,6 +8,7 @@
 #include "mcts.hpp"
 #include "evaluator.hpp"
 #include "cache.hpp"
+#include "batcher.hpp"
 
 namespace py = pybind11;
 
@@ -616,6 +617,18 @@ PYBIND11_MODULE(_core, m) {
                throw std::runtime_error("cache_insert expects dict {value:, priors:}");
           }
           Cache::instance().insert(key, std::move(e));
-     });
+          });
 
+          m.def("get_batcher", []() -> Batcher& {
+               return Batcher::instance();
+               }, py::return_value_policy::reference);
+
+          py::class_<Batcher>(m, "Batcher")
+               .def("load_model", &Batcher::load_model)
+               .def("start", &Batcher::start)
+               .def("stop", &Batcher::stop)
+               .def("set_queue_size", &Batcher::set_queue_size)
+               .def("force_predict", &Batcher::force_predict)
+               .def("get_result", &Batcher::get_result)
+               .def("clear_results_cache", &Batcher::clear_results_cache);
 }

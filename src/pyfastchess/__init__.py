@@ -19,6 +19,8 @@ cache_stats = _core.cache_stats
 cache_clear = _core.cache_clear
 cache_insert = _core.cache_insert
 cache_lookup = _core.cache_lookup
+Batcher = _core.Batcher
+get_batcher = _core.get_batcher
 
 __all__ = [
     "Board",
@@ -33,5 +35,7 @@ __all__ = [
     "cache_stats",
     "cache_clear",
     "cache_insert",
-    "cache_lookup"
+    "cache_lookup",
+    "Batcher",
+    "get_batcher"
 ]
