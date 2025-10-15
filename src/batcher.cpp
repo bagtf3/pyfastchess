@@ -1,9 +1,21 @@
-// batcher.cpp
+// src/batcher.cpp
 #include "batcher.hpp"
-#include <iostream>
 #include <cassert>
+#include <chrono>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <cstring> // memcpy
 
-namespace py = pybind11;
+namespace {
+
+// minimal portable utf8 -> wstring conversion for local POC
+static std::wstring to_wstring(const std::string& s) {
+    // Portable (basic) conversion: OK for local paths on Windows for POC.
+    return std::wstring(s.begin(), s.end());
+}
+
+} // anon
 
 Batcher& Batcher::instance() {
     static Batcher inst;
@@ -11,8 +23,8 @@ Batcher& Batcher::instance() {
 }
 
 Batcher::Batcher() {
-    // default session options can be tuned later (CUDA provider etc.)
     session_options_.SetIntraOpNumThreads(1);
+    // Do not configure providers here — load_model() can set options later if needed.
 }
 
 Batcher::~Batcher() {
@@ -29,38 +41,49 @@ void Batcher::load_model(const std::string& onnx_path) {
 void Batcher::ensure_session() {
     if (session_configured_.load()) return;
     if (model_path_.empty()) throw std::runtime_error("Batcher: model not set");
-    session_.reset(new Ort::Session(env_, std::wstring(model_path_.begin(), model_path_.end()).c_str(), session_options_));
+
+#ifdef _WIN32
+    std::wstring wpath = to_wstring(model_path_);
+    session_.reset(new Ort::Session(ort_env_, wpath.c_str(), session_options_));
+#else
+    session_.reset(new Ort::Session(ort_env_, model_path_.c_str(), session_options_));
+#endif
+
     session_configured_.store(true);
 }
 
 void Batcher::start() {
     bool expected = false;
-    if (!started_.compare_exchange_strong(expected, true)) return; // already started
-    running_ = true;
+    if (!started_.compare_exchange_strong(expected, true)) return;
+    running_.store(true);
     worker_ = std::thread([this]{ this->worker_loop(); });
 }
 
 void Batcher::stop() {
     {
         std::lock_guard<std::mutex> l(mu_);
-        running_ = false;
+        running_.store(false);
         cv_.notify_all();
     }
     if (worker_.joinable()) worker_.join();
     started_.store(false);
 }
 
-void Batcher::push_prediction(uint64_t token, uint64_t zobrist, py::array_t<float> input_arr) {
-    // validate input dtype/ndim in Python before calling to avoid costly checks; still check shape minimally
-    py::buffer_info bi = input_arr.request();
-    if (bi.ndim < 1) throw std::runtime_error("Batcher: input must be an array (NHWC / flattened)");
+void Batcher::set_queue_size(size_t q) {
     std::lock_guard<std::mutex> l(mu_);
-    queue_.push_back(Item{token, zobrist, input_arr});
+    queue_size_ = (q == 0) ? 1 : q;
+}
+
+void Batcher::push_prediction(uint64_t token, uint64_t zobrist, const std::vector<float>& input) {
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        queue_.push_back(Item{token, zobrist, input});
+        stat_total_requests_.fetch_add(1);
+    }
     if (queue_.size() >= queue_size_) cv_.notify_one();
 }
 
 void Batcher::force_predict() {
-    std::lock_guard<std::mutex> l(mu_);
     cv_.notify_one();
 }
 
@@ -76,102 +99,112 @@ void Batcher::clear_results_cache() {
     results_.clear();
 }
 
+std::map<std::string, long long> Batcher::stats_map() {
+    std::map<std::string, long long> m;
+    m["total_batches"] = stat_total_batches_.load();
+    m["total_requests"] = stat_total_requests_.load();
+    m["total_predictions"] = stat_total_predictions_.load();
+    m["failed_predictions"] = stat_failed_predictions_.load();
+    m["last_batch_size"] = stat_last_batch_size_.load();
+    return m;
+}
+
 void Batcher::worker_loop() {
     while (true) {
-        std::unique_lock<std::mutex> lk(mu_);
-        cv_.wait(lk, [this]{ return !running_ || queue_.size() >= queue_size_ || (!queue_.empty()); });
-        if (!running_ && queue_.empty()) break;
-
-        // swap out queued items for processing
         std::vector<Item> items;
-        items.swap(queue_);
-        lk.unlock();
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_.wait(lk, [this]{ return !running_.load() || queue_.size() >= queue_size_ || !queue_.empty(); });
+            if (!running_.load() && queue_.empty()) break;
+            items.swap(queue_);
+        }
 
-        // build input batch lists
-        std::vector<py::array_t<float>> inputs;
-        std::vector<uint64_t> zkeys;
+        if (items.empty()) continue;
+
+        std::vector<std::vector<float>> inputs;
+        std::vector<uint64_t> zobrist_keys;
         std::vector<uint64_t> tokens;
-        inputs.reserve(items.size());
-        zkeys.reserve(items.size());
-        tokens.reserve(items.size());
+        inputs.reserve(items.size()); zobrist_keys.reserve(items.size()); tokens.reserve(items.size());
         for (auto &it : items) {
-            inputs.push_back(it.arr);
-            zkeys.push_back(it.zobrist);
+            inputs.push_back(it.input);
+            zobrist_keys.push_back(it.zobrist);
             tokens.push_back(it.token);
         }
 
-        // ensure session exists and run batch
         try {
             ensure_session();
-            run_batch(zkeys, inputs, tokens);
+            run_batch(zobrist_keys, inputs, tokens);
+            stat_total_batches_.fetch_add(1);
         } catch (const std::exception &e) {
             std::cerr << "[Batcher] prediction error: " << e.what() << "\n";
-            // store empty/failed marker if desired
+            stat_failed_predictions_.fetch_add(1);
         }
     }
 }
 
-void Batcher::run_batch(std::vector<uint64_t> const& zobrist_keys,
-                        std::vector<py::array_t<float>> const& inputs,
-                        std::vector<uint64_t> const& tokens) {
-    // POC: assume each input has same shape and contiguous float32
-    if (inputs.empty()) return;
-    auto info0 = inputs[0].request();
-    size_t per_item_elems = 1;
-    for (int d=0; d<info0.ndim; ++d) per_item_elems *= static_cast<size_t>(info0.shape[d]);
+void Batcher::run_batch(const std::vector<uint64_t>& zobrist_keys,
+                        const std::vector<std::vector<float>>& inputs,
+                        const std::vector<uint64_t>& tokens) {
+    if (!session_) throw std::runtime_error("Batcher: session not configured");
 
     size_t B = inputs.size();
-    std::vector<float> batch(B * per_item_elems);
-    for (size_t i=0;i<B;++i) {
-        auto bi = inputs[i].request();
-        assert(bi.size == (ssize_t)per_item_elems);
-        std::memcpy(batch.data() + i*per_item_elems, bi.ptr, per_item_elems * sizeof(float));
-    }
+    if (B == 0) return;
+    // assume all inputs have same length
+    size_t per_item = inputs[0].size();
+    for (const auto &v : inputs) if (v.size() != per_item)
+        throw std::runtime_error("Batcher: inconsistent input lengths");
 
-    // --- Build ONNX input/outputs and run (minimal POC) ---
+    // build batch buffer
+    std::vector<float> batch; batch.resize(B * per_item);
+    for (size_t i=0;i<B;++i) std::memcpy(batch.data() + i*per_item, inputs[i].data(), per_item * sizeof(float));
+
+    // prepare ONNX input
     Ort::AllocatorWithDefaultOptions alloc;
-    auto in_name = session_->GetInputNameAllocated(0, alloc);
-    std::string in_s = in_name.get();
-    const char* in_names[] = { in_s.c_str() };
+    auto in_name_ptr = session_->GetInputNameAllocated(0, alloc);
+    std::string in_name = in_name_ptr.get();
+    const char* in_names[] = { in_name.c_str() };
 
-    // input shape: [B, ...] -> build shape vector
-    std::vector<int64_t> ishape;
-    ishape.push_back(static_cast<int64_t>(B));
-    for (int d=0; d<info0.ndim; ++d) ishape.push_back(static_cast<int64_t>(info0.shape[d]));
+    // build shape: [B, ...] assuming session input dims known from first input shape
+    // For POC, assume model expects [B,8,8,channels] flattened as per_item => we pass [B, per_item] as 2D
+    std::vector<int64_t> input_shape = { static_cast<int64_t>(B), static_cast<int64_t>(per_item) };
 
     auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value input = Ort::Value::CreateTensor<float>(mem, batch.data(), batch.size(), ishape.data(), ishape.size());
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem, batch.data(), batch.size(), input_shape.data(), input_shape.size());
 
-    // outputs
+    // gather output names safely
     size_t out_count = session_->GetOutputCount();
     std::vector<Ort::AllocatedStringPtr> out_name_hold;
-    std::vector<std::string> out_s;
     std::vector<const char*> out_names;
-    for (size_t i = 0; i < out_count; ++i) {
+    for (size_t i=0;i<out_count;++i) {
         out_name_hold.push_back(session_->GetOutputNameAllocated(i, alloc));
-        out_s.emplace_back(out_name_hold.back().get());
-        out_names.push_back(out_s.back().c_str());
+        const char* p = out_name_hold.back().get();
+        if (!p || p[0] == '\0') throw std::runtime_error("Batcher: model has empty output name");
+        out_names.push_back(p);
     }
 
-    auto outs = session_->Run(Ort::RunOptions{nullptr}, in_names, &input, 1, out_names.data(), out_names.size());
+    // run
+    auto outs = session_->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names.data(), out_names.size());
 
-    // Flatten outputs (POC: flatten all outputs sequentially into outputs_flat)
-    // This is intentionally minimal — adapt to your actual output layout.
+    // flatten all outputs sequentially
     std::vector<float> flat;
-    for (size_t i=0;i<outs.size();++i) {
-        auto ti = outs[i].GetTensorTypeAndShapeInfo();
+    for (size_t oi=0; oi<outs.size(); ++oi) {
+        auto &o = outs[oi];
+        auto ti = o.GetTensorTypeAndShapeInfo();
         size_t cnt = ti.GetElementCount();
-        const float* p = outs[i].GetTensorData<float>();
+        const float* p = o.GetTensorData<float>();
         flat.insert(flat.end(), p, p + cnt);
     }
 
-    // Store per-item slices in results_ keyed by zobrist.
-    std::lock_guard<std::mutex> l(mu_);
-    for (size_t i=0;i<B;++i) {
-        PredictionResult pr;
-        // naive: store full flat buffer for now (consumer must know layout)
-        pr.outputs_flat = flat;
-        pr.shape = { static_cast<int64_t>(B) }; // placeholder
-        results_[zobrist_keys[i]] = std::move(pr);
+    // store results per-item (for now, store same flat vector and shape; consumer decodes)
+    {
+        std::lock_guard<std::mutex> l(mu_);
+        stat_total_predictions_.fetch_add(static_cast<long long>(B));
+        stat_last_batch_size_.store(static_cast<long long>(B));
+        for (size_t i=0;i<B;++i) {
+            PredictionResult pr;
+            pr.outputs_flat = flat;                 // naive: consumer must decode per-item from layout
+            pr.shape = { static_cast<int64_t>(B) }; // placeholder; can be extended with full output shapes
+            results_[zobrist_keys[i]] = std::move(pr);
+        }
     }
 }

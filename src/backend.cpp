@@ -12,7 +12,6 @@
 #include <utility>
 #include <optional>
 #include <vector>
-#include <onnxruntime_cxx_api.h>
 #include <algorithm> 
 #include <cstring>
 
@@ -699,91 +698,6 @@ std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames) {
         if (!tmp.unmake()) break; // no more history
     }
     return out;
-}
-
-void backend::Board::onnx_mvp_predict() const {
-    // ONNX expects NHWC float32 with 70 channels (5 frames * 14)
-    constexpr int H = 8, W = 8, C = 70, F = 5; // frames
-    const int64_t ishape[4] = {1, H, W, C};
-
-    // --- 1) Build stacked_planes(5) into NHWC float32 buffer ---
-    std::vector<float> x((size_t)H*W*C, 0.0f);
-    backend::Board temp = *this;                   // copy so we can unmake safely
-    uint8_t frame[8*8*14];
-
-    for (int f = F-1; f >= 0; --f) {
-        make_frame_14(temp, frame);
-        // write into channels [f*14 .. f*14+13]
-        for (int rr=0; rr<H; ++rr) {
-            for (int cc=0; cc<W; ++cc) {
-                const uint8_t* src = &frame[(rr*8 + cc)*14];
-                float* dst = &x[(rr*W + cc)*C + f*14];
-                for (int k=0; k<14; ++k) dst[k] = float(src[k]);
-            }
-        }
-        if (!temp.unmake()) break;               // stop if no history left  :contentReference[oaicite:1]{index=1}
-    }
-
-    // --- 2) ORT session on CUDA ---
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "onnx_mvp");
-    Ort::SessionOptions so;
-    // minimal CUDA EP (no extra flags; works with ORT 1.23.x)
-    OrtCUDAProviderOptions cuda_opts{};
-    cuda_opts.device_id = 0;
-    so.AppendExecutionProvider_CUDA(cuda_opts);
-    const std::wstring wpath = L"C:\\Users\\Bryan\\Data\\chessbot_data\\models\\conv_factorized.onnx";
-    Ort::Session sess(env, wpath.c_str(), so);
-
-    // --- 3) Names / IO ---
-    Ort::AllocatorWithDefaultOptions alloc;
-
-    // input name (own it as std::string, pass const char*)
-    auto in_name = sess.GetInputNameAllocated(0, alloc);
-    std::string in_s = in_name.get();
-    const char* in_names[] = { in_s.c_str() };
-
-    // output names (own holders -> strings -> const char* vec)
-    std::vector<Ort::AllocatedStringPtr> out_name_hold;
-    std::vector<std::string> out_s;
-    std::vector<const char*> out_names;
-    const size_t out_count = sess.GetOutputCount();
-    out_name_hold.reserve(out_count);
-    out_s.reserve(out_count);
-    out_names.reserve(out_count);
-    for (size_t i = 0; i < out_count; ++i) {
-        out_name_hold.push_back(sess.GetOutputNameAllocated(i, alloc));
-        out_s.emplace_back(out_name_hold.back().get());
-        out_names.push_back(out_s.back().c_str());
-    }
-
-    // --- 4) Make tensor and run ---
-    auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value input = Ort::Value::CreateTensor<float>(mem, x.data(), x.size(), ishape, 4);
-
-    auto outs = sess.Run(Ort::RunOptions{nullptr},
-                        in_names, &input, 1,
-                        out_names.data(), out_names.size());
-
-    // --- 5) Print minimal info ---
-    std::printf("[ONNX MVP] input='%s' shape=[%lld,%d,%d,%d]\n",
-                in_s.c_str(), (long long)ishape[0], H, W, C);
-    std::printf("[ONNX MVP] outputs=%zu\n", outs.size());
-    for (size_t i = 0; i < outs.size(); ++i) {
-        auto ti  = outs[i].GetTensorTypeAndShapeInfo();
-        auto shp = ti.GetShape();
-        std::printf("  %zu) %s shape=[", i, out_s[i].c_str());
-        for (size_t j = 0; j < shp.size(); ++j)
-            std::printf("%lld%s", (long long)shp[j], (j + 1 < shp.size() ? "," : ""));
-        std::printf("]\n");
-
-        if (ti.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-            const float* p = outs[i].GetTensorData<float>();
-            size_t n = std::min<size_t>(ti.GetElementCount(), 8);
-            std::printf("     head: ");
-            for (size_t k = 0; k < n; ++k) std::printf("% .4f ", p[k]);
-            std::printf("\n");
-        }
-    }
 }
 
 } // namespace backend
