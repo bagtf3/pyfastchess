@@ -239,6 +239,10 @@ PYBIND11_MODULE(_core, m) {
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
+          
+               // in src/binding.cpp, inside the py::class_<backend::Board>(m, "Board") chain:
+          .def("onnx_mvp_predict", &backend::Board::onnx_mvp_predict,
+               "Run the ONNX CNN on stacked_planes(5) and print results (MVP).")
 
           .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
                "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")

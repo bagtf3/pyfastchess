@@ -96,6 +96,8 @@ public:
     std::vector<std::pair<int, std::string>> ordered_moves(
         const std::optional<std::string>& tt_best = std::nullopt) const;
 
+    // MVP: run ONNX (CUDA) on stacked_planes(5) and print results
+    void onnx_mvp_predict() const;
     
 private:
     static std::string color_to_char(chess::Color c);
