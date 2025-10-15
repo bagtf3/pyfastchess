@@ -21,6 +21,7 @@ cache_insert = _core.cache_insert
 cache_lookup = _core.cache_lookup
 Batcher = _core.Batcher
 get_batcher = _core.get_batcher
+PredResult = _core.PredictionResult
 
 __all__ = [
     "Board",
@@ -37,5 +38,6 @@ __all__ = [
     "cache_insert",
     "cache_lookup",
     "Batcher",
-    "get_batcher"
+    "get_batcher",
+    "PredResult"
 ]

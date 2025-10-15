@@ -154,9 +154,18 @@ void Batcher::run_batch(const std::vector<uint64_t>& zobrist_keys,
     for (const auto &v : inputs) if (v.size() != per_item)
         throw std::runtime_error("Batcher: inconsistent input lengths");
 
-    // build batch buffer
+    // expected fixed layout for this model
+    const int64_t H = 8, W = 8, C = 70;                 // channels = 14 * 5 frames
+    const int64_t expected_per_item = H * W * C;       // 8*8*70 = 4480
+    if (static_cast<int64_t>(per_item) != expected_per_item) {
+        throw std::runtime_error("Batcher: unexpected per-item length; expected " + std::to_string(expected_per_item));
+    }
+
+    // build batch buffer (flattened NHWC per-item layout already provided by caller)
     std::vector<float> batch; batch.resize(B * per_item);
-    for (size_t i=0;i<B;++i) std::memcpy(batch.data() + i*per_item, inputs[i].data(), per_item * sizeof(float));
+    for (size_t i = 0; i < B; ++i) {
+        std::memcpy(batch.data() + i * per_item, inputs[i].data(), per_item * sizeof(float));
+    }
 
     // prepare ONNX input
     Ort::AllocatorWithDefaultOptions alloc;
@@ -164,9 +173,8 @@ void Batcher::run_batch(const std::vector<uint64_t>& zobrist_keys,
     std::string in_name = in_name_ptr.get();
     const char* in_names[] = { in_name.c_str() };
 
-    // build shape: [B, ...] assuming session input dims known from first input shape
-    // For POC, assume model expects [B,8,8,channels] flattened as per_item => we pass [B, per_item] as 2D
-    std::vector<int64_t> input_shape = { static_cast<int64_t>(B), static_cast<int64_t>(per_item) };
+    // Use fixed NHWC shape for this model: [B,8,8,70]
+    std::vector<int64_t> input_shape = { static_cast<int64_t>(B), H, W, C };
 
     auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem, batch.data(), batch.size(), input_shape.data(), input_shape.size());
@@ -175,7 +183,7 @@ void Batcher::run_batch(const std::vector<uint64_t>& zobrist_keys,
     size_t out_count = session_->GetOutputCount();
     std::vector<Ort::AllocatedStringPtr> out_name_hold;
     std::vector<const char*> out_names;
-    for (size_t i=0;i<out_count;++i) {
+    for (size_t i = 0; i < out_count; ++i) {
         out_name_hold.push_back(session_->GetOutputNameAllocated(i, alloc));
         const char* p = out_name_hold.back().get();
         if (!p || p[0] == '\0') throw std::runtime_error("Batcher: model has empty output name");
@@ -185,26 +193,60 @@ void Batcher::run_batch(const std::vector<uint64_t>& zobrist_keys,
     // run
     auto outs = session_->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names.data(), out_names.size());
 
-    // flatten all outputs sequentially
-    std::vector<float> flat;
-    for (size_t oi=0; oi<outs.size(); ++oi) {
+    // Expect exactly 5 outputs for this model
+    if (outs.size() != 5) {
+        throw std::runtime_error("Batcher: unexpected number of outputs from model; expected 5");
+    }
+
+    // known head sizes per output
+    const std::array<size_t,5> head_sizes = { 1, 64, 64, 6, 4 };
+    // verify counts and collect raw pointers
+    std::vector<const float*> out_ptrs(outs.size());
+    std::array<size_t,5> out_counts{};
+    for (size_t oi = 0; oi < outs.size(); ++oi) {
         auto &o = outs[oi];
         auto ti = o.GetTensorTypeAndShapeInfo();
         size_t cnt = ti.GetElementCount();
-        const float* p = o.GetTensorData<float>();
-        flat.insert(flat.end(), p, p + cnt);
+        size_t expected_cnt = static_cast<size_t>(B) * head_sizes[oi];
+        if (cnt != expected_cnt) {
+            throw std::runtime_error("Batcher: unexpected element count for output " + std::to_string(oi)
+                + " got=" + std::to_string(cnt) + " expected=" + std::to_string(expected_cnt));
+        }
+        out_counts[oi] = head_sizes[oi];
+        out_ptrs[oi] = o.GetTensorData<float>();
     }
 
-    // store results per-item (for now, store same flat vector and shape; consumer decodes)
+    // prepare per-item PredictionResult objects
+    std::vector<PredictionResult> results_local(B);
+    size_t total_per_item = 0;
+    for (size_t hs : head_sizes) total_per_item += hs;
+    for (size_t i = 0; i < B; ++i) {
+        results_local[i].outputs_flat.reserve(total_per_item);
+    }
+
+    // slice each output into per-item segments and append in head order
+    for (size_t oi = 0; oi < outs.size(); ++oi) {
+        const float* base = out_ptrs[oi];
+        size_t head = out_counts[oi];
+        for (size_t i = 0; i < B; ++i) {
+            const float* src = base + i * head;
+            results_local[i].outputs_flat.insert(results_local[i].outputs_flat.end(), src, src + head);
+        }
+    }
+
+    // set shape metadata (head sizes) for each PredictionResult
+    std::vector<int64_t> shape_meta;
+    shape_meta.reserve(head_sizes.size());
+    for (auto s : head_sizes) shape_meta.push_back(static_cast<int64_t>(s));
     {
         std::lock_guard<std::mutex> l(mu_);
         stat_total_predictions_.fetch_add(static_cast<long long>(B));
         stat_last_batch_size_.store(static_cast<long long>(B));
-        for (size_t i=0;i<B;++i) {
-            PredictionResult pr;
-            pr.outputs_flat = flat;                 // naive: consumer must decode per-item from layout
-            pr.shape = { static_cast<int64_t>(B) }; // placeholder; can be extended with full output shapes
-            results_[zobrist_keys[i]] = std::move(pr);
+        stat_total_batches_.fetch_add(1);
+        // store into results_ map keyed by zobrist
+        for (size_t i = 0; i < B; ++i) {
+            results_local[i].shape = shape_meta;
+            results_[zobrist_keys[i]] = std::move(results_local[i]);
         }
     }
 }

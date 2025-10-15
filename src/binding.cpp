@@ -539,4 +539,7 @@ PYBIND11_MODULE(_core, m) {
                .def("get_result", &Batcher::get_result)
                .def("clear_results_cache", &Batcher::clear_results_cache)
                .def("stats", &Batcher::stats_map);
+          py::class_<PredictionResult>(m, "PredictionResult")
+               .def_readonly("outputs_flat", &PredictionResult::outputs_flat)
+               .def_readonly("shape", &PredictionResult::shape);
 }
