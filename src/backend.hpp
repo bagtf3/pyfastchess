@@ -27,6 +27,11 @@ struct QStats {
     int time_used_ms = 0;
 };
 
+class Board;
+
+// Return H x W x (14 * num_frames) uint8 bytes (channels-last, HWC)
+std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames = 5);
+
 class Board {
 public:
     Board();
@@ -35,18 +40,17 @@ public:
     // Use default copy/move; fast if chess::Board is trivially copyable
     Board(const Board&) = default;
     Board& operator=(const Board&) = default;
-
     Board clone() const { return *this; }  // helper for pybind
 
     // Core API
     std::string fen(bool include_counters = true) const;
     std::vector<std::string> legal_moves() const;
     bool push_uci(const std::string& uci);
-    bool unmake();  // <-- CHANGED from void to bool
-    // in class backend::Board (public)
-    std::uint64_t hash() const;
+    bool unmake();
 
+    std::uint64_t hash() const;
     std::uint64_t zobrist_full() const;
+
     std::string side_to_move() const;
     std::string enpassant_sq() const;
     std::string castling_rights() const;
@@ -55,25 +59,32 @@ public:
     int fullmove_number() const;
     bool is_repetition(int count) const;
     bool would_be_repetition(const std::string& uci, int count = 3) const;
+
     bool is_capture(const std::string& uci) const;
     bool is_pawn_move(const std::string& uci) const;
     bool in_check() const;
     bool gives_check(const std::string& uci) const;
     bool gives_checkmate(const std::string& uci) const;
+
     std::pair<std::string, std::string> is_game_over() const;
     bool is_terminal() const;
+
     size_t history_size() const;
     std::vector<std::string> history_uci() const;
-    void clear_history();  // optional
+    void clear_history();
+
     std::string san(const std::string& uci) const;
     int material_count() const;
     int piece_count() const;
     int mvvlva(const std::string& uci) const;
+
     // Returns (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme
     std::tuple<int,int,int,int> move_to_labels(const std::string& uci) const;
+
     // Returns four vectors: from, to, piece, promo (collapsed promo scheme)
     std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
     moves_to_labels(const std::vector<std::string>& ucis) const;
+
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
     int piece_at(int square) const;
     // convenience: same but returns 0..6 (0 = none, 1..6 pawn..king) and separate color function

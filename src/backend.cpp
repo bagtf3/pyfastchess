@@ -12,8 +12,9 @@
 #include <utility>
 #include <optional>
 #include <vector>
-#include <onnxruntime_cxx_api.h>  // add near other includes at top if you prefer
+#include <onnxruntime_cxx_api.h>
 #include <algorithm> 
+#include <cstring>
 
 #ifdef _MSC_VER
   #include <intrin.h>
@@ -618,63 +619,87 @@ terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
 }
 
 namespace {
-
-// 12 piece planes P..K, p..k
-static inline int piece_plane(char ch) {
-    switch (ch) {
-        case 'P': return 0; case 'N': return 1; case 'B': return 2;
-        case 'R': return 3; case 'Q': return 4; case 'K': return 5;
-        case 'p': return 6; case 'n': return 7; case 'b': return 8;
-        case 'r': return 9; case 'q': return 10; case 'k': return 11;
-        default:  return -1;
-    }
-}
-
-// One frame: 8x8x14 uint8 (HWC)
-static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
-    std::fill(out, out + 8*8*14, (uint8_t)0);
-
-    // piece planes from FEN
-    std::string fen = b.fen(true);
-    const auto sp = fen.find(' ');
-    const std::string pieces = (sp == std::string::npos) ? fen : fen.substr(0, sp);
-
-    int r=0, c=0;
-    for (char ch : pieces) {
-        if (ch == '/') { ++r; c = 0; continue; }
-        if (ch >= '1' && ch <= '8') { c += (ch - '0'); continue; }
-        int p = piece_plane(ch);
-        if (p >= 0 && r>=0 && r<8 && c>=0 && c<8) {
-            out[(r*8 + c)*14 + p] = 1;
-        }
-        ++c;
-    }
-
-    // side-to-move plane (index 12)
-    const bool wtm = (b.side_to_move() == "w");
-    for (int rr=0; rr<8; ++rr)
-        for (int cc=0; cc<8; ++cc)
-            out[(rr*8 + cc)*14 + 12] = wtm ? 1 : 0;
-
-    // castling plane (index 13), 4 quadrants KQkq
-    std::string cs = b.castling_rights();
-    bool wk = cs.find('K') != std::string::npos;
-    bool wq = cs.find('Q') != std::string::npos;
-    bool bk = cs.find('k') != std::string::npos;
-    bool bq = cs.find('q') != std::string::npos;
-    for (int rr=0; rr<8; ++rr) {
-        for (int cc=0; cc<8; ++cc) {
-            uint8_t v = 0;
-            if (rr < 4 && cc < 4)       v = wk ? 1 : 0;
-            else if (rr < 4 && cc >= 4) v = wq ? 1 : 0;
-            else if (rr >= 4 && cc < 4) v = bk ? 1 : 0;
-            else                         v = bq ? 1 : 0;
-            out[(rr*8 + cc)*14 + 13] = v;
+    // 12 piece planes P..K, p..k
+    static inline int piece_plane(char ch) {
+        switch (ch) {
+            case 'P': return 0; case 'N': return 1; case 'B': return 2;
+            case 'R': return 3; case 'Q': return 4; case 'K': return 5;
+            case 'p': return 6; case 'n': return 7; case 'b': return 8;
+            case 'r': return 9; case 'q': return 10; case 'k': return 11;
+            default:  return -1;
         }
     }
-}
 
+    // One frame: 8x8x14 uint8 (HWC)
+    static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
+        std::fill(out, out + 8*8*14, (uint8_t)0);
+
+        // piece planes from FEN
+        std::string fen = b.fen(true);
+        const auto sp = fen.find(' ');
+        const std::string pieces = (sp == std::string::npos) ? fen : fen.substr(0, sp);
+
+        int r=0, c=0;
+        for (char ch : pieces) {
+            if (ch == '/') { ++r; c = 0; continue; }
+            if (ch >= '1' && ch <= '8') { c += (ch - '0'); continue; }
+            int p = piece_plane(ch);
+            if (p >= 0 && r>=0 && r<8 && c>=0 && c<8) {
+                out[(r*8 + c)*14 + p] = 1;
+            }
+            ++c;
+        }
+
+        // side-to-move plane (index 12)
+        const bool wtm = (b.side_to_move() == "w");
+        for (int rr=0; rr<8; ++rr)
+            for (int cc=0; cc<8; ++cc)
+                out[(rr*8 + cc)*14 + 12] = wtm ? 1 : 0;
+
+        // castling plane (index 13), 4 quadrants KQkq
+        std::string cs = b.castling_rights();
+        bool wk = cs.find('K') != std::string::npos;
+        bool wq = cs.find('Q') != std::string::npos;
+        bool bk = cs.find('k') != std::string::npos;
+        bool bq = cs.find('q') != std::string::npos;
+        for (int rr=0; rr<8; ++rr) {
+            for (int cc=0; cc<8; ++cc) {
+                uint8_t v = 0;
+                if (rr < 4 && cc < 4)       v = wk ? 1 : 0;
+                else if (rr < 4 && cc >= 4) v = wq ? 1 : 0;
+                else if (rr >= 4 && cc < 4) v = bk ? 1 : 0;
+                else                         v = bq ? 1 : 0;
+                out[(rr*8 + cc)*14 + 13] = v;
+            }
+        }
+    }
 } // anonymous
+
+std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames) {
+    constexpr int H = 8, W = 8, C = 14;          // H x W x channels per frame
+    int F = (num_frames > 0) ? num_frames : 5;   // default 5 frames
+    std::vector<uint8_t> out((size_t)H * W * C * F);
+
+    // We copy the board so we can unmake moves safely while building frames.
+    Board tmp = b;
+    std::vector<uint8_t> frame(H * W * C);
+
+    // Fill frames from newest to oldest (so the last played move is last element)
+    for (int f = F - 1; f >= 0; --f) {
+        make_frame_14(tmp, frame.data()); // your existing helper that fills 8*8*14 bytes
+        // write frame into out with channel-major per frame at end
+        // layout: for each cell (r,c): channels[0..13] for frame0, then frame1, ...
+        for (int r = 0; r < H; ++r) {
+            for (int c = 0; c < W; ++c) {
+                uint8_t* src = frame.data() + (r * W + c) * C;
+                uint8_t* dst = out.data() + ( (r * W + c) * C * F + f * C );
+                std::memcpy(dst, src, C);
+            }
+        }
+        if (!tmp.unmake()) break; // no more history
+    }
+    return out;
+}
 
 void backend::Board::onnx_mvp_predict() const {
     // ONNX expects NHWC float32 with 70 channels (5 frames * 14)
