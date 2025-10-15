@@ -1,3 +1,8 @@
+ONNX_RUNTIME = r"C:\libs\onnxruntime-win-x64-gpu-1.19.0\lib"
+ 
+import os
+os.add_dll_directory(ONNX_RUNTIME)
+
 from importlib import import_module
 
 _core = import_module("pyfastchess._core")
