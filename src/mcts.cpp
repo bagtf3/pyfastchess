@@ -1,10 +1,11 @@
-#include "mcts.hpp"
-#include "backend.hpp"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
 #include <atomic>
+#include "mcts.hpp"
+#include "backend.hpp"
 #include "cache.hpp"
+#include "batcher.hpp"
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -184,8 +185,25 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         if (!node) break;
 
         if (tag == MCTSTree::CollectTag::NEW_LEAF) {
-            (void)this->queue_pending(node);
-            ++new_count;
+            // queue node (assigns token if needed) and push the encoded input to the Batcher
+            uint64_t token = this->queue_pending(node);
+            // Encode the board into bytes (H x W x (14 * frames)) — backend returns uint8 bytes
+            const int frames = 5;
+            std::vector<uint8_t> bytes = backend::stacked_planes_bytes(node->board, frames);
+
+            // Convert bytes -> float vector expected by Batcher (model expects float32 NHWC flattened)
+            std::vector<float> input;
+            input.reserve(bytes.size());
+            for (uint8_t b : bytes) input.push_back(static_cast<float>(b));
+
+            // Push to the batcher (thread-safe)
+            try {
+                Batcher::instance().push_prediction(token, node->zobrist, input);
+            } catch (const std::exception& e) {
+                // Don't crash tree — log and continue; you can extend logging as needed
+                std::cerr << "[MCTS] failed to push to batcher: " << e.what() << "\n";
+            }
+        ++new_count;
         } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
         } else if (tag == MCTSTree::CollectTag::TERMINAL) {
