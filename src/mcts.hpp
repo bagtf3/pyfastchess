@@ -8,10 +8,11 @@
 #include <optional>
 #include <cmath>
 #include <memory>
-#include <unordered_map>
 #include <atomic>
+#include <cstdint>
 #include "backend.hpp"
 #include "evaluator.hpp"
+
 
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
@@ -36,7 +37,6 @@ struct PVItem {
 class MCTSTree;
 
 struct MCTSNode {
-    uint64_t token = 0;  // opaque id for routing predictions
 
     // --- Tree links ---
     MCTSNode* parent = nullptr;
@@ -106,26 +106,16 @@ public:
         const std::vector<std::pair<std::string, float>>& move_priors,
         float value_white_pov, bool cache=true);
 
-    // ---- pending/token API (single declarations only) ----
+    // Queue a leaf as pending
+    uint64_t queue_pending(MCTSNode* n);
 
-    // Queue a leaf as pending; returns a stable token.
-    uint64_t queue_pending(struct MCTSNode* n);
-
-    // Apply predictions to a queued leaf by token.
-    bool apply_result_token(
-        uint64_t token,
-        const std::vector<std::pair<std::string, float>>& move_priors,
-        float value_white_pov,
-        bool cache);
-
-    // Clear all pending tokens (call on reset / after making a move).
+    // Clear all pending (call on reset / after making a move).
     void clear_pending();
 
     // Read-only accessor for bindings. Keep it inline to avoid ODR issues.
-    const std::unordered_map<uint64_t, struct MCTSNode*>& pending_nodes() const {
-        return pending_nodes_;
-    }
+    std::unordered_map<uint64_t, MCTSNode*> pending_nodes_;
 
+    void apply_batcher_results();
     // Stats from root (sorted by visits descending): [(uci, N), ...]
     std::vector<std::pair<std::string, int>> root_child_visits() const;
 
@@ -179,9 +169,6 @@ private:
 
     // Tunable scale for cp -> [-1,1] mapping
     float vprime_scale_ = 1500.0f;
-
-    std::atomic<uint64_t> next_token_{1};
-    std::unordered_map<uint64_t, struct MCTSNode*> pending_nodes_;
 
     size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
     size_t count_terminal_ = 0;  // number of terminal hits in last collection

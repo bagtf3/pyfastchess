@@ -305,16 +305,13 @@ PYBIND11_MODULE(_core, m) {
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
-          // binding.cpp — replace existing collect_many_leaves binding with this
           .def("collect_many_leaves", &MCTSTree::collect_many_leaves,
                py::arg("n_new"), py::arg("n_fastpath") = 0,
                "Collect up to n_new fresh leaves, fill the tree's pending queue, and return counts.")
           
-          // Return a Python list of tuples:
-          // (zobrist, stacked_planes(nplanes), piece_count, legal_moves)
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (const auto& kv : t.pending_nodes()) {
+               for (const auto& kv : t.pending_nodes_) {
                     uint64_t tok = kv.first;
                     MCTSNode* n  = kv.second;
                     if (!n) continue;
@@ -337,19 +334,9 @@ PYBIND11_MODULE(_core, m) {
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
 
-          .def("apply_result_token", [](MCTSTree& t, uint64_t token,
-               const std::vector<std::pair<std::string, float>>& move_priors,
-               float value_white_pov,
-               bool cache) {
-               if (!t.apply_result_token(token, move_priors, value_white_pov, cache)) {
-                    throw std::runtime_error("apply_result_token: stale/unknown token");
-               }
-          },
-          py::arg("token"),
-          py::arg("move_priors"),
-          py::arg("value_white_pov"),
-          py::arg("cache") = true)
-          
+          .def("apply_batcher_results", &MCTSTree::apply_batcher_results)
+          .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
+
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
@@ -538,6 +525,22 @@ PYBIND11_MODULE(_core, m) {
                .def("force_predict", &Batcher::force_predict)
                .def("get_result", &Batcher::get_result)
                .def("clear_results_cache", &Batcher::clear_results_cache)
+               .def("set_cpu_threads", &Batcher::set_cpu_threads,
+                    py::arg("intra") = 0, py::arg("inter") = 1)
+               .def("batch_history", [](Batcher& b) {
+                    py::list out;
+                    auto hist = b.batch_history();
+                    for (const auto& e : hist) {
+                         py::dict d;
+                         d["id"]         = py::int_(e.id);
+                         d["size"]       = py::int_(e.size);
+                         d["run_ms"]     = py::int_(e.run_ms);
+                         d["total_ms"]   = py::int_(e.total_ms);
+                         d["t_start_ns"] = py::int_(e.t_start_ns);
+                         d["t_end_ns"]   = py::int_(e.t_end_ns);
+                         out.append(std::move(d));
+                    } return out; })
+               .def("clear_batch_history", &Batcher::clear_batch_history)
                .def("stats", &Batcher::stats_map);
           py::class_<PredictionResult>(m, "PredictionResult")
                .def_readonly("outputs_flat", &PredictionResult::outputs_flat)

@@ -3,7 +3,6 @@
 
 #include <onnxruntime_cxx_api.h>
 #include <pybind11/pybind11.h>
-
 #include <atomic>
 #include <condition_variable>
 #include <map>
@@ -13,6 +12,10 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <deque>
+#include <chrono>
+
+
 
 struct PredictionResult {
     std::vector<float> outputs_flat;    // flattened concatenation of all output tensors
@@ -21,11 +24,24 @@ struct PredictionResult {
 
 class Batcher {
 public:
+    struct BatchHistoryEntry {
+        uint64_t id;
+        size_t   size;
+        long long run_ms;     // session->Run() latency
+        long long total_ms;   // concat + Run + postprocess
+        uint64_t t_start_ns;
+        uint64_t t_end_ns;
+    };
+
+    // CPU-only helpers (safe to call from Python)
+    void set_cpu_threads(int intra, int inter);
+    std::vector<BatchHistoryEntry> batch_history();
+    void clear_batch_history();
+    void load_model(const std::string& onnx_path);
+
     // singleton
     static Batcher& instance();
 
-    // lifecycle
-    void load_model(const std::string& onnx_path);
     void start();
     void stop();
 
@@ -49,6 +65,12 @@ public:
     std::map<std::string, long long> stats_map();
 
     ~Batcher();
+
+    static inline uint64_t now_ns() {
+        using namespace std::chrono;
+        return duration_cast<nanoseconds>(
+            steady_clock::now().time_since_epoch()).count();
+    }
 
 private:
     Batcher();
@@ -90,4 +112,12 @@ private:
     std::atomic<long long> stat_total_predictions_{0};
     std::atomic<long long> stat_failed_predictions_{0};
     std::atomic<long long> stat_last_batch_size_{0};
+    int cpu_intra_threads_{0};
+    int cpu_inter_threads_{1};
+    std::mutex hist_mu_;
+    std::deque<BatchHistoryEntry> hist_;
+    size_t hist_cap_{128};
+    uint64_t hist_counter_{0};
+    bool input_is_nchw_{false};
+    int64_t in_C_{70}, in_H_{8}, in_W_{8};
 };

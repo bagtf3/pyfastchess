@@ -185,25 +185,24 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         if (!node) break;
 
         if (tag == MCTSTree::CollectTag::NEW_LEAF) {
-            // queue node (assigns token if needed) and push the encoded input to the Batcher
-            uint64_t token = this->queue_pending(node);
-            // Encode the board into bytes (H x W x (14 * frames)) — backend returns uint8 bytes
-            const int frames = 5;
+            // queue node by zobrist (returns zobrist key)
+            uint64_t z = this->queue_pending(node);
+
+            // Encode the board into bytes (H x W x (14 * frames))
+            const int frames = 5; // POC: hardcoded frames; change if you want configurable
             std::vector<uint8_t> bytes = backend::stacked_planes_bytes(node->board, frames);
 
-            // Convert bytes -> float vector expected by Batcher (model expects float32 NHWC flattened)
+            // Convert bytes -> float vector expected by Batcher
             std::vector<float> input;
             input.reserve(bytes.size());
             for (uint8_t b : bytes) input.push_back(static_cast<float>(b));
-
-            // Push to the batcher (thread-safe)
+            
             try {
-                Batcher::instance().push_prediction(token, node->zobrist, input);
+                Batcher::instance().push_prediction(0, z, input);
             } catch (const std::exception& e) {
-                // Don't crash tree — log and continue; you can extend logging as needed
                 std::cerr << "[MCTS] failed to push to batcher: " << e.what() << "\n";
             }
-        ++new_count;
+            ++new_count;
         } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
         } else if (tag == MCTSTree::CollectTag::TERMINAL) {
@@ -314,35 +313,111 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->is_expanded = true;
 }
 
+// Keys pending_nodes_ by node->zobrist
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
-    if (n->token == 0) {
-        uint64_t t = next_token_.fetch_add(1, std::memory_order_relaxed);
-        n->token = t;
-        pending_nodes_.emplace(t, n);
-        return t;
-    }
-    // already queued
-    pending_nodes_[n->token] = n;
-    return n->token;
+
+    // Insert (or update) by zobrist key.
+    pending_nodes_[n->zobrist] = n;
+    return n->zobrist;
 }
 
-bool MCTSTree::apply_result_token(
-    uint64_t token,
-    const std::vector<std::pair<std::string, float>>& move_priors,
-    float value_white_pov,
-    bool cache)
-{
-    auto it = pending_nodes_.find(token);
-    if (it == pending_nodes_.end()) return false;
+static void softmax_inplace(std::vector<float>& v) {
+    if (v.empty()) return;
+    float m = *std::max_element(v.begin(), v.end());
+    double sum = 0.0;
+    for (auto &x : v) {
+        double ex = std::exp((double)x - (double)m);
+        x = static_cast<float>(ex);
+        sum += ex;
+    }
+    if (sum <= 0.0) {
+        float u = 1.0f / static_cast<float>(v.size());
+        for (auto &x : v) x = u;
+    } else {
+        double inv = 1.0 / sum;
+        for (auto &x : v) x = static_cast<float>((double)x * inv);
+    }
+}
 
-    MCTSNode* node = it->second;
-    pending_nodes_.erase(it);
-    node->token = 0;
+// New method: scan pending_nodes_ (zobrist -> node), check batcher results,
+// softmax factorized heads, compute priors, and apply_result (caches).
+void MCTSTree::apply_batcher_results() {
+    // copy keys first to avoid modifying map while iterating
+    std::vector<uint64_t> keys;
+    keys.reserve(pending_nodes_.size());
+    for (const auto &kv : pending_nodes_) keys.push_back(kv.first);
 
-    // Your existing node-based apply path likely returns void.
-    this->apply_result(node, move_priors, value_white_pov, cache);
-    return true;
+    for (uint64_t zob : keys) {
+        auto it_node = pending_nodes_.find(zob);
+        if (it_node == pending_nodes_.end()) continue; // might have been removed
+
+        MCTSNode* node = it_node->second;
+        if (!node) {
+            pending_nodes_.erase(it_node);
+            continue;
+        }
+
+        // ask batcher for a result for this zobrist
+        auto pres = Batcher::instance().get_result(zob);
+        if (!pres.has_value()) continue; // not ready yet
+
+        PredictionResult pr = pres.value(); // copy result
+        // Expected pr.shape == {1, 64, 64, 6, 4} and pr.outputs_flat length == sum(heads)
+        if (pr.shape.size() < 5) {
+            std::cerr << "[MCTS] apply_batcher_results: unexpected shape metadata\n";
+            // remove pending to avoid spin? Optionally keep; here remove to avoid stuck node
+            pending_nodes_.erase(it_node);
+            continue;
+        }
+
+        // read head sizes
+        size_t hs_value = static_cast<size_t>(pr.shape[0]); // should be 1
+        size_t hs_from  = static_cast<size_t>(pr.shape[1]); // 64
+        size_t hs_to    = static_cast<size_t>(pr.shape[2]); // 64
+        size_t hs_piece = static_cast<size_t>(pr.shape[3]); // 6
+        size_t hs_promo = static_cast<size_t>(pr.shape[4]); // 4
+
+        const std::vector<float> &flat = pr.outputs_flat;
+        size_t idx = 0;
+        if (idx + hs_value > flat.size()) { pending_nodes_.erase(it_node); continue; }
+        float value_white = flat[idx]; idx += hs_value;
+
+        if (idx + hs_from > flat.size()) { pending_nodes_.erase(it_node); continue; }
+        std::vector<float> p_from(flat.begin() + idx, flat.begin() + idx + hs_from); idx += hs_from;
+
+        if (idx + hs_to > flat.size()) { pending_nodes_.erase(it_node); continue; }
+        std::vector<float> p_to(flat.begin() + idx, flat.begin() + idx + hs_to); idx += hs_to;
+
+        if (idx + hs_piece > flat.size()) { pending_nodes_.erase(it_node); continue; }
+        std::vector<float> p_piece(flat.begin() + idx, flat.begin() + idx + hs_piece); idx += hs_piece;
+
+        if (idx + hs_promo > flat.size()) { pending_nodes_.erase(it_node); continue; }
+        std::vector<float> p_promo(flat.begin() + idx, flat.begin() + idx + hs_promo); idx += hs_promo;
+
+        // Softmax each factorized head
+        softmax_inplace(p_from);
+        softmax_inplace(p_to);
+        softmax_inplace(p_piece);
+        softmax_inplace(p_promo);
+
+        // Build final priors from factorized heads using the existing helper.
+        // This mirrors your Python: pri = prior_engine.build(board, legal, p_from, p_to, p_piece, p_promo, root_stm)
+        // Use mix = 0.5f (same default used elsewhere); adjust if desired.
+        float mix = 0.5f;
+        std::vector<std::pair<std::string, float>> pri =
+            priors_from_heads(node->board, node->legal_moves, p_from, p_to, p_piece, p_promo, mix);
+
+        // Apply result (this will also insert to Cache if cache==true)
+        try {
+            this->apply_result(node, pri, value_white, /*cache=*/true);
+        } catch (const std::exception &e) {
+            std::cerr << "[MCTS] apply_result threw: " << e.what() << "\n";
+        }
+
+        // Remove from pending map (we consumed it)
+        pending_nodes_.erase(it_node);
+    }
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
