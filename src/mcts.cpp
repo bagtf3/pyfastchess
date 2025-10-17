@@ -55,6 +55,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct) {
         backend::Board childb = board;
         if (!childb.push_uci(*best_mv)) return nullptr;
         auto up = std::make_unique<MCTSNode>(childb, this, *best_mv);
+        up->zobrist = childb.hash();
         best_child = up.get();
         children[*best_mv] = std::move(up);
     }
@@ -80,13 +81,15 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
         throw std::runtime_error("MCTSTree ctor: evaluator not configured");
     }
 
+    root_->zobrist = root_->board.hash();
+
     // stash raw pointer for fastest access in hot-path
     evaluator_raw_ = evaluator_.get();
 
     // prebuild QOptions once
-    qopts_shallow_.max_qply = 3;
-    qopts_shallow_.max_qcaptures = 8;
-    qopts_shallow_.time_limit_ms = 2;
+    qopts_shallow_.max_qply = 5;
+    qopts_shallow_.max_qcaptures = 16;
+    qopts_shallow_.time_limit_ms = 3;
 }
 
 // Internal variant of collect_one_leaf that reports reason
@@ -374,6 +377,7 @@ bool MCTSTree::advance_root(const std::string& mv) {
             return false;
         }
         root_ = std::make_unique<MCTSNode>(nb, nullptr, "");
+        root_->zobrist = nb.hash();
         ++epoch_;
         return true;
     }
