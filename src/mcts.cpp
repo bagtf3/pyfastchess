@@ -111,10 +111,6 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         back_up_along_path(node, v, /*add_visit=*/true);
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
-
-    if (node->zobrist == 0ULL) {
-        node->zobrist = node->board.hash();
-    }
     
     // fastpath: check cache for a stored NN result before
     // expanding or running the shallow qsearch. If present, apply it and return.
@@ -186,21 +182,6 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         if (tag == MCTSTree::CollectTag::NEW_LEAF) {
             // queue node by zobrist (returns zobrist key)
             uint64_t z = this->queue_pending(node);
-
-            // Encode the board into bytes (H x W x (14 * frames))
-            const int frames = 5; // POC: hardcoded frames; change if you want configurable
-            std::vector<uint8_t> bytes = backend::stacked_planes_bytes(node->board, frames);
-
-            // Convert bytes -> float vector expected by Batcher
-            std::vector<float> input;
-            input.reserve(bytes.size());
-            for (uint8_t b : bytes) input.push_back(static_cast<float>(b));
-            
-            try {
-                Batcher::instance().push_prediction(0, z, input);
-            } catch (const std::exception& e) {
-                std::cerr << "[MCTS] failed to push to batcher: " << e.what() << "\n";
-            }
             ++new_count;
         } else if (tag == MCTSTree::CollectTag::CACHED) {
             ++cached_count;
@@ -215,10 +196,6 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
     return { count_new_, count_terminal_, count_cached_ };
 }
-
-size_t MCTSTree::count_new() const { return count_new_; }
-size_t MCTSTree::count_terminal() const { return count_terminal_; }
-size_t MCTSTree::count_cached() const { return count_cached_; }
 
 void MCTSTree::clear_pending() {
     pending_nodes_.clear();

@@ -114,11 +114,7 @@ public:
 
     // Read-only accessor for bindings. Keep it inline to avoid ODR issues.
     std::unordered_map<uint64_t, MCTSNode*> pending_nodes_;
-
-    void apply_batcher_results();
-    // Stats from root (sorted by visits descending): [(uci, N), ...]
-    std::vector<std::pair<std::string, int>> root_child_visits() const;
-
+    
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;
 
@@ -144,10 +140,6 @@ public:
     // Prebuilt shallow QOptions used by collect_one_leaf (initialized in ctor)
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
-
-    size_t count_new() const;
-    size_t count_terminal() const;
-    size_t count_cached() const;
 
 private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
