@@ -106,6 +106,10 @@ public:
         const std::vector<std::pair<std::string, float>>& move_priors,
         float value_white_pov, bool cache=true);
 
+    void apply_result_with_zobrist(
+        uint64_t zobrist, const std::vector<std::pair<std::string, float>>& move_priors,
+        float value_white_pov, bool cache);
+    
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
 

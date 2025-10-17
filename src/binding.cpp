@@ -310,21 +310,27 @@ PYBIND11_MODULE(_core, m) {
           
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (const auto& kv : t.pending_nodes_) {
-                    uint64_t tok = kv.first;
-                    MCTSNode* n  = kv.second;
+               for (MCTSNode* n : t.pending_nodes_) {
                     if (!n) continue;
                     uint64_t z   = n->zobrist;
                     auto planes  = ::stacked_planes(n->board, nplanes);
                     auto pc      = n->board.piece_count();
                     const auto& lm = n->legal_moves;
-                    out.append(py::make_tuple(tok, z, planes, pc, lm));
+                    out.append(py::make_tuple(z, planes, pc, lm));
                }
                return out;
-          },
-          py::arg("nplanes"),
-          "Encode pending leaves: (token, zobrist, planes, piece_count, legal_moves).")
+               },
+               py::arg("nplanes"),
+               "Encode pending leaves: (zobrist, planes, piece_count, legal_moves).")
 
+          .def("apply_result_with_zobrist",
+               [](MCTSTree& t, uint64_t zobrist,
+                    const std::vector<std::pair<std::string, float>>& move_priors,
+                    float value_white_pov, bool cache = true) {
+                    t.apply_result_with_zobrist(zobrist, move_priors, value_white_pov, cache);
+               },
+               py::arg("zobrist"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+               
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
