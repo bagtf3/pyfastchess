@@ -1,4 +1,3 @@
-// evaluator.cpp
 #include "evaluator.hpp"
 #include "backend.hpp"
 #include <sstream>

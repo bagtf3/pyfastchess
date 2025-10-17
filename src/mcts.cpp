@@ -5,7 +5,6 @@
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
-#include "batcher.hpp"
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);

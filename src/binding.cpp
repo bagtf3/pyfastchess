@@ -9,7 +9,6 @@
 #include "mcts.hpp"
 #include "evaluator.hpp"
 #include "cache.hpp"
-#include "batcher.hpp"
 
 namespace py = pybind11;
 
@@ -333,8 +332,6 @@ PYBIND11_MODULE(_core, m) {
                     t.apply_result(node, move_priors, value_white_pov, cache);
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
-
-          .def("apply_batcher_results", &MCTSTree::apply_batcher_results)
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
 
           .def("root_child_visits", &MCTSTree::root_child_visits)
@@ -511,38 +508,4 @@ PYBIND11_MODULE(_core, m) {
           }
           Cache::instance().insert(key, std::move(e));
           });
-
-          m.def("get_batcher", []() -> Batcher& {
-               return Batcher::instance();
-               }, py::return_value_policy::reference);
-
-          py::class_<Batcher>(m, "Batcher")
-               .def("load_model", &Batcher::load_model)
-               .def("start", &Batcher::start)
-               .def("stop", &Batcher::stop)
-               .def("set_queue_size", &Batcher::set_queue_size)
-               .def("push_prediction", &Batcher::push_prediction, py::arg("token"), py::arg("zobrist"), py::arg("input_array"))
-               .def("force_predict", &Batcher::force_predict)
-               .def("get_result", &Batcher::get_result)
-               .def("clear_results_cache", &Batcher::clear_results_cache)
-               .def("set_cpu_threads", &Batcher::set_cpu_threads,
-                    py::arg("intra") = 0, py::arg("inter") = 1)
-               .def("batch_history", [](Batcher& b) {
-                    py::list out;
-                    auto hist = b.batch_history();
-                    for (const auto& e : hist) {
-                         py::dict d;
-                         d["id"]         = py::int_(e.id);
-                         d["size"]       = py::int_(e.size);
-                         d["run_ms"]     = py::int_(e.run_ms);
-                         d["total_ms"]   = py::int_(e.total_ms);
-                         d["t_start_ns"] = py::int_(e.t_start_ns);
-                         d["t_end_ns"]   = py::int_(e.t_end_ns);
-                         out.append(std::move(d));
-                    } return out; })
-               .def("clear_batch_history", &Batcher::clear_batch_history)
-               .def("stats", &Batcher::stats_map);
-          py::class_<PredictionResult>(m, "PredictionResult")
-               .def_readonly("outputs_flat", &PredictionResult::outputs_flat)
-               .def_readonly("shape", &PredictionResult::shape);
 }

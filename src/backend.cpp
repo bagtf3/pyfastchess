@@ -1,6 +1,3 @@
-#include "chess.hpp" 
-#include "backend.hpp"
-#include "evaluator.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -14,6 +11,9 @@
 #include <vector>
 #include <algorithm> 
 #include <cstring>
+#include "chess.hpp" 
+#include "backend.hpp"
+#include "evaluator.hpp"
 
 #ifdef _MSC_VER
   #include <intrin.h>
