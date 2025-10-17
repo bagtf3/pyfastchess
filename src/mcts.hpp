@@ -133,7 +133,7 @@ public:
     int  epoch() const { return epoch_; }
 
     std::vector<ChildDetail> root_child_details() const;
-    // (avg_depth_by_visits, max_depth)
+    std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
     
     std::vector<PVItem> principal_variation(int max_len = 24) const;

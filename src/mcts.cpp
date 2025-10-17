@@ -323,7 +323,7 @@ std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
     rows.reserve(r->children.size());
     for (const auto& kv : r->children) rows.emplace_back(kv.first, kv.second->N);
     std::sort(rows.begin(), rows.end(), [](auto& a, auto& b){ return a.second > b.second; });
-    return rows;  // mirrors Python’s sorted (uci, N) list
+    return rows;
 }
 
 float MCTSTree::visit_weighted_Q() const {

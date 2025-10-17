@@ -310,9 +310,10 @@ PYBIND11_MODULE(_core, m) {
           
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (MCTSNode* n : t.pending_nodes_) {
+               for (const auto& kv : t.pending_nodes_) {
+                    uint64_t z = kv.first;
+                    MCTSNode* n = kv.second;
                     if (!n) continue;
-                    uint64_t z   = n->zobrist;
                     auto planes  = ::stacked_planes(n->board, nplanes);
                     auto pc      = n->board.piece_count();
                     const auto& lm = n->legal_moves;
