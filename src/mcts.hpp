@@ -12,7 +12,7 @@
 #include <cstdint>
 #include "backend.hpp"
 #include "evaluator.hpp"
-
+#include "prior_registry.hpp"
 
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
@@ -33,8 +33,12 @@ struct PVItem {
     float Q;       // child->Q (white-POV)
 };
 
+// forward declare
+struct PriorEngine;
+
 // Forward decl
 class MCTSTree;
+
 
 struct MCTSNode {
 
@@ -92,7 +96,7 @@ public:
                       float c_puct,
                       std::shared_ptr<evaluator::Evaluator> evaluator);
 
-    // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
+    // Walk with PUCT+virtual loss to a leaf
     // and return the leaf. Stores the chosen path internally for apply_result().
     MCTSNode* collect_one_leaf();
 
@@ -144,7 +148,7 @@ public:
     // Prebuilt shallow QOptions used by collect_one_leaf (initialized in ctor)
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
-    
+
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
 

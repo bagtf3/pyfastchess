@@ -1,9 +1,7 @@
 // prior_registry.cpp
 #include "prior_registry.hpp"
-#include "mcts.hpp"   // for PriorEngine definition
-#include <atomic>
-#include <memory>
+#include "mcts.hpp"   // PriorEngine is declared/defined in mcts.hpp in your current layout
 
-// DEFINITIONS (exactly once in the whole program)
+// Single DEFINITIONS (exactly once)
 std::shared_ptr<PriorEngine> g_prior_engine = nullptr;
 std::atomic<PriorEngine*>   g_prior_engine_raw{nullptr};

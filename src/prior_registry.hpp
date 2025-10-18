@@ -3,14 +3,14 @@
 #include <memory>
 #include <atomic>
 
-// forward
+// Forward declaration of PriorEngine so headers may refer to the pointer type.
 struct PriorEngine;
 
-// Extern declarations (one definition lives in prior_registry.cpp)
+// Globals are defined in prior_registry.cpp (one translation unit).
 extern std::shared_ptr<PriorEngine> g_prior_engine;
 extern std::atomic<PriorEngine*>   g_prior_engine_raw;
 
-// Convenience accessors (inline, header-only)
+// Inline convenience accessors:
 inline std::shared_ptr<PriorEngine> get_prior_engine_shared() {
     return g_prior_engine;
 }
