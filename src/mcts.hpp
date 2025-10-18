@@ -145,10 +145,6 @@ public:
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
 
-    size_t count_new() const;
-    size_t count_terminal() const;
-    size_t count_cached() const;
-
 private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
 
@@ -201,10 +197,11 @@ struct FloatView {
 };
 
 struct PriorConfig {
+    bool  use_prior_boosts = false;
+    
     float anytime_uniform_mix = 0.5f;
     float endgame_uniform_mix = 0.5f;
-
-    bool  use_prior_boosts = true;
+    
     float anytime_gives_check = 0.15f;
     float anytime_repetition_sub = 0.25f;
 

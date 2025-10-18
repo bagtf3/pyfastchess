@@ -217,10 +217,6 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     return { count_new_, count_terminal_, count_cached_ };
 }
 
-size_t MCTSTree::count_new() const { return count_new_; }
-size_t MCTSTree::count_terminal() const { return count_terminal_; }
-size_t MCTSTree::count_cached() const { return count_cached_; }
-
 void MCTSTree::clear_pending() {
     pending_nodes_.clear();
     count_new_ = 0;
@@ -574,7 +570,6 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
     return pv;
 }
 
-// Atomically swap in a new evaluator. Thread-safe.
 void MCTSTree::set_evaluator(std::shared_ptr<evaluator::Evaluator> ev) {
     if (!ev) {
         throw std::runtime_error("MCTSTree::set_evaluator: ev must not be null");
@@ -591,8 +586,8 @@ std::shared_ptr<evaluator::Evaluator> MCTSTree::get_evaluator() const {
     return std::atomic_load(&evaluator_);
 }
 
-// ------------------------- Helpers -------------------------
 
+// ------------------------- Helpers -------------------------
 std::vector<std::pair<std::string, float>>
 priors_from_heads(const std::vector<std::string>& legal_moves,
                   const std::vector<float>& policy_per_legal) {

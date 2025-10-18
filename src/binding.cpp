@@ -189,16 +189,14 @@ PYBIND11_MODULE(_core, m) {
 
      py::class_<PriorConfig>(m, "PriorConfig")
           .def(py::init<>())
-          .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
-          .def_readwrite("endgame_uniform_mix", &PriorConfig::endgame_uniform_mix)
           .def_readwrite("use_prior_boosts", &PriorConfig::use_prior_boosts)
+          .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
           .def_readwrite("anytime_gives_check", &PriorConfig::anytime_gives_check)
-          .def_readwrite("anytime_repetition_sub",
-                         &PriorConfig::anytime_repetition_sub)
+          .def_readwrite("anytime_repetition_sub", &PriorConfig::anytime_repetition_sub)
+          .def_readwrite("endgame_uniform_mix", &PriorConfig::endgame_uniform_mix)
           .def_readwrite("endgame_pawn_push", &PriorConfig::endgame_pawn_push)
           .def_readwrite("endgame_capture", &PriorConfig::endgame_capture)
-          .def_readwrite("endgame_repetition_sub",
-                         &PriorConfig::endgame_repetition_sub)
+          .def_readwrite("endgame_repetition_sub", &PriorConfig::endgame_repetition_sub)
           .def_readwrite("clip_enabled", &PriorConfig::clip_enabled)
           .def_readwrite("clip_min", &PriorConfig::clip_min)
           .def_readwrite("clip_max", &PriorConfig::clip_max);
