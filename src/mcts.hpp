@@ -39,7 +39,6 @@ struct PriorEngine;
 // Forward decl
 class MCTSTree;
 
-
 struct MCTSNode {
 
     // --- Tree links ---
