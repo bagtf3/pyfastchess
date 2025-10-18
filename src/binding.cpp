@@ -178,40 +178,49 @@ PYBIND11_MODULE(_core, m) {
           }, py::arg("tt_best") = py::none(),
                "Return list of (score, uci_move) sorted descending. tt_best optional UCI string");
           
-          m.def("terminal_value_white_pov",
-               [](const backend::Board& b) -> py::object {
-                    auto v = terminal_value_white_pov(b);
-                    if (v.has_value()) return py::float_(*v);
-                    return py::none();
-               },
-               py::arg("board"));
+     m.def("terminal_value_white_pov",
+          [](const backend::Board& b) -> py::object {
+               auto v = terminal_value_white_pov(b);
+               if (v.has_value()) return py::float_(*v);
+               return py::none();
+          },
+          py::arg("board"));
 
-     py::class_<PriorConfig>(m, "PriorConfig")
-          .def(py::init<>())
-          .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
-          .def_readwrite("endgame_uniform_mix", &PriorConfig::endgame_uniform_mix)
-          .def_readwrite("use_prior_boosts", &PriorConfig::use_prior_boosts)
-          .def_readwrite("anytime_gives_check", &PriorConfig::anytime_gives_check)
-          .def_readwrite("anytime_repetition_sub",
-                         &PriorConfig::anytime_repetition_sub)
-          .def_readwrite("endgame_pawn_push", &PriorConfig::endgame_pawn_push)
-          .def_readwrite("endgame_capture", &PriorConfig::endgame_capture)
-          .def_readwrite("endgame_repetition_sub",
-                         &PriorConfig::endgame_repetition_sub)
-          .def_readwrite("clip_enabled", &PriorConfig::clip_enabled)
-          .def_readwrite("clip_min", &PriorConfig::clip_min)
-          .def_readwrite("clip_max", &PriorConfig::clip_max);
+     // Create the singleton with default PriorConfig (defaults from mcts.hpp).
+     m.def("create_prior_engine", []() {
+          g_prior_engine = std::make_shared<PriorEngine>(PriorConfig());
+          g_prior_engine_raw.store(g_prior_engine.get(), std::memory_order_release);
+     }, "Create a PriorEngine singleton with default settings.");
 
-     py::class_<PriorEngine>(m, "PriorEngine")
-          .def(py::init<const PriorConfig&>(), py::arg("cfg"))
-          .def("build",
-               [](const PriorEngine& eng,
-                    const backend::Board& board,
-                    const std::vector<std::string>& legal,
-                    py::array_t<float> p_from,
-                    py::array_t<float> p_to,
-                    py::array_t<float> p_piece,
-                    py::array_t<float> p_promo) {
+     // Configure (partial) from a Python dict. Missing keys leave previous/default values unchanged.
+     m.def("configure_prior_engine", [](py::dict d) {
+          PriorConfig cfg;
+          if (g_prior_engine) cfg = g_prior_engine->get_config();
+          if (d.contains("use_prior_boosts")) cfg.use_prior_boosts = d["use_prior_boosts"].cast<bool>();
+          if (d.contains("anytime_uniform_mix")) cfg.anytime_uniform_mix = d["anytime_uniform_mix"].cast<float>();
+          if (d.contains("anytime_gives_check")) cfg.anytime_gives_check = d["anytime_gives_check"].cast<float>();
+          if (d.contains("anytime_repetition_sub")) cfg.anytime_repetition_sub = d["anytime_repetition_sub"].cast<float>();
+          if (d.contains("endgame_uniform_mix")) cfg.endgame_uniform_mix = d["endgame_uniform_mix"].cast<float>();
+          if (d.contains("endgame_pawn_push")) cfg.endgame_pawn_push = d["endgame_pawn_push"].cast<float>();
+          if (d.contains("endgame_capture")) cfg.endgame_capture = d["endgame_capture"].cast<float>();
+          if (d.contains("endgame_repetition_sub")) cfg.endgame_repetition_sub = d["endgame_repetition_sub"].cast<float>();
+          if (d.contains("clip_enabled")) cfg.clip_enabled = d["clip_enabled"].cast<bool>();
+          if (d.contains("clip_min")) cfg.clip_min = d["clip_min"].cast<float>();
+          if (d.contains("clip_max")) cfg.clip_max = d["clip_max"].cast<float>();
+
+          g_prior_engine = std::make_shared<PriorEngine>(cfg);
+          g_prior_engine_raw.store(g_prior_engine.get(), std::memory_order_release);
+     }, "Configure or partially update the PriorEngine singleton from a dict.");
+
+     // Build priors using the configured singleton. Returns list[(uci, prob), ...]
+     m.def("prior_engine_build",
+               [](const backend::Board& board,
+               const std::vector<std::string>& legal,
+               py::array_t<float> p_from,
+               py::array_t<float> p_to,
+               py::array_t<float> p_piece,
+               py::array_t<float> p_promo) {
+                    if (!g_prior_engine) throw std::runtime_error("PriorEngine not configured");
                     auto vf = p_from.unchecked<1>();
                     auto vt = p_to.unchecked<1>();
                     auto vp = p_piece.unchecked<1>();
@@ -220,12 +229,34 @@ PYBIND11_MODULE(_core, m) {
                     FloatView ft{vt.data(0), (size_t)vt.shape(0)};
                     FloatView fp{vp.data(0), (size_t)vp.shape(0)};
                     FloatView fr{vr.data(0), (size_t)vr.shape(0)};
-                    return eng.build(board, legal, ff, ft, fp, fr, board.piece_count());
+                    auto pri = g_prior_engine->build(board, legal, ff, ft, fp, fr);
+                    py::list out;
+                    for (const auto &pp : pri) out.append(py::make_tuple(pp.first, pp.second));
+                    return out;
                },
                py::arg("board"), py::arg("legal"),
                py::arg("p_from"), py::arg("p_to"),
-               py::arg("p_piece"), py::arg("p_promo"));
+               py::arg("p_piece"), py::arg("p_promo"),
+               "Build priors using the configured PriorEngine singleton.");
 
+     // Expose current PriorEngine configuration as a Python dict
+     m.def("prior_engine_details", []() {
+          py::dict d;
+          if (!g_prior_engine) return d;
+          PriorConfig cfg = g_prior_engine->get_config();
+          d["use_prior_boosts"] = cfg.use_prior_boosts;
+          d["anytime_uniform_mix"] = cfg.anytime_uniform_mix;
+          d["anytime_gives_check"] = cfg.anytime_gives_check;
+          d["anytime_repetition_sub"] = cfg.anytime_repetition_sub;
+          d["endgame_uniform_mix"] = cfg.endgame_uniform_mix;
+          d["endgame_pawn_push"] = cfg.endgame_pawn_push;
+          d["endgame_capture"] = cfg.endgame_capture;
+          d["endgame_repetition_sub"] = cfg.endgame_repetition_sub;
+          d["clip_enabled"] = cfg.clip_enabled;
+          d["clip_min"] = cfg.clip_min;
+          d["clip_max"] = cfg.clip_max;
+          return d;
+     }, "Return the current PriorEngine settings as a dict.");
 
      py::class_<ChildDetail>(m, "ChildDetail")
           .def_readonly("uci",            &ChildDetail::uci)

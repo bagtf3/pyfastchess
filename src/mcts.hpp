@@ -200,7 +200,7 @@ struct PriorConfig {
     float anytime_uniform_mix = 0.5f;
     float endgame_uniform_mix = 0.5f;
 
-    bool  use_prior_boosts = true;
+    bool  use_prior_boosts = false;
     float anytime_gives_check = 0.15f;
     float anytime_repetition_sub = 0.25f;
 
@@ -217,12 +217,15 @@ class PriorEngine {
 public:
     explicit PriorEngine(const PriorConfig& cfg) : cfg_(cfg) {}
 
+    // Build priors from factorized heads. piece_count is obtained from board(). 
     std::vector<std::pair<std::string, float>>
     build(const backend::Board& board,
-        const std::vector<std::string>& legal,
-        FloatView p_from, FloatView p_to,
-        FloatView p_piece, FloatView p_promo,
-        int piece_count) const;
+          const std::vector<std::string>& legal,
+          FloatView p_from, FloatView p_to,
+          FloatView p_piece, FloatView p_promo) const;
+
+    // Return a copy of the current PriorConfig (handy for configure/details helpers).
+    PriorConfig get_config() const { return cfg_; }
 
 private:
     PriorConfig cfg_;

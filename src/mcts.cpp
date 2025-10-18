@@ -578,12 +578,13 @@ std::vector<std::pair<std::string, float>>
 PriorEngine::build(const backend::Board& board,
                    const std::vector<std::string>& legal,
                    FloatView pfv, FloatView ptv,
-                   FloatView pcv, FloatView prv,
-                   int piece_count) const {
+                   FloatView pcv, FloatView prv) const {
     std::vector<std::pair<std::string, float>> pri;
     const size_t n = legal.size();
     if (n == 0) return pri;
 
+    // get piece count directly from the board (no need to pass it in)
+    const int piece_count = board.piece_count();
     const bool endgame = (piece_count <= 14);
     float mix = cfg_.anytime_uniform_mix;
     if (endgame) mix = cfg_.endgame_uniform_mix;
