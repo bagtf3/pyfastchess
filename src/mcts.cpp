@@ -6,6 +6,7 @@
 #include "backend.hpp"
 #include "cache.hpp"
 
+
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
@@ -85,6 +86,9 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
 
     // stash raw pointer for fastest access in hot-path
     evaluator_raw_ = evaluator_.get();
+
+    // stash prior engine raw pointer. must configure first!
+    prior_engine_raw_ = get_prior_engine_raw();
 
     // prebuild QOptions once
     qopts_shallow_.max_qply = 5;

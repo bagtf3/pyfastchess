@@ -144,6 +144,10 @@ public:
     // Prebuilt shallow QOptions used by collect_one_leaf (initialized in ctor)
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
+    
+    // fast hot-path pointer (non-owning)
+    PriorEngine* prior_engine_raw_ = nullptr;
+
 
 private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };

@@ -13,6 +13,7 @@ pybind11_add_module(pyfastchess._core
     src/mcts.cpp
     src/evaluator.cpp
     src/cache.cpp
+    src/prior_registry.cpp
 )
 
 # Explicit include dirs (same style as your working file)

@@ -9,6 +9,7 @@
 #include "mcts.hpp"
 #include "evaluator.hpp"
 #include "cache.hpp"
+#include "prior_registry.hpp"
 
 namespace py = pybind11;
 
