@@ -13,7 +13,6 @@
 //
 // This header exposes all process-global singletons used by MCTS:
 //  - priors_cache()   -> Cache (LRU) capacity 600000
-//  - terminal_cache() -> Cache (LRU) capacity 32768
 //  - raw_policy_cache()-> RawPolicyCache (deque eviction) capacity 16384
 //  - PriorEngine globals (g_prior_engine + g_prior_engine_raw) used by bindings / trees
 //
@@ -88,14 +87,11 @@ inline PriorEngine* get_prior_engine_raw() { return g_prior_engine_raw.load(std:
 
 // ---------------- Singletons accessors ----------------
 Cache& priors_cache();      // LRU cache, capacity 600000
-Cache& terminal_cache();    // LRU cache, capacity 32768
 RawPolicyCache& raw_policy_cache(); // deque-eviction raw buffer, capacity 16384
 
 // Convenience wrappers for stats/clear (useful to expose to python)
 CacheStats priors_cache_stats();
-CacheStats terminal_cache_stats();
 RawStats raw_policy_cache_stats();
 
 void priors_cache_clear();
-void terminal_cache_clear();
 void raw_policy_cache_clear();

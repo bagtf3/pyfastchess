@@ -51,7 +51,6 @@ struct MCTSNode {
     int   N     = 0;      // visits
     float W     = 0.0f;   // total value (white-POV)
     float Q     = 0.0f;   // mean value
-    float vloss = 0.0f;   // virtual loss for parallel sims
 
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;

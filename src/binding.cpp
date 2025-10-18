@@ -289,7 +289,6 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
           .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
-          .def_property_readonly("vloss",[](const MCTSNode& n){ return n.vloss; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
@@ -551,25 +550,4 @@ PYBIND11_MODULE(_core, m) {
           });
 
           m.def("priors_cache_clear", []() { priors_cache_clear(); });
-          m.def("terminal_cache_stats", []() {
-               CacheStats s = terminal_cache_stats();
-               py::dict d;
-               d["size"] = s.size;
-               d["capacity"] = s.capacity;
-               d["evictions"] = s.evictions;
-               d["queries"] = s.queries;
-               d["hits"] = s.hits;
-               return d;
-          });
-
-          m.def("terminal_cache_clear", []() { terminal_cache_clear(); });
-
-          // terminal get (mostly test usage): returns (present:bool, value:float)
-          m.def("terminal_cache_get", [](uint64_t key) {
-               CacheEntry e;
-               bool present = terminal_cache().lookup(key, e);
-               if (!present) return py::none();
-               return py::cast(e.value);
-          });
-
 }

@@ -5,6 +5,7 @@
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
+#include "singleton_registry.hpp"
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -118,12 +119,10 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
     
-    // fastpath: check cache for a stored NN result before
-    // expanding or running the shallow qsearch. If present, apply it and return.
     {
         const uint64_t key = node->zobrist;
-        if (const CacheEntry* ce = Cache::instance().lookup_ptr(key)) {
-            apply_result(node, ce->priors, ce->value);
+        if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
+            apply_result(node, pe->priors, pe->value, /*cache=*/false);
             return { node, MCTSTree::CollectTag::CACHED };
         }
     }
@@ -247,7 +246,8 @@ void MCTSTree::apply_result(
         CacheEntry e;
         e.priors = move_priors;
         e.value  = value_white_pov;
-        Cache::instance().insert(node->board.hash(), std::move(e));
+        // insert into the priors cache (LRU)
+        priors_cache().insert(node->board.hash(), std::move(e));
     }
 }
 

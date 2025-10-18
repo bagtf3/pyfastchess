@@ -93,15 +93,10 @@ size_t RawPolicyCache::capacity() const {
     return capacity_;
 }
 
-// ---------- Singletons (priors, terminal, raw) ----------
+// ---------- Singletons (priors, raw) ----------
 // create static Cache objects with requested capacities
 Cache& priors_cache() {
     static Cache c(600000);
-    return c;
-}
-
-Cache& terminal_cache() {
-    static Cache c(32768);
     return c;
 }
 
@@ -122,27 +117,12 @@ CacheStats priors_cache_stats() {
     return s;
 }
 
-CacheStats terminal_cache_stats() {
-    Cache& c = terminal_cache();
-    CacheStats s;
-    s.size = c.size();
-    s.capacity = c.capacity();
-    s.evictions = c.evictions();
-    s.queries = c.queries();
-    s.hits = c.hits();
-    return s;
-}
-
 RawStats raw_policy_cache_stats() {
     return raw_policy_cache().stats();
 }
 
 void priors_cache_clear() {
     priors_cache().clear();
-}
-
-void terminal_cache_clear() {
-    terminal_cache().clear();
 }
 
 void raw_policy_cache_clear() {
