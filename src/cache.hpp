@@ -22,7 +22,6 @@ public:
     // insert/replace and move to MRU
     void insert(uint64_t key, CacheEntry entry); // pass-by-value, move into map
 
-
     // clear cache and reset counters
     void clear();
 
@@ -34,8 +33,6 @@ public:
     // counters
     size_t queries() const;
     size_t hits() const;
-
-    static Cache& instance(); // singleton
 
     // returns pointer to entry & touches LRU; nullptr if miss
     const CacheEntry* lookup_ptr(uint64_t key);

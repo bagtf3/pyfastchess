@@ -1,12 +1,9 @@
 #include "cache.hpp"
+#include <algorithm>
+#include <stdexcept>
 
 Cache::Cache(size_t max_size) : max_size_(max_size) {
     map_.reserve(max_size_);
-}
-
-Cache& Cache::instance() {
-    static Cache instance(600000);
-    return instance;
 }
 
 bool Cache::lookup(uint64_t key, CacheEntry& out) {
@@ -67,7 +64,6 @@ void Cache::insert(uint64_t key, CacheEntry entry) {
         ++evictions_;
     }
 }
-
 
 void Cache::clear() {
     map_.clear();

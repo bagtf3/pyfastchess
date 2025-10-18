@@ -12,7 +12,7 @@
 #include <cstdint>
 #include "backend.hpp"
 #include "evaluator.hpp"
-#include "prior_registry.hpp"
+#include "singleton_registry.hpp"
 
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {

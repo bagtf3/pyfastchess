@@ -9,7 +9,7 @@
 #include "mcts.hpp"
 #include "evaluator.hpp"
 #include "cache.hpp"
-#include "prior_registry.hpp"
+#include "singleton_registry.hpp"
 
 namespace py = pybind11;
 
@@ -497,54 +497,79 @@ PYBIND11_MODULE(_core, m) {
                return d;
           }, py::arg("board"))
 
-          .def("get_weights", [](evaluator::Evaluator &ev){
-               return ev.get_weights();
-          });
-          
-          // Cache stats + clear (thin, atomic/fast reads)
-          m.def("cache_stats", []() {py::dict d;
-               d["size"]     = Cache::instance().size();
-               d["capacity"] = Cache::instance().capacity();
-               d["evictions"]= Cache::instance().evictions();
-               d["queries"]  = Cache::instance().queries();
-               d["hits"]     = Cache::instance().hits();
-               double hit_rate = 0.0;
-               auto q = Cache::instance().queries();
-               if (q) hit_rate = double(Cache::instance().hits()) / double(q);
-                    d["hit_rate"] = hit_rate;
-               return d;
-               }, "Return cache stats as a dict (size, capacity, evictions, queries, hits, hit_rate)");
+          .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
-          m.def("cache_clear", []() {
-               Cache::instance().clear();
-          }, "Clear the cache and reset counters");
+          m.def("raw_cache_bulk_insert", [](py::list batch) {
+               // batch: iterable of (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array)
+               std::vector<std::tuple<uint64_t, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
+               vec.reserve(batch.size());
+               for (py::handle h : batch) {
+                    auto t = py::tuple(h);
+                    if (t.size() != 5) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, p_from, p_to, p_piece, p_promo)");
+                    uint64_t key = t[0].cast<uint64_t>();
 
-          m.def("cache_lookup", [](uint64_t key)->py::object {
-               CacheEntry e;
-               if (!Cache::instance().lookup(key, e)) return py::none();
-               py::dict out;
-               out["value"] = e.value;
-               // priors is vector<pair<string,float>>
-               py::list pri;
-               for (auto &p : e.priors) pri.append(py::make_tuple(p.first, p.second));
-               out["priors"] = pri;
-               return out;
-          });
+                    auto to_vec = [&](py::handle arr)->std::vector<float> {
+                         auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(arr);
+                         auto info = a.request();
+                         float* data = static_cast<float*>(info.ptr);
+                         size_t n = (size_t)info.size;
+                         std::vector<float> out;
+                         out.resize(n);
+                         if (n) memcpy(out.data(), data, n * sizeof(float));
+                         return out;
+                    };
 
-          m.def("cache_insert", [](uint64_t key, py::object entry_py){
-               CacheEntry e;
-               if (py::isinstance<py::dict>(entry_py)) {
-               py::dict d = entry_py.cast<py::dict>();
-               if (d.contains("value")) e.value = d["value"].cast<float>();
-               if (d.contains("priors")) {
-                    for (auto item : d["priors"].cast<py::list>()) {
-                         auto t = item.cast<py::tuple>();
-                         e.priors.emplace_back(t[0].cast<std::string>(), t[1].cast<float>());
-                    }
+                    std::vector<float> pf = to_vec(t[1]);
+                    std::vector<float> pt = to_vec(t[2]);
+                    std::vector<float> pp = to_vec(t[3]);
+                    std::vector<float> pr = to_vec(t[4]);
+                    vec.emplace_back(key, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
                }
-          } else {
-               throw std::runtime_error("cache_insert expects dict {value:, priors:}");
-          }
-          Cache::instance().insert(key, std::move(e));
+               raw_policy_cache().bulk_insert(std::move(vec));
+               }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
+               "Each batch item must be (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+          
+          m.def("raw_cache_clear", []() {raw_policy_cache().clear();});
+          m.def("raw_cache_stats", []() {
+               RawStats s = raw_policy_cache().stats();
+               py::dict d;
+               d["size"] = s.size;
+               d["capacity"] = s.capacity;
+               d["evictions"] = s.evictions;
+               return d;
           });
+
+          m.def("priors_cache_stats", []() {
+               CacheStats s = priors_cache_stats();
+               py::dict d;
+               d["size"] = s.size;
+               d["capacity"] = s.capacity;
+               d["evictions"] = s.evictions;
+               d["queries"] = s.queries;
+               d["hits"] = s.hits;
+               return d;
+          });
+
+          m.def("priors_cache_clear", []() { priors_cache_clear(); });
+          m.def("terminal_cache_stats", []() {
+               CacheStats s = terminal_cache_stats();
+               py::dict d;
+               d["size"] = s.size;
+               d["capacity"] = s.capacity;
+               d["evictions"] = s.evictions;
+               d["queries"] = s.queries;
+               d["hits"] = s.hits;
+               return d;
+          });
+
+          m.def("terminal_cache_clear", []() { terminal_cache_clear(); });
+
+          // terminal get (mostly test usage): returns (present:bool, value:float)
+          m.def("terminal_cache_get", [](uint64_t key) {
+               CacheEntry e;
+               bool present = terminal_cache().lookup(key, e);
+               if (!present) return py::none();
+               return py::cast(e.value);
+          });
+
 }
