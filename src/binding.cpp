@@ -498,37 +498,49 @@ PYBIND11_MODULE(_core, m) {
 
           .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
-          m.def("raw_cache_bulk_insert", [](py::list batch) {
-               // batch: iterable of (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array)
-               std::vector<std::tuple<uint64_t, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
-               vec.reserve(batch.size());
-               for (py::handle h : batch) {
-                    auto t = py::tuple(h);
-                    if (t.size() != 5) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, p_from, p_to, p_piece, p_promo)");
-                    uint64_t key = t[0].cast<uint64_t>();
+     m.def("raw_cache_bulk_insert", [](py::iterable batch) {
+          // Accept iterable of tuples: (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array)
+          std::vector<std::tuple<uint64_t, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
+          // Try to reserve if length is available
+          try {
+               py::ssize_t n = py::len(batch);
+               if (n > 0) vec.reserve(static_cast<size_t>(n));
+          } catch (...) {
+               /* ignore if not sized */
+          }
 
-                    auto to_vec = [&](py::handle arr)->std::vector<float> {
-                         auto a = py::array_t<float, py::array::c_style | py::array::forcecast>(arr);
-                         auto info = a.request();
-                         float* data = static_cast<float*>(info.ptr);
-                         size_t n = (size_t)info.size;
-                         std::vector<float> out;
-                         out.resize(n);
-                         if (n) memcpy(out.data(), data, n * sizeof(float));
-                         return out;
-                    };
+          for (py::handle item_handle : batch) {
+               // reinterpret as a borrowed tuple (no allocation). Throws if not tuple-like.
+               py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
+               if (t.size() != 5) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, p_from, p_to, p_piece, p_promo)");
+               uint64_t key = t[0].cast<uint64_t>();
 
-                    std::vector<float> pf = to_vec(t[1]);
-                    std::vector<float> pt = to_vec(t[2]);
-                    std::vector<float> pp = to_vec(t[3]);
-                    std::vector<float> pr = to_vec(t[4]);
-                    vec.emplace_back(key, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
-               }
-               raw_policy_cache().bulk_insert(std::move(vec));
-               }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
-               "Each batch item must be (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+               auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
+                    // Ensure convertible to float32 array
+                    py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
+                    if (!arr) throw std::runtime_error("raw_cache_bulk_insert: expected array convertible to float32");
+                    py::buffer_info info = arr.request();
+                    // Copy into std::vector<float>
+                    float* data = static_cast<float*>(info.ptr);
+                    size_t n = static_cast<size_t>(info.size);
+                    return std::vector<float>(data, data + n);
+               };
+
+               std::vector<float> pf = to_vec(t[1]);
+               std::vector<float> pt = to_vec(t[2]);
+               std::vector<float> pp = to_vec(t[3]);
+               std::vector<float> pr = to_vec(t[4]);
+
+               vec.emplace_back(key, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
+          }
+
+          // Move the batch into the RawPolicyCache
+          raw_policy_cache().bulk_insert(std::move(vec));
+          }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
+          "Each batch item must be (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+
           
-          m.def("raw_cache_clear", []() {raw_policy_cache().clear();});
+          m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_stats", []() {
                RawStats s = raw_policy_cache().stats();
                py::dict d;
@@ -536,7 +548,7 @@ PYBIND11_MODULE(_core, m) {
                d["capacity"] = s.capacity;
                d["evictions"] = s.evictions;
                return d;
-          });
+          }, "Return raw policy cache stats.");
 
           m.def("priors_cache_stats", []() {
                CacheStats s = priors_cache_stats();

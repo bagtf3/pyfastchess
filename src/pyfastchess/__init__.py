@@ -24,11 +24,6 @@ raw_cache_stats = _core.raw_cache_stats
 priors_cache_stats = _core.priors_cache_stats
 priors_cache_clear = _core.priors_cache_clear
 
-# Terminal cache (if present) — you said you might not need it, but keep the names.
-terminal_cache_stats = _core.terminal_cache_stats
-terminal_cache_clear = _core.terminal_cache_clear
-terminal_cache_get = _core.terminal_cache_get
-
 # Evaluator & helpers that existed previously
 Evaluator = _core.Evaluator
 EvalWeights = _core.EvalWeights
@@ -56,10 +51,7 @@ __all__ = [
     "raw_cache_clear",
     "raw_cache_stats",
     "priors_cache_stats",
-    "priors_cache_clear",
-    "terminal_cache_stats",
-    "terminal_cache_clear",
-    "terminal_cache_get",
+    "priors_cache_clear"
     "Evaluator",
     "EvalWeights",
     "priors_from_heads",
