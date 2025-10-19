@@ -157,6 +157,9 @@ private:
     
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
+    void expand_with_priors(
+        MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
+
     std::pair<MCTSNode*, CollectTag> collect_one_leaf_tagged();
 
     // Ownership to keep evaluator alive for lifetime of tree:
@@ -171,7 +174,7 @@ private:
     size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
     size_t count_terminal_ = 0;  // number of terminal hits in last collection
     size_t count_cached_ = 0;    // number of cached hits in last collection
-    
+
     mutable std::mutex tree_mutex_; 
 };
 
