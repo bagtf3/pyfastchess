@@ -341,27 +341,16 @@ PYBIND11_MODULE(_core, m) {
           
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (const auto& kv : t.pending_nodes_) {
-                    uint64_t z = kv.first;
-                    MCTSNode* n = kv.second;
+               for (MCTSNode* n : t.pending_nodes_) {
                     if (!n) continue;
+                    uint64_t z   = n->zobrist;
                     auto planes  = ::stacked_planes(n->board, nplanes);
-                    auto pc      = n->board.piece_count();
-                    const auto& lm = n->legal_moves;
-                    out.append(py::make_tuple(z, planes, pc, lm));
+                    out.append(py::make_tuple(z, planes));
                }
                return out;
-               },
-               py::arg("nplanes"),
-               "Encode pending leaves: (zobrist, planes, piece_count, legal_moves).")
-
-          .def("apply_result_with_zobrist",
-               [](MCTSTree& t, uint64_t zobrist,
-                    const std::vector<std::pair<std::string, float>>& move_priors,
-                    float value_white_pov, bool cache = true) {
-                    t.apply_result_with_zobrist(zobrist, move_priors, value_white_pov, cache);
-               },
-               py::arg("zobrist"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+          },
+          py::arg("nplanes") =5,
+          "Encode pending leaves: (token, zobrist, planes, piece_count, legal_moves).")
                
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
@@ -498,47 +487,45 @@ PYBIND11_MODULE(_core, m) {
 
           .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
-     m.def("raw_cache_bulk_insert", [](py::iterable batch) {
-          // Accept iterable of tuples: (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array)
-          std::vector<std::tuple<uint64_t, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
-          // Try to reserve if length is available
-          try {
-               py::ssize_t n = py::len(batch);
-               if (n > 0) vec.reserve(static_cast<size_t>(n));
-          } catch (...) {
-               /* ignore if not sized */
-          }
+          m.def("raw_cache_bulk_insert", [](py::iterable batch) {
+               std::vector<std::tuple<uint64_t, float, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
 
-          for (py::handle item_handle : batch) {
-               // reinterpret as a borrowed tuple (no allocation). Throws if not tuple-like.
-               py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
-               if (t.size() != 5) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, p_from, p_to, p_piece, p_promo)");
-               uint64_t key = t[0].cast<uint64_t>();
+               // Try to reserve if length is available
+               try {
+                    py::ssize_t n = py::len(batch);
+                    if (n > 0) vec.reserve(static_cast<size_t>(n));
+               } catch (...) {
+                    /* ignore if not sized */
+               }
 
-               auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
-                    // Ensure convertible to float32 array
-                    py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
-                    if (!arr) throw std::runtime_error("raw_cache_bulk_insert: expected array convertible to float32");
-                    py::buffer_info info = arr.request();
-                    // Copy into std::vector<float>
-                    float* data = static_cast<float*>(info.ptr);
-                    size_t n = static_cast<size_t>(info.size);
-                    return std::vector<float>(data, data + n);
-               };
+               for (py::handle item_handle : batch) {
+                    py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
+                    if (t.size() != 6) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, value, p_from, p_to, p_piece, p_promo)");
 
-               std::vector<float> pf = to_vec(t[1]);
-               std::vector<float> pt = to_vec(t[2]);
-               std::vector<float> pp = to_vec(t[3]);
-               std::vector<float> pr = to_vec(t[4]);
+                    uint64_t key = t[0].cast<uint64_t>();
+                    float net_value = t[1].cast<float>();
 
-               vec.emplace_back(key, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
-          }
+                    auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
+                         py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
+                         if (!arr) throw std::runtime_error("raw_cache_bulk_insert: expected array convertible to float32");
+                         py::buffer_info info = arr.request();
+                         float* data = static_cast<float*>(info.ptr);
+                         size_t n = static_cast<size_t>(info.size);
+                         return std::vector<float>(data, data + n);
+                    };
+
+                    std::vector<float> pf = to_vec(t[2]);
+                    std::vector<float> pt = to_vec(t[3]);
+                    std::vector<float> pp = to_vec(t[4]);
+                    std::vector<float> pr = to_vec(t[5]);
+
+                    vec.emplace_back(key, net_value, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
+               }
 
           // Move the batch into the RawPolicyCache
           raw_policy_cache().bulk_insert(std::move(vec));
           }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
-          "Each batch item must be (key:int, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
-
+          "Each batch item must be (key:int, value:float, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
           
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_stats", []() {

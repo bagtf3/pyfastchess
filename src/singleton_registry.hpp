@@ -1,4 +1,5 @@
 #pragma once
+
 #include "cache.hpp"
 #include <memory>
 #include <atomic>
@@ -26,13 +27,20 @@ struct RawEntry {
     std::vector<float> p_piece;
     std::vector<float> p_promo;
 
+    // network scalar value and flag indicating if present
+    float value = 0.0f;
+    bool has_value = false;
+
     RawEntry() = default;
-    RawEntry(std::vector<float>&& a, std::vector<float>&& b,
+    RawEntry(float v,
+             std::vector<float>&& a, std::vector<float>&& b,
              std::vector<float>&& c, std::vector<float>&& d)
       : p_from(std::move(a)), p_to(std::move(b)),
-        p_piece(std::move(c)), p_promo(std::move(d)) {}
+        p_piece(std::move(c)), p_promo(std::move(d)),
+        value(v), has_value(true) {}
 };
 
+// Stats view
 struct RawStats {
     size_t size = 0;
     size_t capacity = 0;
@@ -52,11 +60,14 @@ class RawPolicyCache {
 public:
     explicit RawPolicyCache(size_t capacity = 16384);
 
+    // NOTE: batch now holds tuples:
+    //   (uint64_t key, float value, p_from_vec, p_to_vec, p_piece_vec, p_promo_vec)
     void bulk_insert(std::vector<std::tuple<uint64_t,
-                                           std::vector<float>,
-                                           std::vector<float>,
-                                           std::vector<float>,
-                                           std::vector<float>>>&& batch);
+                                            float,
+                                            std::vector<float>,
+                                            std::vector<float>,
+                                            std::vector<float>,
+                                            std::vector<float>>>&& batch);
 
     const RawEntry* lookup(uint64_t key) const;
     void erase(uint64_t key);

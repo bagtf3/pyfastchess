@@ -1,5 +1,3 @@
-# __init__.py — direct attribute access (no getattr). Fails fast if symbols are missing.
-
 from importlib import import_module
 
 _core = import_module("pyfastchess._core")
@@ -20,15 +18,15 @@ raw_cache_bulk_insert = _core.raw_cache_bulk_insert
 raw_cache_clear = _core.raw_cache_clear
 raw_cache_stats = _core.raw_cache_stats
 
-# Priors cache controls
+# priors cache controls
 priors_cache_stats = _core.priors_cache_stats
 priors_cache_clear = _core.priors_cache_clear
 
-# Evaluator & helpers that existed previously
+# Evaluator and weights
 Evaluator = _core.Evaluator
 EvalWeights = _core.EvalWeights
 
-# Legacy helpers (if still present)
+# misc helpers
 priors_from_heads = _core.priors_from_heads
 terminal_value_white_pov = _core.terminal_value_white_pov
 
@@ -56,5 +54,5 @@ __all__ = [
     "EvalWeights",
     "priors_from_heads",
     "terminal_value_white_pov",
-    "ensure_prior_engine",
+    "ensure_prior_engine"
 ]

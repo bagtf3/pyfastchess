@@ -107,10 +107,6 @@ public:
         MCTSNode* node,
         const std::vector<std::pair<std::string, float>>& move_priors,
         float value_white_pov, bool cache=true);
-
-    void apply_result_with_zobrist(
-        uint64_t zobrist, const std::vector<std::pair<std::string, float>>& move_priors,
-        float value_white_pov, bool cache);
     
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
@@ -118,8 +114,8 @@ public:
     // Clear all pending (call on reset / after making a move).
     void clear_pending();
 
-    // Read-only accessor for bindings. Keep it inline to avoid ODR issues.
-    std::unordered_map<uint64_t, MCTSNode*> pending_nodes_;
+    // Read-only accessor for bindings.
+    std::vector<MCTSNode*> pending_nodes_;
     
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;

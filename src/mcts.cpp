@@ -251,25 +251,6 @@ void MCTSTree::apply_result(
     }
 }
 
-void MCTSTree::apply_result_with_zobrist(
-    uint64_t zobrist,
-    const std::vector<std::pair<std::string, float>>& move_priors,
-    float value_white_pov,
-    bool cache
-) {
-    auto it = pending_nodes_.find(zobrist);
-    if (it != pending_nodes_.end()) {
-        // Node found, apply result directly
-        MCTSNode* node = it->second;
-        apply_result(node, move_priors, value_white_pov, cache);
-        // Remove the node from pending_nodes_ after applying the result
-        pending_nodes_.erase(it);
-    } else {
-        // Node not found, print a message
-        std::cout << "Node not found for the given zobrist: " << zobrist << std::endl;
-    }
-}
-
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
     std::vector<MCTSNode*> path;
     for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
@@ -307,12 +288,10 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->is_expanded = true;
 }
 
-// Keys pending_nodes_ by node->zobrist
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
-
-    // Insert (or update) by zobrist key.
-    pending_nodes_[n->zobrist] = n;
+    // append node pointer to queue; keep duplicates (same zobrist, diff paths)
+    pending_nodes_.push_back(n);
     return n->zobrist;
 }
 

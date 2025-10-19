@@ -1,5 +1,5 @@
 #include "singleton_registry.hpp"
-#include "mcts.hpp"
+#include "mcts.hpp" 
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
@@ -28,6 +28,7 @@ void RawPolicyCache::evict_if_needed_unlocked() {
 }
 
 void RawPolicyCache::bulk_insert(std::vector<std::tuple<uint64_t,
+                                                       float,
                                                        std::vector<float>,
                                                        std::vector<float>,
                                                        std::vector<float>,
@@ -38,19 +39,25 @@ void RawPolicyCache::bulk_insert(std::vector<std::tuple<uint64_t,
     }
     for (auto &t : batch) {
         uint64_t key = std::get<0>(t);
-        std::vector<float> a = std::move(std::get<1>(t));
-        std::vector<float> b = std::move(std::get<2>(t));
-        std::vector<float> c = std::move(std::get<3>(t));
-        std::vector<float> d = std::move(std::get<4>(t));
+        float net_value = std::get<1>(t);
+        std::vector<float> a = std::move(std::get<2>(t));
+        std::vector<float> b = std::move(std::get<3>(t));
+        std::vector<float> c = std::move(std::get<4>(t));
+        std::vector<float> d = std::move(std::get<5>(t));
+
         auto it = map_.find(key);
         if (it != map_.end()) {
+            // replace existing contents in-place and set value
             it->second.p_from = std::move(a);
             it->second.p_to = std::move(b);
             it->second.p_piece = std::move(c);
             it->second.p_promo = std::move(d);
+            it->second.value = net_value;
+            it->second.has_value = true;
             order_.push_back(key);
         } else {
-            map_.emplace(key, RawEntry(std::move(a), std::move(b), std::move(c), std::move(d)));
+            RawEntry re(net_value, std::move(a), std::move(b), std::move(c), std::move(d));
+            map_.emplace(key, std::move(re));
             order_.push_back(key);
         }
         evict_if_needed_unlocked();
