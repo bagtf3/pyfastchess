@@ -359,6 +359,10 @@ PYBIND11_MODULE(_core, m) {
                     t.apply_result(node, move_priors, value_white_pov, cache);
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+
+          .def("resolve_pending", &MCTSTree::resolve_pending,
+               "Resolve pending leaves by consuming raw cache (build priors + apply).")
+
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
 
           .def("root_child_visits", &MCTSTree::root_child_visits)

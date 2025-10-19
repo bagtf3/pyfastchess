@@ -302,6 +302,76 @@ void MCTSTree::clear_pending() {
     count_cached_ = 0;
 }
 
+// Resolve pending nodes by checking the global RawPolicyCache and applying priors.
+// For each queued node we look up raw results by zobrist. If found we build priors
+// using the global PriorEngine, apply them (cache=true) and remove the node from
+// the pending queue. If not found we print a message for that node.
+// At the end we print the total number applied.
+void MCTSTree::resolve_pending() {
+    if (pending_nodes_.empty()) {
+        std::cout << "[MCTS] resolve_pending: nothing pending\n";
+        return;
+    }
+
+    int applied_count = 0;
+    size_t i = 0;
+    while (i < pending_nodes_.size()) {
+        MCTSNode* node = pending_nodes_[i];
+        if (!node) { // defensive
+            ++i;
+            continue;
+        }
+
+        const uint64_t z = node->zobrist;
+        const RawEntry* re = raw_policy_cache().lookup(z);
+        if (!re) {
+            // Not available yet — print as requested and keep the pending entry.
+            std::cout << "[MCTS] resolve_pending: missing raw for zobrist " << z << "\n";
+            ++i;
+            continue;
+        }
+
+        // Have raw outputs; need prior engine to turn them into priors.
+        PriorEngine* pe = get_prior_engine_raw();
+        if (!pe) {
+            std::cout << "[MCTS] resolve_pending: prior engine not configured\n";
+            // bail out; we can't do anything without the prior engine.
+            break;
+        }
+
+        // Build FloatView wrappers expected by PriorEngine::build
+        FloatView ff{ re->p_from.empty() ? nullptr : re->p_from.data(), re->p_from.size() };
+        FloatView ft{ re->p_to.empty()   ? nullptr : re->p_to.data(),   re->p_to.size()   };
+        FloatView fp{ re->p_piece.empty()? nullptr : re->p_piece.data(), re->p_piece.size()};
+        FloatView fr{ re->p_promo.empty()? nullptr: re->p_promo.data(),  re->p_promo.size()};
+
+        // Use the node's cached legal moves (expand_with_uniform_priors already stored them).
+        // If for some reason legal_moves is empty, fall back to asking the board.
+        std::vector<std::string> legal;
+        if (!node->legal_moves.empty()) legal = node->legal_moves;
+        else legal = node->board.legal_moves();
+
+        // Build priors
+        auto built_priors = pe->build(node->board, legal, ff, ft, fp, fr);
+
+        // Determine value: prefer the network value if present in raw entry, otherwise fall back
+        // to node->v_prime if available, else 0.0f.
+        float value_white_pov = re->has_value ? re->value
+                                  : (node->has_vprime ? node->v_prime : 0.0f);
+
+        // Apply result and insert into priors cache (apply_result(..., cache=true) does both)
+        apply_result(node, built_priors, value_white_pov, /*cache=*/true);
+
+        // Remove this processed node from the pending queue (do not increment i since erase shifts)
+        pending_nodes_.erase(pending_nodes_.begin() + i);
+
+        ++applied_count;
+    }
+
+    // Print how many were applied (user requested simple integer print)
+    std::cout << "[MCTS] resolve_pending: applied " << applied_count << "\n";
+}
+
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
     const MCTSNode* r = root_.get();
     std::vector<std::pair<std::string, int>> rows;

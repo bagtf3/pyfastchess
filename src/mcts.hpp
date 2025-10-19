@@ -110,9 +110,8 @@ public:
     
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
-
-    // Clear all pending (call on reset / after making a move).
     void clear_pending();
+    void resolve_pending();
 
     // Read-only accessor for bindings.
     std::vector<MCTSNode*> pending_nodes_;
