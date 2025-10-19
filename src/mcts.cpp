@@ -2,6 +2,8 @@
 #include <numeric>
 #include <stdexcept>
 #include <atomic>
+#include <mutex>
+#include <iostream>
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
@@ -210,6 +212,9 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
+    // Protect node modifications with tree mutex
+    std::lock_guard<std::mutex> g(tree_mutex_);
+
     // Overwrite priors with NN priors (unchanged behaviour)
     node->P.clear();
     node->P.reserve(move_priors.size());
@@ -246,16 +251,25 @@ void MCTSTree::apply_result(
         CacheEntry e;
         e.priors = move_priors;
         e.value  = value_white_pov;
-        // insert into the priors cache (LRU)
+        // insert into the priors cache (LRU) -- priors_cache() is now threadsafe via its internal mutex
         priors_cache().insert(node->board.hash(), std::move(e));
     }
 }
 
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
+    if (!leaf) return;
     std::vector<MCTSNode*> path;
     for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
-    if (path.empty() || path.back() != root_.get()) return;
+    if (path.empty()) return;
 
+    // Validate root relationship under lock
+    {
+        std::lock_guard<std::mutex> g(tree_mutex_);
+        if (path.back() != root_.get()) return;
+    }
+
+    // Mutate along path under lock
+    std::lock_guard<std::mutex> g(tree_mutex_);
     for (auto it = path.rbegin(); it != path.rend(); ++it) {
         MCTSNode* n = *it;
         if (add_visit) n->N += 1;
@@ -265,6 +279,9 @@ void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
 }
 
 void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
+    if (!node) return;
+    std::lock_guard<std::mutex> g(tree_mutex_);
+
     node->P.clear();
     node->children.clear();
 
@@ -290,44 +307,53 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
 
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
+    std::lock_guard<std::mutex> g(tree_mutex_);
     // append node pointer to queue; keep duplicates (same zobrist, diff paths)
     pending_nodes_.push_back(n);
     return n->zobrist;
 }
 
 void MCTSTree::clear_pending() {
+    std::lock_guard<std::mutex> g(tree_mutex_);
     pending_nodes_.clear();
     count_new_ = 0;
     count_terminal_ = 0;
     count_cached_ = 0;
 }
 
-// Resolve pending nodes by checking the global RawPolicyCache and applying priors.
-// For each queued node we look up raw results by zobrist. If found we build priors
-// using the global PriorEngine, apply them (cache=true) and remove the node from
-// the pending queue. If not found we print a message for that node.
-// At the end we print the total number applied.
+// ------------------------ resolve_pending (two-phase) ------------------------
 void MCTSTree::resolve_pending() {
-    if (pending_nodes_.empty()) {
-        std::cout << "[MCTS] resolve_pending: nothing pending\n";
-        return;
+    // Quick check
+    {
+        std::lock_guard<std::mutex> g(tree_mutex_);
+        if (pending_nodes_.empty()) {
+            std::cout << "[MCTS] resolve_pending: nothing pending\n";
+            return;
+        }
+    }
+
+    // Phase 1: move pending nodes into a local vector under lock (drain)
+    std::vector<MCTSNode*> to_process;
+    {
+        std::lock_guard<std::mutex> g(tree_mutex_);
+        to_process = std::move(pending_nodes_);
+        pending_nodes_.clear();
     }
 
     int applied_count = 0;
-    size_t i = 0;
-    while (i < pending_nodes_.size()) {
-        MCTSNode* node = pending_nodes_[i];
-        if (!node) { // defensive
-            ++i;
-            continue;
-        }
+
+    // Phase 2: process each node without holding tree_mutex_ 
+    // safe because node pointers are stable while tree exists)
+    for (MCTSNode* node : to_process) {
+        if (!node) continue;
 
         const uint64_t z = node->zobrist;
-        const RawEntry* re = raw_policy_cache().lookup(z);
+        const RawEntry* re = raw_policy_cache().lookup(z); // Raw cache is already thread-safe
         if (!re) {
-            // Not available yet — print as requested and keep the pending entry.
+            // Not available yet — requeue the node (under lock) for future attempts
+            std::lock_guard<std::mutex> g(tree_mutex_);
+            pending_nodes_.push_back(node);
             std::cout << "[MCTS] resolve_pending: missing raw for zobrist " << z << "\n";
-            ++i;
             continue;
         }
 
@@ -335,7 +361,9 @@ void MCTSTree::resolve_pending() {
         PriorEngine* pe = get_prior_engine_raw();
         if (!pe) {
             std::cout << "[MCTS] resolve_pending: prior engine not configured\n";
-            // bail out; we can't do anything without the prior engine.
+            // Requeue node (so we don't lose it) and bail out (prior engine missing is fatal)
+            std::lock_guard<std::mutex> g(tree_mutex_);
+            pending_nodes_.push_back(node);
             break;
         }
 
@@ -348,10 +376,14 @@ void MCTSTree::resolve_pending() {
         // Use the node's cached legal moves (expand_with_uniform_priors already stored them).
         // If for some reason legal_moves is empty, fall back to asking the board.
         std::vector<std::string> legal;
-        if (!node->legal_moves.empty()) legal = node->legal_moves;
-        else legal = node->board.legal_moves();
+        {
+            // small read under tree_mutex_ to safely access node->legal_moves
+            std::lock_guard<std::mutex> g(tree_mutex_);
+            if (!node->legal_moves.empty()) legal = node->legal_moves;
+        }
+        if (legal.empty()) legal = node->board.legal_moves();
 
-        // Build priors
+        // Build priors (this is potentially slow but does not hold tree_mutex_)
         auto built_priors = pe->build(node->board, legal, ff, ft, fp, fr);
 
         // Determine value: prefer the network value if present in raw entry, otherwise fall back
@@ -359,24 +391,26 @@ void MCTSTree::resolve_pending() {
         float value_white_pov = re->has_value ? re->value
                                   : (node->has_vprime ? node->v_prime : 0.0f);
 
-        // Apply result and insert into priors cache (apply_result(..., cache=true) does both)
+        // Apply result (apply_result will take tree lock internally)
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
-
-        // Remove this processed node from the pending queue (do not increment i since erase shifts)
-        pending_nodes_.erase(pending_nodes_.begin() + i);
-
         ++applied_count;
     }
 
-    // Print how many were applied (user requested simple integer print)
     std::cout << "[MCTS] resolve_pending: applied " << applied_count << "\n";
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
     std::vector<std::pair<std::string, int>> rows;
+    if (!r) return rows;
     rows.reserve(r->children.size());
-    for (const auto& kv : r->children) rows.emplace_back(kv.first, kv.second->N);
+    for (const auto& kv : r->children) {
+        const std::string& mv = kv.first;
+        const MCTSNode* ch = kv.second.get();
+        int N = ch ? ch->N : 0;
+        rows.emplace_back(mv, N);
+    }
     std::sort(rows.begin(), rows.end(), [](auto& a, auto& b){ return a.second > b.second; });
     return rows;
 }
@@ -404,6 +438,7 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
 }
 
 bool MCTSTree::advance_root(const std::string& mv) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
     last_path_.clear();
     // Take ownership of the current root so we can safely move out of it
     auto old_root = std::move(root_);
@@ -438,6 +473,7 @@ bool MCTSTree::advance_root(const std::string& mv) {
 }
 
 std::vector<ChildDetail> MCTSTree::root_child_details() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
     std::vector<ChildDetail> out;
     const MCTSNode* r = root_.get();
     if (!r) return out;
@@ -452,12 +488,12 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
 
         ChildDetail cd;
         cd.uci = mv;
-        cd.N = ch->N;
-        cd.Q = ch->Q;
-        cd.vprime_visits = ch->vprime_visits;
+        cd.N = ch ? ch->N : 0;
+        cd.Q = ch ? ch->Q : 0.0f;
+        cd.vprime_visits = ch ? ch->vprime_visits : 0;
         cd.prior = prior;
-        cd.is_terminal = ch->is_terminal;
-        cd.value = ch->value;
+        cd.is_terminal = ch ? ch->is_terminal : false;
+        cd.value = ch ? ch->value : 0.0f;
         out.push_back(std::move(cd));
     }
     std::sort(out.begin(), out.end(),
@@ -465,9 +501,9 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
     return out;
 }
 
-
 std::pair<float,int> MCTSTree::depth_stats() const {
-    const MCTSNode* r = root_.get();   // <-- .get()
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    const MCTSNode* r = root_.get();
     if (!r) return {0.0f, 0};
 
     float sum_vd = 0.0f;
@@ -491,6 +527,7 @@ std::pair<float,int> MCTSTree::depth_stats() const {
 }
 
 std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
     std::vector<PVItem> pv;
     const MCTSNode* node = root_.get();
     if (!node || max_len <= 0) return pv;

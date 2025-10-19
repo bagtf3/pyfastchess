@@ -22,6 +22,9 @@ public:
     // insert/replace and move to MRU
     void insert(uint64_t key, CacheEntry entry); // pass-by-value, move into map
 
+    // returns pointer to entry & touches LRU; nullptr if miss
+    const CacheEntry* lookup_ptr(uint64_t key);
+
     // clear cache and reset counters
     void clear();
 
@@ -34,8 +37,8 @@ public:
     size_t queries() const;
     size_t hits() const;
 
-    // returns pointer to entry & touches LRU; nullptr if miss
-    const CacheEntry* lookup_ptr(uint64_t key);
+    // returns reference singleton elsewhere (we don't create instance() here)
+    // static Cache& instance(); // removed - singletons are created in registry
 
 private:
     using ListIt = std::list<uint64_t>::iterator;
@@ -49,6 +52,9 @@ private:
     // counters (plain for single-threaded)
     size_t queries_{0};
     size_t hits_{0};
+
+    // internal mutex to protect all access
+    mutable std::mutex mutex_;
 
     void touch(ListIt it); // move an existing list iterator to MRU
 };

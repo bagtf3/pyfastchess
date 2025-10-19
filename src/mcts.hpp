@@ -10,6 +10,7 @@
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include <mutex> 
 #include "backend.hpp"
 #include "evaluator.hpp"
 #include "singleton_registry.hpp"
@@ -170,6 +171,8 @@ private:
     size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
     size_t count_terminal_ = 0;  // number of terminal hits in last collection
     size_t count_cached_ = 0;    // number of cached hits in last collection
+    
+    mutable std::mutex tree_mutex_; 
 };
 
 // --------- Helpers ---------
