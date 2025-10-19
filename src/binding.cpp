@@ -350,7 +350,7 @@ PYBIND11_MODULE(_core, m) {
                return out;
           },
           py::arg("nplanes") =5,
-          "Encode pending leaves: (token, zobrist, planes, piece_count, legal_moves).")
+          "Encode pending leaves: (zobrist, planes).")
                
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
@@ -360,8 +360,9 @@ PYBIND11_MODULE(_core, m) {
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
 
-          .def("resolve_pending", &MCTSTree::resolve_pending,
-               "Resolve pending leaves by consuming raw cache (build priors + apply).")
+          .def("resolve_pending", [](MCTSTree &t) {
+               t.resolve_pending();
+          }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
 
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
 
@@ -493,7 +494,6 @@ PYBIND11_MODULE(_core, m) {
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
                std::vector<std::tuple<uint64_t, float, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
-
                // Try to reserve if length is available
                try {
                     py::ssize_t n = py::len(batch);
@@ -526,10 +526,10 @@ PYBIND11_MODULE(_core, m) {
                     vec.emplace_back(key, net_value, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
                }
 
-          // Move the batch into the RawPolicyCache
-          raw_policy_cache().bulk_insert(std::move(vec));
-          }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
-          "Each batch item must be (key:int, value:float, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+               // Move the batch into the RawPolicyCache
+               raw_policy_cache().bulk_insert(std::move(vec));
+               }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
+               "Each batch item must be (key:int, value:float, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
           
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_stats", []() {
