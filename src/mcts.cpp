@@ -20,7 +20,7 @@ MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_f
 }
 
 MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct) {
-    if (P.empty()) return nullptr;               // no priors / no legal moves known
+    if (P.empty()) return nullptr;
 
     const float parentN   = static_cast<float>(std::max(1, N));
     const float u_scale   = c_puct * std::sqrt(parentN);
@@ -120,7 +120,8 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         back_up_along_path(node, v, /*add_visit=*/true);
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
-    
+
+    // Try priors cache fast-path
     {
         uint64_t key = node->zobrist;
         if (key == 0) {
@@ -129,37 +130,22 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
             std::cout << "[MCTS][DBG] initialized empty zobrist -> " << key << "\n";
         }
 
-        auto pe = priors_cache().lookup_ptr(key);
-        if (pe) {
-            if (pe->priors.empty()) {
-                std::cout << "[MCTS][DBG] cache hit but EMPTY priors for zobrist " << key << "\n";
-                // treat as miss and continue
+        if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
+            // capture v' provisional state BEFORE apply_result may clear it
+            const bool had_vprime = node->has_vprime && (node->vprime_visits > 0);
+
+            // ensure node is expanded with these priors (placeholders; lazy children)
+            expand_with_priors(node, pe->priors);
+
+            // If there were no provisional v' backups, count this visit now.
+            if (!had_vprime) {
+                back_up_along_path(node, pe->value, /*add_visit=*/true);
             } else {
-                // capture v' provisional state BEFORE apply_result clears it
-                const bool had_vprime = node->has_vprime && (node->vprime_visits > 0);
-
-                // Ensure the node is expanded with these priors (placeholders; lazy children)
-                if (!node->is_expanded) {
-                    expand_with_priors(node, pe->priors);
-                } else {
-                    std::cout << "[MCTS][DBG] cache hit but already expanded for zobrist " << key << "\n";
-                    // If node is_expanded but P/children are not matching, we might want to
-                    // refresh P. Optional: update node->P only if empty or if replace wanted.
-                    // std::lock_guard<std::mutex> g(tree_mutex_); node->P = ... (if required)
-                }
-
-                // If there were no provisional v' backups, we need to count this visit now.
-                if (!had_vprime) {
-                    back_up_along_path(node, pe->value, /*add_visit=*/true);
-                } else {
-                    // apply_result: will reconcile any v' bookkeeping or simply set the value
-                    apply_result(node, pe->priors, pe->value, /*cache=*/false);
-                }
-
-                // else: apply_result already adjusted W and cleared vprime bookkeeping
-
-                return { node, MCTSTree::CollectTag::CACHED };
+                std::cout << "[MCTS][DBG] cache fastpath: had v' -> apply_result\n";
+                apply_result(node, pe->priors, pe->value, /*cache=*/false);
             }
+
+            return { node, MCTSTree::CollectTag::CACHED };
         }
     }
 
@@ -172,7 +158,7 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
-    // Fresh non-terminal leaf: expand with uniform priors and start V'
+    // Fresh non-terminal leaf: expand with uniform priors and start v'
     expand_with_uniform_priors(node);
 
     // shallow qsearch using non-owning raw pointer
@@ -183,7 +169,7 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
     float vprime = static_cast<float>(cp) / vprime_scale_;
     if (vprime < -1.0f) vprime = -1.0f;
     else if (vprime > 1.0f) vprime = 1.0f;
-    
+
     node->v_prime = vprime;
     node->has_vprime = true;
     node->vprime_visits = 1;
@@ -200,7 +186,7 @@ MCTSNode* MCTSTree::collect_one_leaf() {
 
 // collect_many_leaves: collect up to `n_new` new leaves (non-terminal,
 // non-cached) and stop early if we've applied `n_fastpath` fast-path results
-// (cached OR terminal). This version fills pending_nodes_ and returns only
+// (cached OR terminal). This method fills pending_nodes_
 std::tuple<size_t, size_t, size_t>
 MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     count_new_ = count_terminal_ = count_cached_ = 0;
@@ -221,7 +207,6 @@ MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         if (!node) break;
 
         if (tag == MCTSTree::CollectTag::NEW_LEAF) {
-            // queue node by zobrist (returns zobrist key)
             uint64_t z = this->queue_pending(node);
             ++new_count;
         } else if (tag == MCTSTree::CollectTag::CACHED) {
@@ -285,7 +270,7 @@ void MCTSTree::apply_result(
         CacheEntry e;
         e.priors = move_priors;
         e.value  = value_white_pov;
-        // insert into the priors cache (LRU) -- priors_cache() is now threadsafe via its internal mutex
+        // insert into the priors cache. now threadsafe via mutex
         priors_cache().insert(node->board.hash(), std::move(e));
     }
 }
@@ -376,15 +361,11 @@ void MCTSTree::clear_pending() {
     count_cached_ = 0;
 }
 
-// ------------------------ resolve_pending (two-phase) ------------------------
 void MCTSTree::resolve_pending() {
     // Quick check
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
-        if (pending_nodes_.empty()) {
-            //std::cout << "[MCTS] resolve_pending: nothing pending\n";
-            return;
-        }
+        if (pending_nodes_.empty()) {return;}
     }
 
     // Phase 1: move pending nodes into a local vector under lock (drain)
@@ -394,8 +375,6 @@ void MCTSTree::resolve_pending() {
         to_process = std::move(pending_nodes_);
         pending_nodes_.clear();
     }
-
-    int applied_count = 0;
 
     // Phase 2: process each node without holding tree_mutex_ 
     // safe because node pointers are stable while tree exists)
@@ -414,13 +393,6 @@ void MCTSTree::resolve_pending() {
 
         // Have raw outputs; need prior engine to turn them into priors.
         PriorEngine* pe = get_prior_engine_raw();
-        if (!pe) {
-            std::cout << "[MCTS] resolve_pending: prior engine not configured\n";
-            // Requeue node (so we don't lose it) and bail out (prior engine missing is fatal)
-            std::lock_guard<std::mutex> g(tree_mutex_);
-            pending_nodes_.push_back(node);
-            break;
-        }
 
         // Build FloatView wrappers expected by PriorEngine::build
         FloatView ff{ re->p_from.empty() ? nullptr : re->p_from.data(), re->p_from.size() };
@@ -428,7 +400,7 @@ void MCTSTree::resolve_pending() {
         FloatView fp{ re->p_piece.empty()? nullptr : re->p_piece.data(), re->p_piece.size()};
         FloatView fr{ re->p_promo.empty()? nullptr: re->p_promo.data(),  re->p_promo.size()};
 
-        // Use the node's cached legal moves (expand_with_uniform_priors already stored them).
+        // Use the nodes cached legal moves (expand_with_uniform_priors already stored them).
         // If for some reason legal_moves is empty, fall back to asking the board.
         std::vector<std::string> legal;
         {
@@ -448,10 +420,7 @@ void MCTSTree::resolve_pending() {
 
         // Apply result (apply_result will take tree lock internally)
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
-        ++applied_count;
     }
-
-    //std::cout << "[MCTS] resolve_pending: applied " << applied_count << "\n";
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
@@ -512,7 +481,6 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     if (!best_mv) return {"", nullptr};
     return { *best_mv, best_ch };
 }
-
 
 bool MCTSTree::advance_root(const std::string& mv) {
     std::lock_guard<std::mutex> g(tree_mutex_);
@@ -634,7 +602,7 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
                 best_ch = ch;
             }
         }
-        if (!best_mv || best_N <= 0 || !best_ch) break; // stop if no *visited* child
+        if (!best_mv || best_N <= 0 || !best_ch) break; // stop if no visited child
 
         float prior = 0.0f;
         if (auto it = node->P.find(*best_mv); it != node->P.end()) prior = it->second;
@@ -670,7 +638,7 @@ priors_from_heads(const std::vector<std::string>& legal_moves,
     std::vector<std::pair<std::string, float>> out;
     if (legal_moves.empty()) return out;
 
-    // Just (move, prob) → renormalize (your Python also normalizes/mixes).
+    // Just (move, prob) → renormalize
     const size_t n = std::min(legal_moves.size(), policy_per_legal.size());
     out.reserve(n);
     double s = 0.0;
@@ -753,7 +721,7 @@ PriorEngine::build(const backend::Board& board,
     const size_t n = legal.size();
     if (n == 0) return pri;
 
-    // get piece count directly from the board (no need to pass it in)
+    // get piece count to determine endgame or not
     const int piece_count = board.piece_count();
     const bool endgame = (piece_count <= 14);
     float mix = cfg_.anytime_uniform_mix;

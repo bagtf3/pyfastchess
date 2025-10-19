@@ -117,8 +117,6 @@ std::uint64_t Board::zobrist_full() const {
     return board_.zobrist();
 }
 
-// ----------------- New methods -----------------
-
 bool Board::is_capture(const std::string& uci) const {
     chess::Move mv = chess::uci::uciToMove(board_, uci);
     if (mv == chess::Move::NO_MOVE) return false;
@@ -136,7 +134,7 @@ bool Board::would_be_repetition(const std::string& uci, int count) const {
     if (mv == chess::Move::NO_MOVE) return false;
     chess::Board tmp = board_;      // cheap copy, keeps this method const
     tmp.makeMove(mv);
-    return tmp.isRepetition(count); // “at least count times” (see note below)
+    return tmp.isRepetition(count); // at least count times
 }
 
 std::string Board::side_to_move() const {
@@ -215,7 +213,7 @@ std::vector<std::string> Board::history_uci() const {
     return out;
 }
 
-void Board::clear_history() { history_.clear(); }  // optional
+void Board::clear_history() { history_.clear(); }
 
 std::string Board::san(const std::string& uci) const {
     chess::Move move = chess::uci::uciToMove(board_, uci);
@@ -314,7 +312,6 @@ std::tuple<int,int,int,int> Board::move_to_labels(const std::string& uci) const 
   // Default to the engine's target square (rook square for castling in this lib)
   int to_idx = m.to().index();
 
-  // ---- Robust castling handling ----
   bool remapped = false;
 
   // 1) Non-960: detect king two-file jump from UCI literal and use that as king target
@@ -505,7 +502,7 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
             } else if (m.size() > 4) { // promotion UCI has 5th char
                 scored.emplace_back(1000, m);
             } else if (this->gives_check(m)) {
-                scored.emplace_back(0, m);
+                scored.emplace_back(500, m);
             }
         }
     }
@@ -530,7 +527,7 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
 
         if (!this->push_uci(mv)) continue;
 
-        // recurse **without** negation: we keep white-POV throughout
+        // recurse **without** negation: keep white-POV throughout
         int sc = this->qsearch_impl(alpha, beta, ply + 1, ev, opts, stats, start);
 
         this->unmake();
@@ -605,7 +602,7 @@ terminal_value_white_pov(const Board& b) noexcept {
         const bool white_wins = !stm_white;
         return white_wins ? 1.0f : -1.0f;   // white-POV
     }
-    // stalemate / repetition / 50mr / insufficient material → draw
+    // stalemate / repetition / 50mr / insufficient material -> draw
     return 0.0f;
 }
 
