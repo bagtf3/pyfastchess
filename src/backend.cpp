@@ -564,7 +564,6 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     return best;
 }
 
-
 std::vector<std::pair<int, std::string>> Board::ordered_moves(const std::optional<std::string>& tt_best) const {
     std::vector<std::pair<int, std::string>> out;
     auto legal = legal_moves();
@@ -627,6 +626,7 @@ namespace {
     }
 
     // One frame: 8x8x14 uint8 (HWC)
+    // this is currently trash. next thing to fix
     static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
         std::fill(out, out + 8*8*14, (uint8_t)0);
 
