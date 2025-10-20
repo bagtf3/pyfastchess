@@ -365,7 +365,8 @@ PYBIND11_MODULE(_core, m) {
           }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
 
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
-
+          .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
+          
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
