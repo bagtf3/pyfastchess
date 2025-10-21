@@ -614,34 +614,25 @@ terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
 
 namespace {
 
-// Portable ctz64
-static inline int ctzll_u64(uint64_t x) {
-#ifdef _MSC_VER
-    if (x == 0) return 64;
-    unsigned long idx;
-    _BitScanForward64(&idx, x);
-    return static_cast<int>(idx);
-#else
-    if (x == 0) return 64;
-    return __builtin_ctzll(x);
-#endif
-}
-
 // Map chess::Piece -> plane index 0..11 (P N B R Q K p n b r q k)
-static inline int plane_index_for_piece(const chess::Piece &p) {
-    if (p.type() == chess::PieceType::NONE) return -1;
+static inline int plane_index_for_piece(const chess::Piece& p) {
+    // In this library, p.type() is the PieceType::underlying (integral).
+    // Known mapping (already assumed elsewhere): PAWN..KING -> 0..5
+    const int t = static_cast<int>(p.type());
+    if (t < 0 || t > 5) return -1;
+
     int base = 0;
-    switch (p.type()) {
-        case chess::PieceType::PAWN:   base = 0; break;
-        case chess::PieceType::KNIGHT: base = 1; break;
-        case chess::PieceType::BISHOP: base = 2; break;
-        case chess::PieceType::ROOK:   base = 3; break;
-        case chess::PieceType::QUEEN:  base = 4; break;
-        case chess::PieceType::KING:   base = 5; break;
+    switch (t) {
+        case 0: base = 0; break; // PAWN
+        case 1: base = 1; break; // KNIGHT
+        case 2: base = 2; break; // BISHOP
+        case 3: base = 3; break; // ROOK
+        case 4: base = 4; break; // QUEEN
+        case 5: base = 5; break; // KING
         default: return -1;
     }
-    if (p.color() == chess::Color::WHITE) return base;       // 0..5
-    else                                   return base + 6;  // 6..11
+
+    return (p.color() == chess::Color::WHITE) ? base : (base + 6);
 }
 
 static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
@@ -710,7 +701,7 @@ std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames) {
     std::vector<uint8_t> frame(H * W * C);
 
     for (int f = F - 1; f >= 0; --f) {
-        make_frame_14_bb(tmp, frame.data());  // NEW (bitboard path)
+        make_frame_14(tmp, frame.data());
         for (int r = 0; r < H; ++r) {
             for (int c = 0; c < W; ++c) {
                 uint8_t* src = frame.data() + (r * W + c) * C;
