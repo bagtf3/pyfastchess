@@ -214,7 +214,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
 
         bool attacked_by_lower = false;
         if (en_prize) {
-            // per-piece-type check (keeps current semantics)
+            // per-piece-type check
             for (int atk_pt = 0; atk_pt < 6; ++atk_pt) {
                 uint64_t enemy_pt_bb = is_white ? black_by_pt[atk_pt] : white_by_pt[atk_pt];
                 if ((atk_enemy_mask & enemy_pt_bb) != 0) {
@@ -254,7 +254,7 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
     }
 
     // --- MOBILITY: compute per-piece non-capture (empty destination) counts ---
-    // We'll count how many empty squares each piece type can move to (non-captures),
+    // count how many empty squares each piece type can move to (non-captures),
     // using chess::attacks bitboard helpers for knights/bishops/rooks/queens/kings and
     // simple forward checks for pawns.
     auto popcount_u64 = [](uint64_t x)->int {
