@@ -614,85 +614,112 @@ terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
 }
 
 namespace {
-    // 12 piece planes P..K, p..k
-    static inline int piece_plane(char ch) {
-        switch (ch) {
-            case 'P': return 0; case 'N': return 1; case 'B': return 2;
-            case 'R': return 3; case 'Q': return 4; case 'K': return 5;
-            case 'p': return 6; case 'n': return 7; case 'b': return 8;
-            case 'r': return 9; case 'q': return 10; case 'k': return 11;
-            default:  return -1;
+// --- fast/bitboard-based frame builder (drop-in alongside make_frame_14) ---
+// Place in the same anonymous namespace as make_frame_14 so symbols remain local.
+
+static inline int frame_cell_from_sq(int sq) {
+    // Convert internal square index (0 == a1, 63 == h8) into the
+    // (r*8 + c) cell index used by make_frame_14 (r==0 corresponds to top row from FEN)
+    int file = sq % 8;           // 0..7 -> a..h
+    int rank = sq / 8;           // 0..7 -> rank1..rank8
+    int r = 7 - rank;            // r==0 -> rank8 (FEN row0)
+    int c = file;
+    return r * 8 + c;
+}
+
+static void make_frame_14_bitboards(const backend::Board& b, uint8_t out[8*8*14]) {
+    // Same output layout as make_frame_14: (r*8 + c)*14 + plane
+    std::fill(out, out + 8*8*14, (uint8_t)0);
+
+    // get raw chess board
+    const chess::Board &rb = b.raw_board();
+
+    // gather piece bitboards per piece-type and color (pv: pawn..king -> 0..5)
+    uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
+    for (int pt = 0; pt < 6; ++pt) {
+        auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
+        white_by_pt[pt] = rb.pieces(pt_e, chess::Color::WHITE).getBits();
+        black_by_pt[pt] = rb.pieces(pt_e, chess::Color::BLACK).getBits();
+    }
+
+    // portable ctz (reuse file-local helper if available)
+    auto ctzll_local = [](uint64_t x)->int {
+#ifdef _MSC_VER
+        if (x == 0) return 64;
+        unsigned long idx;
+        _BitScanForward64(&idx, x);
+        return static_cast<int>(idx);
+#else
+        if (x == 0) return 64;
+        return __builtin_ctzll(x);
+#endif
+    };
+
+    // fill piece planes 0..11 (0..5 = P,N,B,R,Q,K ; 6..11 = p,n,b,r,q,k)
+    for (int pt = 0; pt < 6; ++pt) {
+        uint64_t w = white_by_pt[pt];
+        while (w) {
+            int sq = ctzll_local(w);
+            w &= w - 1ULL;
+            int cell = frame_cell_from_sq(sq);
+            out[cell * 14 + pt] = 1;
+        }
+        uint64_t bb = black_by_pt[pt];
+        while (bb) {
+            int sq = ctzll_local(bb);
+            bb &= bb - 1ULL;
+            int cell = frame_cell_from_sq(sq);
+            out[cell * 14 + (6 + pt)] = 1;
         }
     }
 
-    // One frame: 8x8x14 uint8 (HWC)
-    // this is currently trash. next thing to fix.
-    static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
-        std::fill(out, out + 8*8*14, (uint8_t)0);
+    // side-to-move plane (index 12) — preserve previous layout (full plane)
+    const bool wtm = (b.side_to_move() == "w");
+    uint8_t stm_val = wtm ? 1 : 0;
+    for (int cell = 0; cell < 64; ++cell) out[cell * 14 + 12] = stm_val;
 
-        // piece planes from FEN
-        std::string fen = b.fen(true);
-        const auto sp = fen.find(' ');
-        const std::string pieces = (sp == std::string::npos) ? fen : fen.substr(0, sp);
+    // castling plane (index 13) — preserve quadrant mapping exactly
+    std::string cs = b.castling_rights();
+    bool wk = cs.find('K') != std::string::npos;
+    bool wq = cs.find('Q') != std::string::npos;
+    bool bk = cs.find('k') != std::string::npos;
+    bool bq = cs.find('q') != std::string::npos;
 
-        int r=0, c=0;
-        for (char ch : pieces) {
-            if (ch == '/') { ++r; c = 0; continue; }
-            if (ch >= '1' && ch <= '8') { c += (ch - '0'); continue; }
-            int p = piece_plane(ch);
-            if (p >= 0 && r>=0 && r<8 && c>=0 && c<8) {
-                out[(r*8 + c)*14 + p] = 1;
-            }
-            ++c;
-        }
-
-        // side-to-move plane (index 12)
-        const bool wtm = (b.side_to_move() == "w");
-        for (int rr=0; rr<8; ++rr)
-            for (int cc=0; cc<8; ++cc)
-                out[(rr*8 + cc)*14 + 12] = wtm ? 1 : 0;
-
-        // castling plane (index 13), 4 quadrants KQkq
-        std::string cs = b.castling_rights();
-        bool wk = cs.find('K') != std::string::npos;
-        bool wq = cs.find('Q') != std::string::npos;
-        bool bk = cs.find('k') != std::string::npos;
-        bool bq = cs.find('q') != std::string::npos;
-        for (int rr=0; rr<8; ++rr) {
-            for (int cc=0; cc<8; ++cc) {
-                uint8_t v = 0;
-                if (rr < 4 && cc < 4)       v = wk ? 1 : 0;
-                else if (rr < 4 && cc >= 4) v = wq ? 1 : 0;
-                else if (rr >= 4 && cc < 4) v = bk ? 1 : 0;
-                else                         v = bq ? 1 : 0;
-                out[(rr*8 + cc)*14 + 13] = v;
-            }
+    for (int rr = 0; rr < 8; ++rr) {
+        for (int cc = 0; cc < 8; ++cc) {
+            uint8_t v = 0;
+            if (rr < 4 && cc < 4)       v = wk ? 1 : 0;
+            else if (rr < 4 && cc >= 4) v = wq ? 1 : 0;
+            else if (rr >= 4 && cc < 4) v = bk ? 1 : 0;
+            else                        v = bq ? 1 : 0;
+            out[(rr * 8 + cc) * 14 + 13] = v;
         }
     }
+}
+
 } // anonymous
 
-std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames) {
-    constexpr int H = 8, W = 8, C = 14;          // H x W x channels per frame
-    int F = (num_frames > 0) ? num_frames : 5;   // default 5 frames
+// stacked planes builder using bitboards
+std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_frames) {
+    constexpr int H = 8, W = 8, C = 14;
+    int F = (num_frames > 0) ? num_frames : 5;
     std::vector<uint8_t> out((size_t)H * W * C * F);
 
-    // We copy the board so we can unmake moves safely while building frames.
+    // copy board so unmake() is safe
     Board tmp = b;
     std::vector<uint8_t> frame(H * W * C);
 
-    // Fill frames from newest to oldest (so the last played move is last element)
+    // Fill frames from newest to oldest to match existing stacked_planes_bytes
     for (int f = F - 1; f >= 0; --f) {
-        make_frame_14(tmp, frame.data()); // your existing helper that fills 8*8*14 bytes
-        // write frame into out with channel-major per frame at end
-        // layout: for each cell (r,c): channels[0..13] for frame0, then frame1, ...
+        make_frame_14_bitboards(tmp, frame.data());
         for (int r = 0; r < H; ++r) {
             for (int c = 0; c < W; ++c) {
                 uint8_t* src = frame.data() + (r * W + c) * C;
-                uint8_t* dst = out.data() + ( (r * W + c) * C * F + f * C );
+                uint8_t* dst = out.data() + ((r * W + c) * C * F + f * C);
                 std::memcpy(dst, src, C);
             }
         }
-        if (!tmp.unmake()) break; // no more history
+        if (!tmp.unmake()) break;
     }
     return out;
 }

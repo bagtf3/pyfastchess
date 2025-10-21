@@ -29,8 +29,9 @@ struct QStats {
 
 class Board;
 
-// Return H x W x (14 * num_frames) uint8 bytes (channels-last, HWC)
-std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames = 5);
+// Fast bitboard-based variant — same output layout as stacked_planes_bytes,
+// but built directly from chess::Bitboard u64s for speed.
+std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_frames = 5);
 
 class Board {
 public:

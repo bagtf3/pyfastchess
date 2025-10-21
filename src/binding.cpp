@@ -13,13 +13,14 @@
 
 namespace py = pybind11;
 
-// wrapper: stacked frames (8,8,14 * num_frames)
-static py::array_t<uint8_t> stacked_planes(const backend::Board& b, int num_frames = 5) {
-    auto v = backend::stacked_planes_bytes(b, num_frames);
+// wrapper: stacked frames using bitboard encoder (8,8,14 * num_frames)
+static py::array_t<uint8_t> stacked_planes_bitboards(const backend::Board& b, int num_frames = 5) {
+    auto v = backend::stacked_planes_bytes_bitboards(b, num_frames);
     py::ssize_t H = 8, W = 8, C = 14;
     std::vector<py::ssize_t> shape = { H, W, C * static_cast<py::ssize_t>(num_frames) };
     py::array_t<uint8_t> arr(shape);
-    std::memcpy(arr.mutable_data(), v.data(), v.size() * sizeof(uint8_t));
+    // ensure three args: dest, src, bytes
+    std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(v.size() * sizeof(uint8_t)));
     return arr;
 }
 
@@ -146,7 +147,7 @@ PYBIND11_MODULE(_core, m) {
           .def("san", &backend::Board::san, py::arg("uci"),
                "Convert a UCI string into SAN for this board's current position.")
           
-          .def("stacked_planes", &stacked_planes,
+          .def("stacked_planes", &stacked_planes_bitboards,
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
@@ -344,7 +345,7 @@ PYBIND11_MODULE(_core, m) {
                for (MCTSNode* n : t.pending_nodes_) {
                     if (!n) continue;
                     uint64_t z   = n->zobrist;
-                    auto planes  = ::stacked_planes(n->board, nplanes);
+                    auto planes  = ::stacked_planes_bitboards(n->board, nplanes);
                     out.append(py::make_tuple(z, planes));
                }
                return out;
@@ -366,7 +367,7 @@ PYBIND11_MODULE(_core, m) {
 
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
           .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
-          
+
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
