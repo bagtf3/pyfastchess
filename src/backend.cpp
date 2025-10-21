@@ -609,107 +609,90 @@ std::optional<int>
 terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
     auto n = terminal_value_white_pov(b);
     if (!n) return std::nullopt;
+    // n ∈ {-1,0,+1}
     return static_cast<int>(*n * mate_cp);
 }
 
 namespace {
-
-// Map chess::Piece -> plane index 0..11 (P N B R Q K p n b r q k)
-static inline int plane_index_for_piece(const chess::Piece& p) {
-    // In this library, p.type() is the PieceType::underlying (integral).
-    // Known mapping (already assumed elsewhere): PAWN..KING -> 0..5
-    const int t = static_cast<int>(p.type());
-    if (t < 0 || t > 5) return -1;
-
-    int base = 0;
-    switch (t) {
-        case 0: base = 0; break; // PAWN
-        case 1: base = 1; break; // KNIGHT
-        case 2: base = 2; break; // BISHOP
-        case 3: base = 3; break; // ROOK
-        case 4: base = 4; break; // QUEEN
-        case 5: base = 5; break; // KING
-        default: return -1;
-    }
-
-    return (p.color() == chess::Color::WHITE) ? base : (base + 6);
-}
-
-static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
-    constexpr int H = 8, W = 8, C = 14;
-    std::fill(out, out + H*W*C, (uint8_t)0);
-
-    // Raw chess board (no strings)
-    const chess::Board &rb = b.raw_board();
-
-    // 1) PIECE PLANES (0..11), using occupancy scan
-    uint64_t occ = rb.occ().getBits();
-    uint64_t cur = occ;
-    while (cur) {
-        int sq = ctzll_u64(cur);
-        cur &= cur - 1ULL;
-
-        chess::Square csq(static_cast<chess::Square::underlying>(sq));
-        chess::Piece  p   = rb.at(csq);
-        int pl = plane_index_for_piece(p);
-        if (pl < 0) continue;
-
-        // Convert bit index (a1=0..h8=63) to (r,c) with r=0 at top (rank 8), c=0 at file 'a'
-        int rank0_a1 = sq / 8;       // 0..7 with 0 = rank 1 (bottom)
-        int file0_a  = sq % 8;       // 0..7 with 0 = file 'a'
-        int r = 7 - rank0_a1;        // flip so r=0 corresponds to rank 8 (top), matching old output
-        int c = file0_a;
-
-        out[(r*8 + c)*C + pl] = 1;
-    }
-
-    // 2) SIDE-TO-MOVE PLANE (12): fill all squares with 1 if white to move else 0
-    const bool wtm = (b.side_to_move() == std::string("w"));
-    for (int r = 0; r < H; ++r) {
-        for (int c = 0; c < W; ++c) {
-            out[(r*W + c)*C + 12] = wtm ? 1 : 0;
+    // 12 piece planes P..K, p..k
+    static inline int piece_plane(char ch) {
+        switch (ch) {
+            case 'P': return 0; case 'N': return 1; case 'B': return 2;
+            case 'R': return 3; case 'Q': return 4; case 'K': return 5;
+            case 'p': return 6; case 'n': return 7; case 'b': return 8;
+            case 'r': return 9; case 'q': return 10; case 'k': return 11;
+            default:  return -1;
         }
     }
 
-    // 3) CASTLING 
-    std::string cs = b.castling_rights();
-    bool wk = cs.find('K') != std::string::npos;
-    bool wq = cs.find('Q') != std::string::npos;
-    bool bk = cs.find('k') != std::string::npos;
-    bool bq = cs.find('q') != std::string::npos;
+    // One frame: 8x8x14 uint8 (HWC)
+    // this is currently trash. next thing to fix.
+    static void make_frame_14(const backend::Board& b, uint8_t out[8*8*14]) {
+        std::fill(out, out + 8*8*14, (uint8_t)0);
 
-    for (int r = 0; r < H; ++r) {
-        for (int c = 0; c < W; ++c) {
-            uint8_t v = 0;
-            if      (r < 4 && c < 4)       v = wk ? 1 : 0;  // top-left
-            else if (r < 4 && c >= 4)      v = wq ? 1 : 0;  // top-right
-            else if (r >= 4 && c < 4)      v = bk ? 1 : 0;  // bottom-left
-            else                           v = bq ? 1 : 0;  // bottom-right
-            out[(r*W + c)*C + 13] = v;
+        // piece planes from FEN
+        std::string fen = b.fen(true);
+        const auto sp = fen.find(' ');
+        const std::string pieces = (sp == std::string::npos) ? fen : fen.substr(0, sp);
+
+        int r=0, c=0;
+        for (char ch : pieces) {
+            if (ch == '/') { ++r; c = 0; continue; }
+            if (ch >= '1' && ch <= '8') { c += (ch - '0'); continue; }
+            int p = piece_plane(ch);
+            if (p >= 0 && r>=0 && r<8 && c>=0 && c<8) {
+                out[(r*8 + c)*14 + p] = 1;
+            }
+            ++c;
+        }
+
+        // side-to-move plane (index 12)
+        const bool wtm = (b.side_to_move() == "w");
+        for (int rr=0; rr<8; ++rr)
+            for (int cc=0; cc<8; ++cc)
+                out[(rr*8 + cc)*14 + 12] = wtm ? 1 : 0;
+
+        // castling plane (index 13), 4 quadrants KQkq
+        std::string cs = b.castling_rights();
+        bool wk = cs.find('K') != std::string::npos;
+        bool wq = cs.find('Q') != std::string::npos;
+        bool bk = cs.find('k') != std::string::npos;
+        bool bq = cs.find('q') != std::string::npos;
+        for (int rr=0; rr<8; ++rr) {
+            for (int cc=0; cc<8; ++cc) {
+                uint8_t v = 0;
+                if (rr < 4 && cc < 4)       v = wk ? 1 : 0;
+                else if (rr < 4 && cc >= 4) v = wq ? 1 : 0;
+                else if (rr >= 4 && cc < 4) v = bk ? 1 : 0;
+                else                         v = bq ? 1 : 0;
+                out[(rr*8 + cc)*14 + 13] = v;
+            }
         }
     }
-}
-
 } // anonymous
 
 std::vector<uint8_t> stacked_planes_bytes(const Board& b, int num_frames) {
-    constexpr int H = 8, W = 8, C = 14;
-    int F = (num_frames > 0) ? num_frames : 5;
-
+    constexpr int H = 8, W = 8, C = 14;          // H x W x channels per frame
+    int F = (num_frames > 0) ? num_frames : 5;   // default 5 frames
     std::vector<uint8_t> out((size_t)H * W * C * F);
+
+    // We copy the board so we can unmake moves safely while building frames.
     Board tmp = b;
     std::vector<uint8_t> frame(H * W * C);
 
+    // Fill frames from newest to oldest (so the last played move is last element)
     for (int f = F - 1; f >= 0; --f) {
-        make_frame_14(tmp, frame.data());
+        make_frame_14(tmp, frame.data()); // your existing helper that fills 8*8*14 bytes
+        // write frame into out with channel-major per frame at end
+        // layout: for each cell (r,c): channels[0..13] for frame0, then frame1, ...
         for (int r = 0; r < H; ++r) {
             for (int c = 0; c < W; ++c) {
                 uint8_t* src = frame.data() + (r * W + c) * C;
-                uint8_t* dst = out.data() + ((r * W + c) * C * F + f * C);
+                uint8_t* dst = out.data() + ( (r * W + c) * C * F + f * C );
                 std::memcpy(dst, src, C);
             }
         }
-        if (!tmp.unmake()) break;
+        if (!tmp.unmake()) break; // no more history
     }
     return out;
 }
