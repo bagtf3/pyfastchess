@@ -442,9 +442,14 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     ++stats.qnodes;
     if (ply > stats.max_qply_seen) stats.max_qply_seen = ply;
 
+    // terminal check
+    if (auto tv = terminal_value_cp_white_pov(*this, 32000)) {
+        return *tv;
+    }
+
     // optional ply cap
     if (opts.max_qply && ply >= opts.max_qply) {
-        return ev ? ev->evaluate(*this) : this->material_count();
+        return ev->evaluate(*this);
     }
 
     // time cutoff
@@ -452,22 +457,13 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             clk::now() - start).count();
         if (elapsed > opts.time_limit_ms) {
-            return ev ? ev->evaluate(*this) : this->material_count();
+            return ev->evaluate(*this);
         }
     }
 
-    // node limit cutoff
-    if (opts.node_limit && (uint64_t)stats.qnodes >= opts.node_limit) {
-        return ev ? ev->evaluate(*this) : this->material_count();
-    }
-
-    // terminal check
-    if (auto tv = terminal_value_cp_white_pov(*this, 32000)) {
-        return *tv;
-    }
 
     // Stand value is white-POV (Evaluator returns white-positive)
-    int stand = ev ? ev->evaluate(*this) : this->material_count();
+    int stand = ev->evaluate(*this);
 
     // Determine which side to move: true => white to move (maximize)
     const bool stm_white = (this->side_to_move() == "w");
@@ -553,11 +549,8 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 clk::now() - start).count();
             if (elapsed > opts.time_limit_ms) {
-                return ev ? ev->evaluate(*this) : this->material_count();
+                return ev->evaluate(*this);
             }
-        }
-        if (opts.node_limit && (uint64_t)stats.qnodes >= opts.node_limit) {
-            return ev ? ev->evaluate(*this) : this->material_count();
         }
     }
 
