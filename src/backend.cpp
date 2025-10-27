@@ -117,6 +117,111 @@ std::uint64_t Board::zobrist_full() const {
     return board_.zobrist();
 }
 
+bool Board::gives_double_attack(const std::string& uci, bool include_king) const {
+    using chess::Color;
+    using chess::PieceType;
+    using chess::Square;
+
+    // Parse and validate the move in the *current* position
+    chess::Move mv = chess::uci::uciToMove(board_, uci);
+    if (mv == chess::Move::NO_MOVE) return false;
+
+    // Play on a temp board to inspect the *resulting* position
+    chess::Board tmp = board_;
+    tmp.makeMove(mv);
+
+    // Colors after the move
+    Color stm_after   = tmp.sideToMove();           // side to move *after* this move
+    Color mover_color = (stm_after == Color::WHITE) ? Color::BLACK : Color::WHITE;
+    Color opp_color   = (stm_after == Color::WHITE) ? Color::WHITE : Color::BLACK;
+
+    // Gather bitboards per piece-type for both colors in the *new* position
+    uint64_t mover_by_pt[6] = {0}, opp_by_pt[6] = {0};
+    for (int pt = 0; pt < 6; ++pt) {
+        auto ept = PieceType(static_cast<PieceType::underlying>(pt));
+        mover_by_pt[pt] = tmp.pieces(ept, mover_color).getBits();
+        opp_by_pt[pt]   = tmp.pieces(ept, opp_color).getBits();
+    }
+
+    // Cumulative "lower-than" masks for attacker side (pawn..queen; king excluded)
+    uint64_t mover_cm_lower[6] = {0};
+    mover_cm_lower[0] = 0ULL;                     // no type lower than a pawn
+    for (int pt = 1; pt < 6; ++pt) {
+        mover_cm_lower[pt] = mover_cm_lower[pt - 1] | mover_by_pt[pt - 1];
+    }
+
+    // Also build cumulative-lower for the opponent (for destination safety check)
+    uint64_t opp_cm_lower[6] = {0};
+    opp_cm_lower[0] = 0ULL;
+    for (int pt = 1; pt < 6; ++pt) {
+        opp_cm_lower[pt] = opp_cm_lower[pt - 1] | opp_by_pt[pt - 1];
+    }
+
+    auto atk_mask = [&](Color c, int sq_idx) -> uint64_t {
+        return chess::attacks::attackers(tmp, c, Square(sq_idx)).getBits();
+    };
+
+    auto piece_type_idx = [&](int sq_idx) -> int {
+        chess::Piece p = tmp.at(Square(sq_idx));
+        if (p.type() == PieceType::NONE) return -1;
+        return static_cast<int>(p.type());  // 0..5 -> pawn..king
+    };
+
+    // Destination safety: the moved piece at its new square must not be
+    // (a) hanging (attacked and not defended), nor
+    // (b) attacked by *lower*.
+    const int to_sq = mv.to().index();
+    const int mover_pt = piece_type_idx(to_sq);
+    if (mover_pt >= 0 && mover_pt <= 5) {
+        uint64_t opp_atk_to   = atk_mask(opp_color,   to_sq);
+        uint64_t mover_def_to = atk_mask(mover_color, to_sq);
+        bool attacked = (opp_atk_to != 0ULL);
+        bool defended = (mover_def_to != 0ULL);
+        bool hanging  = attacked && !defended;
+        bool att_by_lower = attacked && ((opp_atk_to & opp_cm_lower[mover_pt]) != 0ULL);
+        if (hanging || att_by_lower) {
+            return false;
+        }
+    }
+
+    // Build a bitboard of all opponent targets we consider (optionally exclude king)
+    uint64_t opp_targets = 0ULL;
+    for (int pt = 0; pt < 6; ++pt) {
+        if (!include_king && pt == 5) continue;    // skip king unless explicitly requested
+        opp_targets |= opp_by_pt[pt];
+    }
+
+    // Early out: nothing to attack
+    if (opp_targets == 0ULL) return false;
+
+    // Scan enemy pieces; count qualifying victims: (hanging) OR (attacked-by-lower)
+    int qualifying = 0;
+    uint64_t mask = opp_targets;
+    while (mask) {
+        int sq = ctzll_u64(mask);
+        mask &= mask - 1ULL;
+
+        const int v_pt = piece_type_idx(sq);
+        if (v_pt < 0) continue;
+
+        uint64_t mover_atk = atk_mask(mover_color, sq);
+        if (!mover_atk) continue;                  // not attacked at all
+
+        uint64_t opp_def  = atk_mask(opp_color, sq);
+        bool defended = (opp_def != 0ULL);
+        bool hanging  = !defended;
+
+        // attacked-by-lower: any attacker of strictly lower piece-type
+        bool att_by_lower = ((mover_atk & mover_cm_lower[v_pt]) != 0ULL);
+
+        if (hanging || att_by_lower) {
+            if (++qualifying >= 2) return true;    // found a double attack
+        }
+    }
+
+    return false;
+}
+
 bool Board::is_capture(const std::string& uci) const {
     chess::Move mv = chess::uci::uciToMove(board_, uci);
     if (mv == chess::Move::NO_MOVE) return false;
@@ -431,7 +536,6 @@ std::pair<int, backend::QStats> Board::qsearch(int alpha, int beta,
     return { score, stats };
 }
 
-// member recursive implementation: has direct access to this-> internals
 int Board::qsearch_impl(int alpha, int beta, int ply,
                         evaluator::Evaluator* ev,
                         const QOptions &opts,
@@ -447,123 +551,88 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         return *tv;
     }
 
-    // optional ply cap
+    // ply cap / time limit shortcuts
     if (opts.max_qply && ply >= opts.max_qply) {
-        return ev->evaluate(*this);
+        int e = ev->evaluate(*this);
+        return e;
     }
 
-    // time cutoff
     if (opts.time_limit_ms) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             clk::now() - start).count();
         if (elapsed > opts.time_limit_ms) {
-            return ev->evaluate(*this);
+            int e = ev->evaluate(*this);
+            return e;
         }
     }
 
     const bool in_check = this->in_check();
-
-    // Determine which side to move: true => white to move (maximize)
     const bool stm_white = (this->side_to_move() == "w");
 
-    // eval once (white POV)
     int base_eval = ev->evaluate(*this);
-
-    // stand-pat value (penalized only if in check)
     int stand = base_eval;
-    if (in_check) {
-        stand += stm_white ? -350 : +350;  // make score worse for STM by 350
-    }
+    // if in check, prove youre not losing a minor piece
+    // compromise because full mate check is too slow
+    if (in_check) stand += stm_white ? -330 : +330;
 
+    // stand-pat window tests
     if (stm_white) {
-        if (stand >= beta) return stand;
+        if (stand >= beta) {return stand; }
         if (alpha < stand) alpha = stand;
     } else {
-        if (stand <= alpha) return stand;
-        if (beta  > stand)  beta  = stand;
+        if (stand <= alpha) {return stand; }
+        if (beta > stand) beta = stand;
     }
 
-    // Build candidate move list:
-    // - if in check: all legal moves (evasions)
-    // - else: only captures, checks, and promotions (stop at quiet)
     auto moves = this->legal_moves();
     std::vector<std::pair<int, std::string>> scored;
     scored.reserve(moves.size());
 
     for (const auto &m : moves) {
-        // score values chosen to keep captures highest, then promotions, then checks
         if (in_check) {
-            // when in check, every legal move is an evasion we must consider
-            scored.emplace_back(0, m);
+            int s = 0;
+            if (this->is_capture(m)) s = 100;
+            else if (this->gives_check(m)) s = 500;
+            scored.emplace_back(s, m);
         } else {
-            // not in check: only interested in tactical moves (captures, promos, checks)
-            if (this->is_capture(m)) {
-                scored.emplace_back(this->mvvlva(m), m);
-            } else if (m.size() > 4) { // promotion UCI has 5th char
-                scored.emplace_back(1000, m);
-            } else if (this->gives_check(m)) {
-                scored.emplace_back(500, m);
-            }
+            if (this->gives_double_attack(m, true)) scored.emplace_back(800, m);
+            else if (this->is_capture(m)) scored.emplace_back(this->mvvlva(m), m);
+            else if (m.size() > 4) scored.emplace_back(700, m);
+            else if (this->gives_check(m)) scored.emplace_back(500, m);
+            else continue;
         }
     }
 
-    // If no candidates:
     if (scored.empty()) {
-        // IMPORTANT: no penalty on the final return — give straight eval
-        return base_eval;
+        return stand;
     }
 
-    // sort candidates descending by score
     std::sort(scored.begin(), scored.end(),
               [](const auto &a, const auto &b){ return a.first > b.first; });
 
-    // cap by configured max candidates to examine
-    size_t max_c = scored.size();
-    if ((size_t)opts.max_qcaptures < max_c) max_c = opts.max_qcaptures;
-    stats.captures_considered += static_cast<int>(max_c);
+    int best = stand;
 
-    // best starts at stand (white-POV). We will either increase it (white stm)
-    // or decrease it (black stm).
-    int best = stand; 
-
-    for (size_t i = 0; i < max_c; ++i) {
-        const std::string &mv = scored[i].second;
-
+    for (size_t i = 0; i < std::min<size_t>(scored.size(), opts.max_qcaptures); ++i) {
+        const auto &[score, mv] = scored[i];
         if (!this->push_uci(mv)) continue;
 
-        // recurse **without** negation: keep white-POV throughout
         int sc = this->qsearch_impl(alpha, beta, ply + 1, ev, opts, stats, start);
-
         this->unmake();
 
         if (stm_white) {
-            // maximizing node semantics
-            if (sc >= beta) return sc;
-            if (sc > best) {
-                best = sc;
-                if (sc > alpha) alpha = sc;
-            }
+            if (sc >= beta) {return sc; }
+            if (sc > best) best = sc;
+            if (sc > alpha) alpha = sc;
         } else {
-            // minimizing node semantics
-            if (sc <= alpha) return sc;
-            if (sc < best) {
-                best = sc;
-                if (sc < beta) beta = sc;
-            }
-        }
-
-        // re-check time/node inside loop
-        if (opts.time_limit_ms) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                clk::now() - start).count();
-            if (elapsed > opts.time_limit_ms) {
-                return ev->evaluate(*this);
-            }
+            if (sc <= alpha) {return sc; }
+            if (sc < best) best = sc;
+            if (sc < beta) beta = sc;
         }
     }
 
     return best;
 }
+
 
 std::vector<std::pair<int, std::string>> Board::ordered_moves(const std::optional<std::string>& tt_best) const {
     std::vector<std::pair<int, std::string>> out;

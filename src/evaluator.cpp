@@ -311,8 +311,13 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
     if (b.side_to_move() == "b") stm_cp = -stm_cp;
 
     const bool white_to_move = (b.side_to_move() == "w");
-    const int greedy_oneply_cp = white_to_move ? best_black_victim : -best_white_victim;
 
+    // NEW: don’t apply greedy capture when STM is in check
+    const bool stm_in_check = b.in_check();  // uses backend::Board const method
+    const int greedy_oneply_cp_raw = white_to_move ? best_black_victim : -best_white_victim;
+    const int greedy_oneply_cp     = stm_in_check ? 0 : greedy_oneply_cp_raw;
+
+    // SUM
     const int raw = material_cp + psqt_cp + mobility_cp + tactical_cp + greedy_oneply_cp + stm_cp;
     const int total = (raw * w_.global_scale) / 100;
 

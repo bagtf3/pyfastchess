@@ -76,6 +76,15 @@ PYBIND11_MODULE(_core, m) {
 
           .def("is_capture", &backend::Board::is_capture, py::arg("uci"),
                "Return True if the UCI move is a capture (EP counts as capture).")
+
+          .def("gives_double_attack", &backend::Board::gives_double_attack,
+               py::arg("uci"), py::arg("include_king") = false,
+               "Return True if making UCI move yields a 'double attack': "
+               "at least two enemy pieces are simultaneously either hanging or "
+               "attacked by a lower-value attacker. The moving piece must not be "
+               "hanging/attacked-by-lower at its destination. Set include_king=True "
+               "to count enemy king as a target.")
+
           .def("is_pawn_move", &backend::Board::is_pawn_move, py::arg("uci"),
                "True if the move is made by a pawn.")
           .def("would_be_repetition", &backend::Board::would_be_repetition,
@@ -108,7 +117,7 @@ PYBIND11_MODULE(_core, m) {
 
           .def("gives_checkmate", &backend::Board::gives_checkmate, py::arg("uci"),
                "Return True if the given UCI move immediately delivers checkmate.")
-
+          
           .def("is_game_over", &backend::Board::is_game_over,
                "Return (reason, result) strings for game over status; "
                "('none','none') if the game is not over.")

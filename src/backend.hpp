@@ -13,10 +13,10 @@ namespace evaluator { class Evaluator; }
 namespace backend {
 
 struct QOptions {
-    int max_qply = 64;         // max quiescence ply to explore
-    int max_qcaptures = 512;   // max total captures to consider (safety)
+    int max_qply = 16;         // max quiescence ply to explore
+    int max_qcaptures = 24;    // max total captures to consider (safety)
     int qdelta = 0;            // optional delta threshold (unused initially)
-    int time_limit_ms = 0;     // 0 => no time limit
+    int time_limit_ms = 3;     // 0 => no time limit
     uint64_t node_limit = 0;   // 0 => no limit
 };
 
@@ -62,6 +62,7 @@ public:
     bool would_be_repetition(const std::string& uci, int count = 3) const;
 
     bool is_capture(const std::string& uci) const;
+    bool gives_double_attack(const std::string& uci, bool include_king = false) const;
     bool is_pawn_move(const std::string& uci) const;
     bool in_check() const;
     bool gives_check(const std::string& uci) const;
