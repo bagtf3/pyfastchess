@@ -207,12 +207,8 @@ struct PriorConfig {
     
     float anytime_uniform_mix = 0.5f;
     float endgame_uniform_mix = 0.5f;
-<<<<<<< HEAD
-    
-=======
 
     bool  use_prior_boosts = false;
->>>>>>> 0a45826ee16da2917dd33d6ae3b818f50772a564
     float anytime_gives_check = 0.15f;
     float anytime_repetition_sub = 0.25f;
 
