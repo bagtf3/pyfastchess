@@ -203,8 +203,6 @@ struct FloatView {
 };
 
 struct PriorConfig {
-    bool  use_prior_boosts = false;
-    
     float anytime_uniform_mix = 0.5f;
     float endgame_uniform_mix = 0.5f;
 
