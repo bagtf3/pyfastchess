@@ -5,6 +5,26 @@
 #include <stdexcept>
 #include <vector>
 
+// small util helpers (MSVC/GCC portability)
+static inline int popcount_u64(uint64_t x) {
+#ifdef _MSC_VER
+    return static_cast<int>(__popcnt64(x));
+#else
+    return __builtin_popcountll(x);
+#endif
+}
+
+static inline int ctzll_u64(uint64_t x) {
+    if (x == 0) return 64;
+#ifdef _MSC_VER
+    unsigned long idx;
+    _BitScanForward64(&idx, x);
+    return static_cast<int>(idx);
+#else
+    return __builtin_ctzll(x);
+#endif
+}
+
 namespace evaluator {
 
 // --- ctor / configure --------------------------------
@@ -85,30 +105,6 @@ int Evaluator::piece_char_to_index(char ch, bool &is_white, bool &is_piece) {
     return -1;
 }
 
-// row: 0..7 where 0 corresponds to rank 8 in FEN parsing; we want index 0==a1
-int Evaluator::square_index_from_fen_rowcol(int row, int col) {
-    // col: 0..7 where 0 == file 'a'
-    int rank = 7 - row; // make 0 == rank1
-    return rank * 8 + col; // a1..h8 => 0..63
-}
-
-// helper to flip side char in a fen string (preserves the rest)
-static std::string fen_with_side(const std::string &fen, const char target_side) {
-    // simple split by spaces; fen format: pieces side castling ep halfmove fullmove
-    std::istringstream iss(fen);
-    std::string parts[6];
-    for (int i=0;i<6;i++) {
-        if (!(iss >> parts[i])) parts[i] = "";
-    }
-    parts[1] = std::string(1, target_side);
-    std::ostringstream oss;
-    for (int i=0;i<6;i++) {
-        if (i) oss << ' ';
-        oss << parts[i];
-    }
-    return oss.str();
-}
-
 // --- core evaluation ---------------------------------
 int Evaluator::evaluate(const backend::Board& b) const {
     auto tup = evaluate_itemized(b);
@@ -121,38 +117,40 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
     // raw chess board (const ref)
     const chess::Board &rb = b.raw_board();
 
-    // build pieces vector by scanning occupancy bitboard
+    // build pieces vector by iterating per-piece-type / per-color bitboards
     struct PieceRec { int pidx; bool is_white; int sq; };
     std::vector<PieceRec> pieces;
     pieces.reserve(32);
 
-    // occupancy mask (u64)
-    uint64_t occ = rb.occ().getBits();
+    // also build per-type arrays while we iterate (avoid another loop)
+    uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
+    uint64_t white_occ = 0, black_occ = 0;
 
-    // portable ctz helper (MSVC/GCC)
-    auto ctzll_u64 = [](uint64_t x)->int {
-#ifdef _MSC_VER
-        if (x == 0) return 64;
-        unsigned long idx;
-        _BitScanForward64(&idx, x);
-        return static_cast<int>(idx);
-#else
-        if (x == 0) return 64;
-        return __builtin_ctzll(x);
-#endif
-    };
+    for (int color_idx = 0; color_idx < 2; ++color_idx) {
+        const chess::Color c = (color_idx == 0) ? chess::Color::WHITE : chess::Color::BLACK;
+        const bool is_white = (c == chess::Color::WHITE);
+        for (int pt = 0; pt < 6; ++pt) {
+            auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
+            uint64_t bb = rb.pieces(pt_e, c).getBits();
+            if (bb == 0) continue;
+            // store per-type by color
+            if (is_white) white_by_pt[pt] = bb;
+            else           black_by_pt[pt] = bb;
 
-    uint64_t occ_copy = occ;
-    while (occ_copy) {
-        int sq = ctzll_u64(occ_copy);
-        occ_copy &= occ_copy - 1ULL;
-        chess::Square csq(sq);
-        chess::Piece p = rb.at(csq);
-        if (p.type() == chess::PieceType::NONE) continue; // defensive
-        int pidx = static_cast<int>(p.type()); // 0..5
-        bool is_white = (p.color() == chess::Color::WHITE);
-        pieces.push_back({pidx, is_white, sq});
+            // accumulate occupancy per color
+            if (is_white) white_occ |= bb;
+            else           black_occ |= bb;
+
+            while (bb) {
+                int sq = ctzll_u64(bb);
+                bb &= bb - 1ULL;
+                pieces.push_back({pt, is_white, sq});
+            }
+        }
     }
+
+    // authoritative occupancy from the board helper (avoid mismatch)
+    uint64_t occ = rb.occ().getBits();
 
     // --- material & PSQT ---
     int material_cp = 0;
@@ -178,17 +176,6 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
         int val = is_white ? psqt_white_[base_idx] : psqt_black_[base_idx];
         psqt_cp += is_white ? val : -val;
 
-    }
-
-    // --- prepare per-piece-type bitboards for quick checks & occ by color ---
-    uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
-    uint64_t white_occ = 0, black_occ = 0;
-    for (int pt = 0; pt < 6; ++pt) {
-        auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
-        white_by_pt[pt] = rb.pieces(pt_e, chess::Color::WHITE).getBits();
-        black_by_pt[pt] = rb.pieces(pt_e, chess::Color::BLACK).getBits();
-        white_occ |= white_by_pt[pt];
-        black_occ |= black_by_pt[pt];
     }
 
     // --- Compute tactical counts per piece-type (separate white/black counts) ---
@@ -257,16 +244,9 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
     // count how many empty squares each piece type can move to (non-captures),
     // using chess::attacks bitboard helpers for knights/bishops/rooks/queens/kings and
     // simple forward checks for pawns.
-    auto popcount_u64 = [](uint64_t x)->int {
-#ifdef _MSC_VER
-        return static_cast<int>(__popcnt64(x));
-#else
-        return __builtin_popcountll(x);
-#endif
-    };
 
     int mob_white[6] = {0}, mob_black[6] = {0};
-    uint64_t empty_mask = ~occ; // bits where squares are empty (note: upper bits beyond 64 are okay in u64)
+    uint64_t empty_mask = ~occ; // bits where squares are empty
 
     for (const auto &pr : pieces) {
         int pidx = pr.pidx;
