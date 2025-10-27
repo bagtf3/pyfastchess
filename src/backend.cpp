@@ -461,20 +461,26 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         }
     }
 
-
-    // Stand value is white-POV (Evaluator returns white-positive)
-    int stand = ev->evaluate(*this);
+    const bool in_check = this->in_check();
 
     // Determine which side to move: true => white to move (maximize)
     const bool stm_white = (this->side_to_move() == "w");
 
-    // Immediate alpha/beta checks use white-POV semantics
+    // eval once (white POV)
+    int base_eval = ev->evaluate(*this);
+
+    // stand-pat value (penalized only if in check)
+    int stand = base_eval;
+    if (in_check) {
+        stand += stm_white ? -350 : +350;  // make score worse for STM by 350
+    }
+
     if (stm_white) {
         if (stand >= beta) return stand;
         if (alpha < stand) alpha = stand;
     } else {
         if (stand <= alpha) return stand;
-        if (beta > stand) beta = stand;
+        if (beta  > stand)  beta  = stand;
     }
 
     // Build candidate move list:
@@ -483,8 +489,6 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     auto moves = this->legal_moves();
     std::vector<std::pair<int, std::string>> scored;
     scored.reserve(moves.size());
-
-    const bool in_check = this->in_check();
 
     for (const auto &m : moves) {
         // score values chosen to keep captures highest, then promotions, then checks
@@ -503,7 +507,11 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
         }
     }
 
-    if (scored.empty()) return stand; // quiet node (or no evasions found)
+    // If no candidates:
+    if (scored.empty()) {
+        // IMPORTANT: no penalty on the final return — give straight eval
+        return base_eval;
+    }
 
     // sort candidates descending by score
     std::sort(scored.begin(), scored.end(),
@@ -516,7 +524,7 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
 
     // best starts at stand (white-POV). We will either increase it (white stm)
     // or decrease it (black stm).
-    int best = stand;
+    int best = stand; 
 
     for (size_t i = 0; i < max_c; ++i) {
         const std::string &mv = scored[i].second;

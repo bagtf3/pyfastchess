@@ -93,8 +93,8 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
     prior_engine_raw_ = get_prior_engine_raw();
 
     // prebuild QOptions once
-    qopts_shallow_.max_qply = 7;
-    qopts_shallow_.max_qcaptures = 32;
+    qopts_shallow_.max_qply = 5;
+    qopts_shallow_.max_qcaptures = 24;
     qopts_shallow_.time_limit_ms = 3;
 }
 

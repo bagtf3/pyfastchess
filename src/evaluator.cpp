@@ -113,16 +113,12 @@ int Evaluator::evaluate(const backend::Board& b) const {
 }
 
 std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::Board& b) const {
-    // --- prelim / piece collection (use raw bitboards) ---
-    // raw chess board (const ref)
     const chess::Board &rb = b.raw_board();
 
-    // build pieces vector by iterating per-piece-type / per-color bitboards
     struct PieceRec { int pidx; bool is_white; int sq; };
     std::vector<PieceRec> pieces;
     pieces.reserve(32);
 
-    // also build per-type arrays while we iterate (avoid another loop)
     uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
     uint64_t white_occ = 0, black_occ = 0;
 
@@ -132,15 +128,8 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
         for (int pt = 0; pt < 6; ++pt) {
             auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
             uint64_t bb = rb.pieces(pt_e, c).getBits();
-            if (bb == 0) continue;
-            // store per-type by color
-            if (is_white) white_by_pt[pt] = bb;
-            else           black_by_pt[pt] = bb;
-
-            // accumulate occupancy per color
-            if (is_white) white_occ |= bb;
-            else           black_occ |= bb;
-
+            if (is_white) white_by_pt[pt] = bb; else black_by_pt[pt] = bb;
+            if (is_white) white_occ |= bb; else black_occ |= bb;
             while (bb) {
                 int sq = ctzll_u64(bb);
                 bb &= bb - 1ULL;
@@ -149,129 +138,131 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
         }
     }
 
-    // authoritative occupancy from the board helper (avoid mismatch)
     uint64_t occ = rb.occ().getBits();
 
-    // --- material & PSQT ---
     int material_cp = 0;
     int psqt_cp = 0;
-    int mobility_cp = 0; // will fill below
+    int mobility_cp = 0;
     int tactical_cp = 0;
 
-    // Precompute PSQT bucket index once
-    int ply = static_cast<int>(b.history_size()); // half-moves
+    int ply = static_cast<int>(b.history_size());
     int bucket = std::min(ply / 20, 3);
 
     for (const auto &pr : pieces) {
-        int pidx = pr.pidx;
-        bool is_white = pr.is_white;
-        int sq = pr.sq;
+        const int pidx = pr.pidx;
+        const bool is_white = pr.is_white;
+        const int sq = pr.sq;
 
-        // material
-        int mat_val = MATERIAL_CP[pidx];
-        material_cp += (is_white ? mat_val : -mat_val);
+        const int mat_val = MATERIAL_CP[pidx];
+        material_cp += is_white ? mat_val : -mat_val;
 
-        // PSQT: layout = 4 * 384 entries (bucket * 384 + pidx*64 + sq)
-        int base_idx = bucket * 384 + pidx * 64 + sq;
-        int val = is_white ? psqt_white_[base_idx] : psqt_black_[base_idx];
+        const int base_idx = bucket * 384 + pidx * 64 + sq;
+        const int val = is_white ? psqt_white_[base_idx] : psqt_black_[base_idx];
         psqt_cp += is_white ? val : -val;
-
     }
 
-    // --- Compute tactical counts per piece-type (separate white/black counts) ---
-    // We'll collect counts per piece-type and feature for white and black separately.
-    // Feature order: 0 = attacked_by_lower, 1 = defended, 2 = hanging
+    // cumulative "lower-or-equal" masks by piece index (pawn..queen)
+    uint64_t wht_cm_lower[6], blk_cm_lower[6];
+    wht_cm_lower[0] = white_by_pt[0];
+    blk_cm_lower[0] = black_by_pt[0];
+    for (int pt = 1; pt < 6; ++pt) {
+        wht_cm_lower[pt] = wht_cm_lower[pt - 1] | white_by_pt[pt];
+        blk_cm_lower[pt] = blk_cm_lower[pt - 1] | black_by_pt[pt];
+    }
+
+    // tactical feature counts and greedy one-ply victim trackers
     int tactical_white[6][3] = {{0}}, tactical_black[6][3] = {{0}};
+    int best_white_victim = 0; // cp of best WHITE victim if black to move
+    int best_black_victim = 0; // cp of best BLACK victim if white to move
 
     for (const auto &pr : pieces) {
-        int pidx = pr.pidx;
-        bool is_white = pr.is_white;
-        int sq = pr.sq;
+        const int pidx = pr.pidx;
+        const bool is_white = pr.is_white;
+        const int sq = pr.sq;
 
-        // attacker masks using backend wrappers (fast)
-        uint64_t atk_white = b.attackers_u64("w", sq);
-        uint64_t atk_black = b.attackers_u64("b", sq);
+        const uint64_t atk_white = b.attackers_u64("w", sq);
+        const uint64_t atk_black = b.attackers_u64("b", sq);
 
-        uint64_t atk_enemy_mask = is_white ? atk_black : atk_white;
-        uint64_t atk_ally_mask  = is_white ? atk_white : atk_black;
+        const uint64_t atk_enemy_mask = is_white ? atk_black : atk_white;
+        const uint64_t atk_ally_mask  = is_white ? atk_white : atk_black;
 
-        bool en_prize = (atk_enemy_mask != 0);
-        bool defended = (atk_ally_mask != 0);
-        bool hanging = en_prize && !defended;
+        const bool en_prize = (atk_enemy_mask != 0ULL);
+        const bool defended = (atk_ally_mask  != 0ULL);
+        const bool hanging  = en_prize && !defended;
 
-        bool attacked_by_lower = false;
-        if (en_prize) {
-            // per-piece-type check
-            for (int atk_pt = 0; atk_pt < 6; ++atk_pt) {
-                uint64_t enemy_pt_bb = is_white ? black_by_pt[atk_pt] : white_by_pt[atk_pt];
-                if ((atk_enemy_mask & enemy_pt_bb) != 0) {
-                    if (MATERIAL_CP[atk_pt] < MATERIAL_CP[pidx]) { attacked_by_lower = true; break; }
-                }
-            }
+        // attacked_by_lower via cumulative masks (single AND)
+        uint64_t enemy_lower_mask = 0ULL;
+        if (pidx > 0) {
+            enemy_lower_mask = is_white ? blk_cm_lower[pidx - 1]
+                                        : wht_cm_lower[pidx - 1];
         }
+        const bool attacked_by_lower = en_prize && ((atk_enemy_mask & enemy_lower_mask) != 0ULL);
 
         if (is_white) {
-            if (attacked_by_lower) tactical_white[pidx][0] += 1;
-            if (defended)          tactical_white[pidx][1] += 1;
-            if (hanging)           tactical_white[pidx][2] += 1;
+            if (attacked_by_lower) ++tactical_white[pidx][0];
+            if (defended)          ++tactical_white[pidx][1];
+            if (hanging)           ++tactical_white[pidx][2];
         } else {
-            if (attacked_by_lower) tactical_black[pidx][0] += 1;
-            if (defended)          tactical_black[pidx][1] += 1;
-            if (hanging)           tactical_black[pidx][2] += 1;
+            if (attacked_by_lower) ++tactical_black[pidx][0];
+            if (defended)          ++tactical_black[pidx][1];
+            if (hanging)           ++tactical_black[pidx][2];
+        }
+
+        // greedy one-ply candidate: full if hanging, else half if attacked_by_lower
+        const int val_cp = MATERIAL_CP[pidx];
+        const int candidate = hanging ? val_cp : (attacked_by_lower ? (val_cp >> 1) : 0);
+        if (candidate) {
+            if (is_white) {
+                if (candidate > best_white_victim) best_white_victim = candidate;
+            } else {
+                if (candidate > best_black_victim) best_black_victim = candidate;
+            }
         }
     }
 
-    // Now sum tactical contributions using configured weights, applying sign at summation:
-    // contribution = weight * (white_count - black_count)
     for (int p = 0; p < 6; ++p) {
-        int base_index = p * 3;
-        int64_t w_att_lower = (base_index + 0 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 0] : 0;
-        int64_t w_def       = (base_index + 1 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 1] : 0;
-        int64_t w_hang      = (base_index + 2 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 2] : 0;
+        const int base_index = p * 3;
+        const int64_t w_att_lower = (base_index + 0 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 0] : 0;
+        const int64_t w_def       = (base_index + 1 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 1] : 0;
+        const int64_t w_hang      = (base_index + 2 < (int)w_.tactical_weights.size()) ? w_.tactical_weights[base_index + 2] : 0;
 
-        int white_att = tactical_white[p][0], black_att = tactical_black[p][0];
-        int white_def = tactical_white[p][1], black_def = tactical_black[p][1];
-        int white_hg  = tactical_white[p][2], black_hg  = tactical_black[p][2];
+        const int white_att = tactical_white[p][0], black_att = tactical_black[p][0];
+        const int white_def = tactical_white[p][1], black_def = tactical_black[p][1];
+        const int white_hg  = tactical_white[p][2], black_hg  = tactical_black[p][2];
 
-        tactical_cp += static_cast<int>(
-            w_att_lower * (white_att - black_att)
-          + w_def       * (white_def - black_def)
-          + w_hang      * (white_hg  - black_hg)
+        tactical_cp += (int)(
+            w_att_lower * (white_att - black_att) +
+            w_def       * (white_def - black_def) +
+            w_hang      * (white_hg  - black_hg)
         );
     }
 
-    // --- MOBILITY: compute per-piece non-capture (empty destination) counts ---
-    // count how many empty squares each piece type can move to (non-captures),
-    // using chess::attacks bitboard helpers for knights/bishops/rooks/queens/kings and
-    // simple forward checks for pawns.
-
+    // mobility (unchanged)
     int mob_white[6] = {0}, mob_black[6] = {0};
-    uint64_t empty_mask = ~occ; // bits where squares are empty
+    uint64_t empty_mask = ~occ;
 
     for (const auto &pr : pieces) {
-        int pidx = pr.pidx;
-        bool is_white = pr.is_white;
-        int sq = pr.sq;
+        const int pidx = pr.pidx;
+        const bool is_white = pr.is_white;
+        const int sq = pr.sq;
 
         uint64_t moves_mask = 0ULL;
-
         switch (pidx) {
-            case 0: { // pawn
+            case 0: {
                 if (is_white) {
                     int one = sq + 8;
                     if (one < 64 && ((occ >> one) & 1ULL) == 0) {
                         moves_mask |= (1ULL << one);
-                        // two-step from rank2 (squares 8..15)
                         if (sq >= 8 && sq <= 15) {
                             int two = sq + 16;
                             if (two < 64 && ((occ >> two) & 1ULL) == 0) moves_mask |= (1ULL << two);
                         }
                     }
-                } else { // black
+                } else {
                     int one = sq - 8;
                     if (one >= 0 && ((occ >> one) & 1ULL) == 0) {
                         moves_mask |= (1ULL << one);
-                        if (sq >= 48 && sq <= 55) { // black pawns initial rank (7th rank -> indices 48..55)
+                        if (sq >= 48 && sq <= 55) {
                             int two = sq - 16;
                             if (two >= 0 && ((occ >> two) & 1ULL) == 0) moves_mask |= (1ULL << two);
                         }
@@ -279,53 +270,51 @@ std::tuple<int,int,int,int,int,int> Evaluator::evaluate_itemized(const backend::
                 }
                 break;
             }
-            case 1: { // knight
+            case 1: {
                 auto bb = chess::attacks::knight(chess::Square(sq)).getBits();
                 moves_mask = bb & empty_mask;
                 break;
             }
-            case 2: { // bishop
+            case 2: {
                 auto bb = chess::attacks::bishop(chess::Square(sq), rb.occ()).getBits();
                 moves_mask = bb & empty_mask;
                 break;
             }
-            case 3: { // rook
+            case 3: {
                 auto bb = chess::attacks::rook(chess::Square(sq), rb.occ()).getBits();
                 moves_mask = bb & empty_mask;
                 break;
             }
-            case 4: { // queen
+            case 4: {
                 auto bb = chess::attacks::queen(chess::Square(sq), rb.occ()).getBits();
                 moves_mask = bb & empty_mask;
                 break;
             }
-            case 5: { // king
+            case 5: {
                 auto bb = chess::attacks::king(chess::Square(sq)).getBits();
                 moves_mask = bb & empty_mask;
                 break;
             }
-            default:
-                moves_mask = 0ULL;
+            default: break;
         }
 
-        int cnt = popcount_u64(moves_mask);
-        if (is_white) mob_white[pidx] += cnt;
-        else          mob_black[pidx] += cnt;
+        const int cnt = popcount_u64(moves_mask);
+        if (is_white) mob_white[pidx] += cnt; else mob_black[pidx] += cnt;
     }
 
-    // Sum mobility contributions using weights (weight * (white_count - black_count))
     for (int p = 0; p < 6; ++p) {
-        int64_t w_m = (p < (int)w_.mobility_weights.size()) ? w_.mobility_weights[p] : 0;
-        mobility_cp += static_cast<int>( w_m * (mob_white[p] - mob_black[p]) );
+        const int64_t w_m = (p < (int)w_.mobility_weights.size()) ? w_.mobility_weights[p] : 0;
+        mobility_cp += (int)(w_m * (mob_white[p] - mob_black[p]));
     }
 
-    // stm bias
     int stm_cp = w_.stm_bias;
     if (b.side_to_move() == "b") stm_cp = -stm_cp;
 
-    // scale: global_scale stored as integer 100==1.00
-    int raw = material_cp + psqt_cp + mobility_cp + tactical_cp + stm_cp;
-    int total = (raw * w_.global_scale) / 100;
+    const bool white_to_move = (b.side_to_move() == "w");
+    const int greedy_oneply_cp = white_to_move ? best_black_victim : -best_white_victim;
+
+    const int raw = material_cp + psqt_cp + mobility_cp + tactical_cp + greedy_oneply_cp + stm_cp;
+    const int total = (raw * w_.global_scale) / 100;
 
     return { material_cp, psqt_cp, mobility_cp, tactical_cp, stm_cp, total };
 }
