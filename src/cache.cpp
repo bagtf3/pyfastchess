@@ -1,16 +1,13 @@
 #include "cache.hpp"
+#include <algorithm>
+#include <stdexcept>
 
 Cache::Cache(size_t max_size) : max_size_(max_size) {
     map_.reserve(max_size_);
 }
 
-Cache& Cache::instance() {
-    static Cache instance(600000);
-    return instance;
-}
-
 bool Cache::lookup(uint64_t key, CacheEntry& out) {
-    // single-threaded: increment plain counter
+    std::lock_guard<std::mutex> g(mutex_);
     ++queries_;
 
     auto it = map_.find(key);
@@ -22,21 +19,19 @@ bool Cache::lookup(uint64_t key, CacheEntry& out) {
     // move to MRU
     touch(it->second.second);
 
-    // increment hit counter
     ++hits_;
     return true;
 }
 
 const CacheEntry* Cache::lookup_ptr(uint64_t key) {
-    // count the query
+    std::lock_guard<std::mutex> g(mutex_);
     ++queries_;
 
     auto it = map_.find(key);
     if (it == map_.end()) {
-        return nullptr;  // miss (queries_ already incremented)
+        return nullptr;
     }
 
-    // hit
     ++hits_;
 
     // touch via iterator to avoid second hash lookup
@@ -45,10 +40,13 @@ const CacheEntry* Cache::lookup_ptr(uint64_t key) {
     order_.push_back(key);
     it->second.second = std::prev(order_.end());
 
-    return &it->second.first;  // pointer to stored entry (no copy)
+    // return pointer to stored entry (safe while holding lock in caller?
+    //  NOTE: caller should not hold pointer across unlocked region)
+    return &it->second.first;
 }
 
 void Cache::insert(uint64_t key, CacheEntry entry) {
+    std::lock_guard<std::mutex> g(mutex_);
     auto it = map_.find(key);
     if (it != map_.end()) {
         // replace existing entry (move assignment)
@@ -68,8 +66,8 @@ void Cache::insert(uint64_t key, CacheEntry entry) {
     }
 }
 
-
 void Cache::clear() {
+    std::lock_guard<std::mutex> g(mutex_);
     map_.clear();
     order_.clear();
     evictions_ = 0;
@@ -78,6 +76,7 @@ void Cache::clear() {
 }
 
 void Cache::touch(ListIt it) {
+    // caller must hold mutex_
     uint64_t key = *it;
     order_.erase(it);
     order_.push_back(key);
@@ -86,11 +85,12 @@ void Cache::touch(ListIt it) {
 }
 
 size_t Cache::size() const {
+    std::lock_guard<std::mutex> g(mutex_);
     return map_.size();
 }
 
 size_t Cache::capacity() const { return max_size_; }
-size_t Cache::evictions() const { return evictions_; }
 
-size_t Cache::queries() const { return queries_; }
-size_t Cache::hits() const { return hits_; }
+size_t Cache::evictions() const { std::lock_guard<std::mutex> g(mutex_); return evictions_; }
+size_t Cache::queries() const { std::lock_guard<std::mutex> g(mutex_); return queries_; }
+size_t Cache::hits() const { std::lock_guard<std::mutex> g(mutex_); return hits_; }

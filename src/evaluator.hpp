@@ -31,7 +31,6 @@ public:
     Weights get_weights() const;
 private:
     static int piece_char_to_index(char ch, bool &is_white, bool &is_piece);
-    static int square_index_from_fen_rowcol(int row, int col);
     Weights w_;
     static inline const int MATERIAL_CP[6] = {100, 320, 330, 500, 900, 0};
     std::vector<int> psqt_white_;

@@ -10,9 +10,10 @@
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include <mutex> 
 #include "backend.hpp"
 #include "evaluator.hpp"
-
+#include "singleton_registry.hpp"
 
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
@@ -33,6 +34,9 @@ struct PVItem {
     float Q;       // child->Q (white-POV)
 };
 
+// forward declare
+struct PriorEngine;
+
 // Forward decl
 class MCTSTree;
 
@@ -48,7 +52,6 @@ struct MCTSNode {
     int   N     = 0;      // visits
     float W     = 0.0f;   // total value (white-POV)
     float Q     = 0.0f;   // mean value
-    float vloss = 0.0f;   // virtual loss for parallel sims
 
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
@@ -92,7 +95,7 @@ public:
                       float c_puct,
                       std::shared_ptr<evaluator::Evaluator> evaluator);
 
-    // Walk with PUCT+virtual loss to a leaf, mutate vloss along the path,
+    // Walk with PUCT+virtual loss to a leaf
     // and return the leaf. Stores the chosen path internally for apply_result().
     MCTSNode* collect_one_leaf();
 
@@ -105,20 +108,15 @@ public:
         MCTSNode* node,
         const std::vector<std::pair<std::string, float>>& move_priors,
         float value_white_pov, bool cache=true);
-
+    
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
-
-    // Clear all pending (call on reset / after making a move).
     void clear_pending();
+    void resolve_pending();
 
-    // Read-only accessor for bindings. Keep it inline to avoid ODR issues.
-    std::unordered_map<uint64_t, MCTSNode*> pending_nodes_;
-
-    void apply_batcher_results();
-    // Stats from root (sorted by visits descending): [(uci, N), ...]
-    std::vector<std::pair<std::string, int>> root_child_visits() const;
-
+    // Read-only accessor for bindings.
+    std::vector<MCTSNode*> pending_nodes_;
+    
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;
 
@@ -133,7 +131,7 @@ public:
     int  epoch() const { return epoch_; }
 
     std::vector<ChildDetail> root_child_details() const;
-    // (avg_depth_by_visits, max_depth)
+    std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
     
     std::vector<PVItem> principal_variation(int max_len = 24) const;
@@ -145,9 +143,9 @@ public:
     backend::QOptions qopts_shallow_;
     static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
 
-    size_t count_new() const;
-    size_t count_terminal() const;
-    size_t count_cached() const;
+    // fast hot-path pointer (non-owning)
+    PriorEngine* prior_engine_raw_ = nullptr;
+
 
 private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
@@ -159,6 +157,9 @@ private:
     
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
     void expand_with_uniform_priors(MCTSNode* node);
+    void expand_with_priors(
+        MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
+
     std::pair<MCTSNode*, CollectTag> collect_one_leaf_tagged();
 
     // Ownership to keep evaluator alive for lifetime of tree:
@@ -173,6 +174,8 @@ private:
     size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
     size_t count_terminal_ = 0;  // number of terminal hits in last collection
     size_t count_cached_ = 0;    // number of cached hits in last collection
+
+    mutable std::mutex tree_mutex_; 
 };
 
 // --------- Helpers ---------
@@ -204,7 +207,7 @@ struct PriorConfig {
     float anytime_uniform_mix = 0.5f;
     float endgame_uniform_mix = 0.5f;
 
-    bool  use_prior_boosts = true;
+    bool  use_prior_boosts = false;
     float anytime_gives_check = 0.15f;
     float anytime_repetition_sub = 0.25f;
 
@@ -221,12 +224,15 @@ class PriorEngine {
 public:
     explicit PriorEngine(const PriorConfig& cfg) : cfg_(cfg) {}
 
+    // Build priors from factorized heads. piece_count is obtained from board(). 
     std::vector<std::pair<std::string, float>>
     build(const backend::Board& board,
-        const std::vector<std::string>& legal,
-        FloatView p_from, FloatView p_to,
-        FloatView p_piece, FloatView p_promo,
-        int piece_count) const;
+          const std::vector<std::string>& legal,
+          FloatView p_from, FloatView p_to,
+          FloatView p_piece, FloatView p_promo) const;
+
+    // Return a copy of the current PriorConfig (handy for configure/details helpers).
+    PriorConfig get_config() const { return cfg_; }
 
 private:
     PriorConfig cfg_;

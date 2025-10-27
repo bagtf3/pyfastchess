@@ -1,43 +1,58 @@
-ONNX_RUNTIME = r"C:\libs\onnxruntime-win-x64-gpu-1.19.0\lib"
- 
-import os
-os.add_dll_directory(ONNX_RUNTIME)
-
 from importlib import import_module
 
 _core = import_module("pyfastchess._core")
+
+# Core types
 Board = _core.Board
 MCTSNode = _core.MCTSNode
 MCTSTree = _core.MCTSTree
-priors_from_heads = _core.priors_from_heads
-terminal_value_white_pov = _core.terminal_value_white_pov
-PriorConfig = _core.PriorConfig
-PriorEngine = _core.PriorEngine
+
+# Prior engine singletons / API (must be configured from Python)
+create_prior_engine = _core.create_prior_engine
+configure_prior_engine = _core.configure_prior_engine
+prior_engine_build = _core.prior_engine_build
+prior_engine_details = _core.prior_engine_details
+
+# Raw policy cache API (bulk upload, clear, stats) — may raise if not built into the module
+raw_cache_bulk_insert = _core.raw_cache_bulk_insert
+raw_cache_clear = _core.raw_cache_clear
+raw_cache_stats = _core.raw_cache_stats
+
+# priors cache controls
+priors_cache_stats = _core.priors_cache_stats
+priors_cache_clear = _core.priors_cache_clear
+
+# Evaluator and weights
 Evaluator = _core.Evaluator
 EvalWeights = _core.EvalWeights
-cache_stats = _core.cache_stats
-cache_clear = _core.cache_clear
-cache_insert = _core.cache_insert
-cache_lookup = _core.cache_lookup
-Batcher = _core.Batcher
-get_batcher = _core.get_batcher
-PredResult = _core.PredictionResult
+
+# misc helpers
+priors_from_heads = _core.priors_from_heads
+terminal_value_white_pov = _core.terminal_value_white_pov
+
+def ensure_prior_engine():
+    """Create the prior engine with defaults if it hasn't been created yet.
+    This function calls into the C++ binding directly and will raise an AttributeError
+    if create_prior_engine is not exposed by the extension.
+    """
+    create_prior_engine()
 
 __all__ = [
     "Board",
     "MCTSNode",
     "MCTSTree",
-    "priors_from_heads",
-    "terminal_value_white_pov",
-    "PriorConfig",
-    "PriorEngine",
+    "create_prior_engine",
+    "configure_prior_engine",
+    "prior_engine_build",
+    "prior_engine_details",
+    "raw_cache_bulk_insert",
+    "raw_cache_clear",
+    "raw_cache_stats",
+    "priors_cache_stats",
+    "priors_cache_clear"
     "Evaluator",
     "EvalWeights",
-    "cache_stats",
-    "cache_clear",
-    "cache_insert",
-    "cache_lookup",
-    "Batcher",
-    "get_batcher",
-    "PredResult"
+    "priors_from_heads",
+    "terminal_value_white_pov",
+    "ensure_prior_engine"
 ]
