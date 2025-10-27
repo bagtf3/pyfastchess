@@ -9,17 +9,18 @@
 #include "mcts.hpp"
 #include "evaluator.hpp"
 #include "cache.hpp"
-#include "batcher.hpp"
+#include "singleton_registry.hpp"
 
 namespace py = pybind11;
 
-// wrapper: stacked frames (8,8,14 * num_frames)
-static py::array_t<uint8_t> stacked_planes(const backend::Board& b, int num_frames = 5) {
-    auto v = backend::stacked_planes_bytes(b, num_frames);
+// wrapper: stacked frames using bitboard encoder (8,8,14 * num_frames)
+static py::array_t<uint8_t> stacked_planes_bitboards(const backend::Board& b, int num_frames = 5) {
+    auto v = backend::stacked_planes_bytes_bitboards(b, num_frames);
     py::ssize_t H = 8, W = 8, C = 14;
     std::vector<py::ssize_t> shape = { H, W, C * static_cast<py::ssize_t>(num_frames) };
     py::array_t<uint8_t> arr(shape);
-    std::memcpy(arr.mutable_data(), v.data(), v.size() * sizeof(uint8_t));
+    // ensure three args: dest, src, bytes
+    std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(v.size() * sizeof(uint8_t)));
     return arr;
 }
 
@@ -146,7 +147,7 @@ PYBIND11_MODULE(_core, m) {
           .def("san", &backend::Board::san, py::arg("uci"),
                "Convert a UCI string into SAN for this board's current position.")
           
-          .def("stacked_planes", &stacked_planes,
+          .def("stacked_planes", &stacked_planes_bitboards,
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
@@ -179,38 +180,49 @@ PYBIND11_MODULE(_core, m) {
           }, py::arg("tt_best") = py::none(),
                "Return list of (score, uci_move) sorted descending. tt_best optional UCI string");
           
-          m.def("terminal_value_white_pov",
-               [](const backend::Board& b) -> py::object {
-                    auto v = terminal_value_white_pov(b);
-                    if (v.has_value()) return py::float_(*v);
-                    return py::none();
-               },
-               py::arg("board"));
+     m.def("terminal_value_white_pov",
+          [](const backend::Board& b) -> py::object {
+               auto v = terminal_value_white_pov(b);
+               if (v.has_value()) return py::float_(*v);
+               return py::none();
+          },
+          py::arg("board"));
 
-     py::class_<PriorConfig>(m, "PriorConfig")
-          .def(py::init<>())
-          .def_readwrite("use_prior_boosts", &PriorConfig::use_prior_boosts)
-          .def_readwrite("anytime_uniform_mix", &PriorConfig::anytime_uniform_mix)
-          .def_readwrite("anytime_gives_check", &PriorConfig::anytime_gives_check)
-          .def_readwrite("anytime_repetition_sub", &PriorConfig::anytime_repetition_sub)
-          .def_readwrite("endgame_uniform_mix", &PriorConfig::endgame_uniform_mix)
-          .def_readwrite("endgame_pawn_push", &PriorConfig::endgame_pawn_push)
-          .def_readwrite("endgame_capture", &PriorConfig::endgame_capture)
-          .def_readwrite("endgame_repetition_sub", &PriorConfig::endgame_repetition_sub)
-          .def_readwrite("clip_enabled", &PriorConfig::clip_enabled)
-          .def_readwrite("clip_min", &PriorConfig::clip_min)
-          .def_readwrite("clip_max", &PriorConfig::clip_max);
+     // Create the singleton with default PriorConfig (defaults from mcts.hpp).
+     m.def("create_prior_engine", []() {
+          g_prior_engine = std::make_shared<PriorEngine>(PriorConfig());
+          g_prior_engine_raw.store(g_prior_engine.get(), std::memory_order_release);
+     }, "Create a PriorEngine singleton with default settings.");
 
-     py::class_<PriorEngine>(m, "PriorEngine")
-          .def(py::init<const PriorConfig&>(), py::arg("cfg"))
-          .def("build",
-               [](const PriorEngine& eng,
-                    const backend::Board& board,
-                    const std::vector<std::string>& legal,
-                    py::array_t<float> p_from,
-                    py::array_t<float> p_to,
-                    py::array_t<float> p_piece,
-                    py::array_t<float> p_promo) {
+     // Configure (partial) from a Python dict. Missing keys leave previous/default values unchanged.
+     m.def("configure_prior_engine", [](py::dict d) {
+          PriorConfig cfg;
+          if (g_prior_engine) cfg = g_prior_engine->get_config();
+          if (d.contains("use_prior_boosts")) cfg.use_prior_boosts = d["use_prior_boosts"].cast<bool>();
+          if (d.contains("anytime_uniform_mix")) cfg.anytime_uniform_mix = d["anytime_uniform_mix"].cast<float>();
+          if (d.contains("anytime_gives_check")) cfg.anytime_gives_check = d["anytime_gives_check"].cast<float>();
+          if (d.contains("anytime_repetition_sub")) cfg.anytime_repetition_sub = d["anytime_repetition_sub"].cast<float>();
+          if (d.contains("endgame_uniform_mix")) cfg.endgame_uniform_mix = d["endgame_uniform_mix"].cast<float>();
+          if (d.contains("endgame_pawn_push")) cfg.endgame_pawn_push = d["endgame_pawn_push"].cast<float>();
+          if (d.contains("endgame_capture")) cfg.endgame_capture = d["endgame_capture"].cast<float>();
+          if (d.contains("endgame_repetition_sub")) cfg.endgame_repetition_sub = d["endgame_repetition_sub"].cast<float>();
+          if (d.contains("clip_enabled")) cfg.clip_enabled = d["clip_enabled"].cast<bool>();
+          if (d.contains("clip_min")) cfg.clip_min = d["clip_min"].cast<float>();
+          if (d.contains("clip_max")) cfg.clip_max = d["clip_max"].cast<float>();
+
+          g_prior_engine = std::make_shared<PriorEngine>(cfg);
+          g_prior_engine_raw.store(g_prior_engine.get(), std::memory_order_release);
+     }, "Configure or partially update the PriorEngine singleton from a dict.");
+
+     // Build priors using the configured singleton. Returns list[(uci, prob), ...]
+     m.def("prior_engine_build",
+               [](const backend::Board& board,
+               const std::vector<std::string>& legal,
+               py::array_t<float> p_from,
+               py::array_t<float> p_to,
+               py::array_t<float> p_piece,
+               py::array_t<float> p_promo) {
+                    if (!g_prior_engine) throw std::runtime_error("PriorEngine not configured");
                     auto vf = p_from.unchecked<1>();
                     auto vt = p_to.unchecked<1>();
                     auto vp = p_piece.unchecked<1>();
@@ -219,12 +231,34 @@ PYBIND11_MODULE(_core, m) {
                     FloatView ft{vt.data(0), (size_t)vt.shape(0)};
                     FloatView fp{vp.data(0), (size_t)vp.shape(0)};
                     FloatView fr{vr.data(0), (size_t)vr.shape(0)};
-                    return eng.build(board, legal, ff, ft, fp, fr, board.piece_count());
+                    auto pri = g_prior_engine->build(board, legal, ff, ft, fp, fr);
+                    py::list out;
+                    for (const auto &pp : pri) out.append(py::make_tuple(pp.first, pp.second));
+                    return out;
                },
                py::arg("board"), py::arg("legal"),
                py::arg("p_from"), py::arg("p_to"),
-               py::arg("p_piece"), py::arg("p_promo"));
+               py::arg("p_piece"), py::arg("p_promo"),
+               "Build priors using the configured PriorEngine singleton.");
 
+     // Expose current PriorEngine configuration as a Python dict
+     m.def("prior_engine_details", []() {
+          py::dict d;
+          if (!g_prior_engine) return d;
+          PriorConfig cfg = g_prior_engine->get_config();
+          d["use_prior_boosts"] = cfg.use_prior_boosts;
+          d["anytime_uniform_mix"] = cfg.anytime_uniform_mix;
+          d["anytime_gives_check"] = cfg.anytime_gives_check;
+          d["anytime_repetition_sub"] = cfg.anytime_repetition_sub;
+          d["endgame_uniform_mix"] = cfg.endgame_uniform_mix;
+          d["endgame_pawn_push"] = cfg.endgame_pawn_push;
+          d["endgame_capture"] = cfg.endgame_capture;
+          d["endgame_repetition_sub"] = cfg.endgame_repetition_sub;
+          d["clip_enabled"] = cfg.clip_enabled;
+          d["clip_min"] = cfg.clip_min;
+          d["clip_max"] = cfg.clip_max;
+          return d;
+     }, "Return the current PriorEngine settings as a dict.");
 
      py::class_<ChildDetail>(m, "ChildDetail")
           .def_readonly("uci",            &ChildDetail::uci)
@@ -256,7 +290,6 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
           .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
-          .def_property_readonly("vloss",[](const MCTSNode& n){ return n.vloss; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
@@ -309,21 +342,17 @@ PYBIND11_MODULE(_core, m) {
           
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (const auto& kv : t.pending_nodes_) {
-                    uint64_t tok = kv.first;
-                    MCTSNode* n  = kv.second;
+               for (MCTSNode* n : t.pending_nodes_) {
                     if (!n) continue;
                     uint64_t z   = n->zobrist;
-                    auto planes  = ::stacked_planes(n->board, nplanes);
-                    auto pc      = n->board.piece_count();
-                    const auto& lm = n->legal_moves;
-                    out.append(py::make_tuple(tok, z, planes, pc, lm));
+                    auto planes  = ::stacked_planes_bitboards(n->board, nplanes);
+                    out.append(py::make_tuple(z, planes));
                }
                return out;
           },
-          py::arg("nplanes"),
-          "Encode pending leaves: (token, zobrist, planes, piece_count, legal_moves).")
-
+          py::arg("nplanes") =5,
+          "Encode pending leaves: (zobrist, planes).")
+               
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
@@ -332,8 +361,12 @@ PYBIND11_MODULE(_core, m) {
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
 
-          .def("apply_batcher_results", &MCTSTree::apply_batcher_results)
+          .def("resolve_pending", [](MCTSTree &t) {
+               t.resolve_pending();
+          }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
+
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
+          .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
 
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
@@ -459,88 +492,67 @@ PYBIND11_MODULE(_core, m) {
                return d;
           }, py::arg("board"))
 
-          .def("get_weights", [](evaluator::Evaluator &ev){
-               return ev.get_weights();
-          });
-          
-          // Cache stats + clear (thin, atomic/fast reads)
-          m.def("cache_stats", []() {py::dict d;
-               d["size"]     = Cache::instance().size();
-               d["capacity"] = Cache::instance().capacity();
-               d["evictions"]= Cache::instance().evictions();
-               d["queries"]  = Cache::instance().queries();
-               d["hits"]     = Cache::instance().hits();
-               double hit_rate = 0.0;
-               auto q = Cache::instance().queries();
-               if (q) hit_rate = double(Cache::instance().hits()) / double(q);
-                    d["hit_rate"] = hit_rate;
-               return d;
-               }, "Return cache stats as a dict (size, capacity, evictions, queries, hits, hit_rate)");
+          .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
-          m.def("cache_clear", []() {
-               Cache::instance().clear();
-          }, "Clear the cache and reset counters");
-
-          m.def("cache_lookup", [](uint64_t key)->py::object {
-               CacheEntry e;
-               if (!Cache::instance().lookup(key, e)) return py::none();
-               py::dict out;
-               out["value"] = e.value;
-               // priors is vector<pair<string,float>>
-               py::list pri;
-               for (auto &p : e.priors) pri.append(py::make_tuple(p.first, p.second));
-               out["priors"] = pri;
-               return out;
-          });
-
-          m.def("cache_insert", [](uint64_t key, py::object entry_py){
-               CacheEntry e;
-               if (py::isinstance<py::dict>(entry_py)) {
-               py::dict d = entry_py.cast<py::dict>();
-               if (d.contains("value")) e.value = d["value"].cast<float>();
-               if (d.contains("priors")) {
-                    for (auto item : d["priors"].cast<py::list>()) {
-                         auto t = item.cast<py::tuple>();
-                         e.priors.emplace_back(t[0].cast<std::string>(), t[1].cast<float>());
-                    }
+          m.def("raw_cache_bulk_insert", [](py::iterable batch) {
+               std::vector<std::tuple<uint64_t, float, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
+               // Try to reserve if length is available
+               try {
+                    py::ssize_t n = py::len(batch);
+                    if (n > 0) vec.reserve(static_cast<size_t>(n));
+               } catch (...) {
+                    /* ignore if not sized */
                }
-          } else {
-               throw std::runtime_error("cache_insert expects dict {value:, priors:}");
-          }
-          Cache::instance().insert(key, std::move(e));
+
+               for (py::handle item_handle : batch) {
+                    py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
+                    if (t.size() != 6) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, value, p_from, p_to, p_piece, p_promo)");
+
+                    uint64_t key = t[0].cast<uint64_t>();
+                    float net_value = t[1].cast<float>();
+
+                    auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
+                         py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
+                         if (!arr) throw std::runtime_error("raw_cache_bulk_insert: expected array convertible to float32");
+                         py::buffer_info info = arr.request();
+                         float* data = static_cast<float*>(info.ptr);
+                         size_t n = static_cast<size_t>(info.size);
+                         return std::vector<float>(data, data + n);
+                    };
+
+                    std::vector<float> pf = to_vec(t[2]);
+                    std::vector<float> pt = to_vec(t[3]);
+                    std::vector<float> pp = to_vec(t[4]);
+                    std::vector<float> pr = to_vec(t[5]);
+
+                    vec.emplace_back(key, net_value, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
+               }
+
+               // Move the batch into the RawPolicyCache
+               raw_policy_cache().bulk_insert(std::move(vec));
+               }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
+               "Each batch item must be (key:int, value:float, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+          
+          m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
+          m.def("raw_cache_stats", []() {
+               RawStats s = raw_policy_cache().stats();
+               py::dict d;
+               d["size"] = s.size;
+               d["capacity"] = s.capacity;
+               d["evictions"] = s.evictions;
+               return d;
+          }, "Return raw policy cache stats.");
+
+          m.def("priors_cache_stats", []() {
+               CacheStats s = priors_cache_stats();
+               py::dict d;
+               d["size"] = s.size;
+               d["capacity"] = s.capacity;
+               d["evictions"] = s.evictions;
+               d["queries"] = s.queries;
+               d["hits"] = s.hits;
+               return d;
           });
 
-          m.def("get_batcher", []() -> Batcher& {
-               return Batcher::instance();
-               }, py::return_value_policy::reference);
-
-          py::class_<Batcher>(m, "Batcher")
-               .def("load_model", &Batcher::load_model)
-               .def("start", &Batcher::start)
-               .def("stop", &Batcher::stop)
-               .def("set_queue_size", &Batcher::set_queue_size)
-               .def("push_prediction", &Batcher::push_prediction, py::arg("token"), py::arg("zobrist"), py::arg("input_array"))
-               .def("force_predict", &Batcher::force_predict)
-               .def("get_result", &Batcher::get_result)
-               .def("clear_results_cache", &Batcher::clear_results_cache)
-               .def("set_cpu_threads", &Batcher::set_cpu_threads,
-                    py::arg("intra") = 0, py::arg("inter") = 1)
-               .def("batch_history", [](Batcher& b) {
-                    py::list out;
-                    auto hist = b.batch_history();
-                    for (const auto& e : hist) {
-                         py::dict d;
-                         d["id"]         = py::int_(e.id);
-                         d["size"]       = py::int_(e.size);
-                         d["run_ms"]     = py::int_(e.run_ms);
-                         d["total_ms"]   = py::int_(e.total_ms);
-                         d["t_start_ns"] = py::int_(e.t_start_ns);
-                         d["t_end_ns"]   = py::int_(e.t_end_ns);
-                         out.append(std::move(d));
-                    } return out; })
-               .def("clear_batch_history", &Batcher::clear_batch_history)
-               .def("stats", &Batcher::stats_map);
-          py::class_<PredictionResult>(m, "PredictionResult")
-               .def_readonly("outputs_flat", &PredictionResult::outputs_flat)
-               .def_readonly("shape", &PredictionResult::shape);
+          m.def("priors_cache_clear", []() { priors_cache_clear(); });
 }
