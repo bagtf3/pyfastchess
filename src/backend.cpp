@@ -573,7 +573,7 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     int stand = base_eval;
     // if in check, prove youre not losing a minor piece
     // compromise because full mate check is too slow
-    if (in_check) stand += stm_white ? -330 : +330;
+    if (in_check) stand += stm_white ? -120 : +120;
 
     // stand-pat window tests
     if (stm_white) {

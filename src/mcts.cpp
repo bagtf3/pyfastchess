@@ -241,30 +241,30 @@ void MCTSTree::apply_result(
         node->P.emplace(mp.first, mp.second);
 
     // If we had provisional backups with v′, replace them with V.
-    //if (node->has_vprime && node->vprime_visits > 0) {
-    //    const int   k      = node->vprime_visits;         // exact count of v′ backups
-    //    const float vprime = node->v_prime;               // placeholder value used
-    //    const float delta  = (value_white_pov - vprime) * static_cast<float>(k);
+    if (node->has_vprime && node->vprime_visits > 0) {
+       const int   k      = node->vprime_visits;         // exact count of v′ backups
+       const float vprime = node->v_prime;               // placeholder value used
+       const float delta  = (value_white_pov - vprime) * static_cast<float>(k);
 
         // // Apply the correction along the path to root; do NOT change N.
-        // std::vector<MCTSNode*> path;
-        // for (MCTSNode* p = node; p; p = p->parent) path.push_back(p);
-        // if (!path.empty() && path.back() == root_.get()) {
-        //     for (auto it = path.rbegin(); it != path.rend(); ++it) {
-        //         MCTSNode* n = *it;
-        //         n->W += delta;
-        //         n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
-        //     }
-        // }
+        std::vector<MCTSNode*> path;
+        for (MCTSNode* p = node; p; p = p->parent) path.push_back(p);
+        if (!path.empty() && path.back() == root_.get()) {
+            for (auto it = path.rbegin(); it != path.rend(); ++it) {
+                MCTSNode* n = *it;
+                n->W += delta;
+                n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
+            }
+        }
 
         // Clear v′ bookkeeping on the leaf where V arrived
         node->has_vprime    = false;
         node->vprime_visits = 0;
         node->value         = value_white_pov;   // cache latest true value
-    // } else {
-    //     // No v′ to replace: just cache the fresh value for introspection.
-    //     node->value = value_white_pov;
-    // }
+    } else {
+        // No v′ to replace: just cache the fresh value for introspection.
+        node->value = value_white_pov;
+    }
 
     if (cache) {
         CacheEntry e;
@@ -387,7 +387,6 @@ void MCTSTree::resolve_pending() {
             // Not available yet — requeue the node (under lock) for future attempts
             std::lock_guard<std::mutex> g(tree_mutex_);
             pending_nodes_.push_back(node);
-            std::cout << "[MCTS] resolve_pending: missing raw for zobrist " << z << "\n";
             continue;
         }
 
@@ -415,9 +414,9 @@ void MCTSTree::resolve_pending() {
 
         // Determine value: prefer the network value if present in raw entry, otherwise fall back
         // to node->v_prime if available, else 0.0f.
-        //float value_white_pov = re->has_value ? re->value: (node->has_vprime ? node->v_prime : 0.0f);
+        float value_white_pov = re->has_value ? re->value: (node->has_vprime ? node->v_prime : 0.0f);
         //TEMPORARILY IGNORING NN VALUE !!!!!!!
-        float value_white_pov = node->v_prime;
+        //float value_white_pov = node->v_prime;
 
         // Apply result (apply_result will take tree lock internally)
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
