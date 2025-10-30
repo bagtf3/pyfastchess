@@ -572,9 +572,9 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
     int base_eval = ev->evaluate(*this);
     int stand = base_eval;
 
-    // if in check, prove youre not losing a minor piece
+    // if in check, prove youre not losing a pawn + tempo
     // compromise because full mate check is too slow
-    if (ply <= 3 && in_check) stand += (stm_white ? -300 : 300);
+    if (ply <= 3 && in_check) stand += (stm_white ? -120 : 120);
 
     // stand-pat window tests
     if (stm_white) {
@@ -591,10 +591,7 @@ int Board::qsearch_impl(int alpha, int beta, int ply,
 
     for (const auto &m : moves) {
         if (in_check) {
-            int s = 0;
-            if (this->is_capture(m)) s = 100;
-            else if (this->gives_check(m)) s = 500;
-            scored.emplace_back(s, m);
+            scored.emplace_back(0, m);
         } else {
             if (this->gives_double_attack(m, true)) scored.emplace_back(800, m);
             else if (this->is_capture(m)) scored.emplace_back(this->mvvlva(m), m);
