@@ -121,6 +121,15 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
+    // Fresh terminal? catches repetition draws
+    if (auto tv = backend::terminal_value_white_pov(node->board)) {
+        node->is_terminal = true;
+        node->value = *tv;
+        node->is_expanded = true;
+        back_up_along_path(node, node->value, /*add_visit=*/true);
+        return { node, MCTSTree::CollectTag::TERMINAL };
+    }
+
     // Try priors cache fast-path
     {
         uint64_t key = node->zobrist;
@@ -147,15 +156,6 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
 
             return { node, MCTSTree::CollectTag::CACHED };
         }
-    }
-
-    // Fresh terminal?
-    if (auto tv = backend::terminal_value_white_pov(node->board)) {
-        node->is_terminal = true;
-        node->value = *tv;
-        node->is_expanded = true;
-        back_up_along_path(node, node->value, /*add_visit=*/true);
-        return { node, MCTSTree::CollectTag::TERMINAL };
     }
 
     // Fresh non-terminal leaf: expand with uniform priors and start v'
