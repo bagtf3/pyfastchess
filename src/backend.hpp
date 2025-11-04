@@ -32,6 +32,8 @@ class Board;
 // Fast bitboard-based variant — same output layout as stacked_planes_bytes,
 // but built directly from chess::Bitboard u64s for speed.
 std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_frames = 5);
+// Fast bitboard-based STM-agnostic encoder (8*8*29 * num_frames)
+std::vector<uint8_t> stacked_planes_bytes_stm_pov(const Board& b, int num_frames = 1);
 
 class Board {
 public:
@@ -86,6 +88,10 @@ public:
     // Returns four vectors: from, to, piece, promo (collapsed promo scheme)
     std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
     moves_to_labels(const std::vector<std::string>& ucis) const;
+
+    // Return a 4096-length vector (from*64 + to) of 0/1 bytes indicating legal moves.
+    // STM-agnostic: if black to move, squares are remapped via (63 - sq) before indexing.
+    std::vector<uint8_t> legal_move_mask() const;
 
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
     int piece_at(int square) const;

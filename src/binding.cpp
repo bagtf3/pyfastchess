@@ -24,6 +24,27 @@ static py::array_t<uint8_t> stacked_planes_bitboards(const backend::Board& b, in
     return arr;
 }
 
+// wrapper: STM-agnostic stacked frames using bitboard encoder (8,8,29 * num_frames)
+static py::array_t<uint8_t> stacked_planes_stm_pov(const backend::Board& b, int num_frames = 1) {
+    auto v = backend::stacked_planes_bytes_stm_pov(b, num_frames);
+    py::ssize_t H = 8, W = 8, C = 29;
+    std::vector<py::ssize_t> shape = { H, W, C * static_cast<py::ssize_t>(num_frames) };
+    py::array_t<uint8_t> arr(shape);
+    // memcopy into numpy array (dest, src, bytes)
+    std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(v.size() * sizeof(uint8_t)));
+    return arr;
+}
+
+// wrapper returning np.uint8 array of shape (4096,)
+static py::array_t<uint8_t> legal_move_mask_py(const backend::Board& b) {
+    auto v = b.legal_move_mask(); // std::vector<uint8_t>
+    py::ssize_t N = static_cast<py::ssize_t>(v.size());
+    py::array_t<uint8_t> arr({N});
+    // copy contiguous bytes
+    std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(N * sizeof(uint8_t)));
+    return arr;
+}
+
 static py::tuple board_qsearch_wrapper(backend::Board &b,
                                        int alpha,
                                        int beta,
@@ -160,6 +181,17 @@ PYBIND11_MODULE(_core, m) {
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
+
+          .def("stacked_planes_stm_pov", &stacked_planes_stm_pov,
+               py::arg("num_frames") = 1,
+               "Return (8,8,29*num_frames) uint8 array encoding a STM-agnostic view:\n"
+               "planes 0..5 = us pieces, 6..11 = us attacked-squares per piece-type,\n"
+               "12..17 = them pieces, 18..23 = them attacked-squares per piece-type,\n"
+               "24..27 = castling rights (us_k, us_q, them_k, them_q), 28 = ep-file plane.\n"
+               "Orientation is always White POV; if Black to move, squares are mirrored.")
+          
+          .def("legal_move_mask", &legal_move_mask_py,
+               "Return a (4096,) uint8 array mask of legal moves. Index = from*64 + to, STM-agnostic.")
 
           .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
                "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")
