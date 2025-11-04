@@ -687,7 +687,7 @@ priors_from_heads_views(const backend::Board& board,
         const float s = std::max(0.0f,
             pfv.get((size_t)fi) *
             ptv.get((size_t)ti) *
-            pcv.get((size_t)pci) *
+            //pcv.get((size_t)pci) *
             prv.get((size_t)pri_i));
         pri[i] = s;
         sum += s;
