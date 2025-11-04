@@ -390,10 +390,23 @@ PYBIND11_MODULE(_core, m) {
                     out.append(py::make_tuple(z, planes));
                }
                return out;
-          },
-          py::arg("nplanes") =5,
-          "Encode pending leaves: (zobrist, planes).")
+               }, py::arg("nplanes") =5,"Encode pending leaves: (zobrist, planes).")
                
+          .def("pending_encoded_stm_pov", [](MCTSTree& t, int nplanes) {
+               py::list out;
+               for (MCTSNode* n : t.pending_nodes_) {
+                    if (!n) continue;
+                    // encode stacked STM-POV planes for the node's board
+                    py::array_t<uint8_t> planes = ::stacked_planes_stm_pov(n->board, nplanes);
+                    // encode legal-move mask for the same board (shape (4096,))
+                    py::array_t<uint8_t> mask   = legal_move_mask_py(n->board);
+                    out.append(py::make_tuple(planes, mask));
+               }
+               return out;
+               }, py::arg("nplanes") = 1,
+               "Encode pending leaves as [(planes, legal_mask), ...].\n"
+               "planes: (8,8,29*nplanes) uint8 array (STM-POV). mask: (4096,) uint8 legal-move mask.")
+
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
