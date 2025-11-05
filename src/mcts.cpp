@@ -437,40 +437,13 @@ void MCTSTree::resolve_pending() {
         std::vector<std::pair<std::string, float>> built_priors;
         built_priors.reserve(pairs.size());
 
-        // Simple stats for temporary debugging
-        double sum = 0.0;
-        double minv = std::numeric_limits<double>::infinity();
-        double maxv = -std::numeric_limits<double>::infinity();
-        size_t count = 0;
-
         for (const auto &p : pairs) {
             const std::string &uci = p.first;
             const uint16_t idx = p.second; // 0..4095 expected
 
             // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
             const float prob = policy_vec[idx];
-
             built_priors.emplace_back(uci, prob);
-
-            sum += static_cast<double>(prob);
-            minv = std::min(minv, static_cast<double>(prob));
-            maxv = std::max(maxv, static_cast<double>(prob));
-            ++count;
-        }
-
-        // Temporary diagnostics: print priors stats (remove when finished testing)
-        if (count > 0) {
-            const double mean = sum / static_cast<double>(count);
-            std::cout << "[resolve_pending][priors] zobrist=" << z
-                      << " count=" << count
-                      << " sum=" << std::fixed << std::setprecision(6) << sum
-                      << " mean=" << mean
-                      << " min=" << minv
-                      << " max=" << maxv
-                      << std::endl;
-        } else {
-            std::cout << "[resolve_pending][priors] zobrist=" << z
-                      << " built_priors EMPTY" << std::endl;
         }
 
         // Apply result: this will expand the node and backpropagate the value.
