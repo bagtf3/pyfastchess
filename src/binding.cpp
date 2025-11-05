@@ -5,12 +5,12 @@
 #include <algorithm>
 #include <sstream>
 #include <cstring> 
+#include <memory>
 #include "backend.hpp"
 #include "mcts.hpp"
 #include "evaluator.hpp"
 #include "cache.hpp"
 #include "singleton_registry.hpp"
-#include <memory>
 
 namespace py = pybind11;
 
@@ -37,7 +37,7 @@ static py::array_t<uint8_t> stacked_planes_stm_pov(const backend::Board& b, int 
 }
 
 // wrapper returning np.uint8 array of shape (4096,)
-std::vector<uint8_t> legal_move_mask_py(const Board &b) {
+std::vector<uint8_t> legal_move_mask_py(const backend::Board &b) {
     return b.legal_move_mask().mask;
 }
 
@@ -561,7 +561,6 @@ PYBIND11_MODULE(_core, m) {
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
                std::vector<std::tuple<uint64_t, float, std::vector<float>>> vec;
-          
                // Try to reserve if length is available
                try {
                     py::ssize_t n = py::len(batch);
@@ -571,7 +570,7 @@ PYBIND11_MODULE(_core, m) {
                auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
                     py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
                     if (!arr) throw std::runtime_error(
-                         "raw_cache_bulk_insert: expected array convertible to float32");
+                              "raw_cache_bulk_insert: expected array convertible to float32");
                     py::buffer_info info = arr.request();
                     float* data = static_cast<float*>(info.ptr);
                     size_t n = static_cast<size_t>(info.size);
@@ -581,17 +580,17 @@ PYBIND11_MODULE(_core, m) {
                for (py::handle item_handle : batch) {
                     py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
                     if (t.size() != 3) throw std::runtime_error(
-                         "raw_cache_bulk_insert: each item must be (key, value, policy_vector)");
+                              "raw_cache_bulk_insert: each item must be (key, value, policy_vector)");
                     uint64_t key = t[0].cast<uint64_t>();
                     float net_value = t[1].cast<float>();
                     std::vector<float> policy = to_vec(t[2]);
                     if (policy.size() != 4096) throw std::runtime_error(
-                         "raw_cache_bulk_insert: policy_vector must have length 4096");
+                              "raw_cache_bulk_insert: policy_vector must have length 4096");
                     vec.emplace_back(key, net_value, std::move(policy));
                }
 
                raw_policy_cache().bulk_insert(std::move(vec));
-          });
+               });
           
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_stats", []() {

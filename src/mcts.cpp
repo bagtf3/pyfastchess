@@ -370,10 +370,10 @@ void MCTSTree::resolve_pending() {
     // Quick check
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
-        if (pending_nodes_.empty()) { return; }
+        if (pending_nodes_.empty()) return;
     }
 
-    // 1: drain pending nodes into local vector
+    // Drain pending nodes into a local vector under lock
     std::vector<MCTSNode*> to_process;
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
@@ -381,99 +381,99 @@ void MCTSTree::resolve_pending() {
         pending_nodes_.clear();
     }
 
-    // 2: process each node without holding tree_mutex_
+    // Process without holding tree_mutex_
     for (MCTSNode* node : to_process) {
         if (!node) continue;
 
         const uint64_t z = node->zobrist;
+
+        // Lookup the raw network entry by zobrist (non-blocking)
         const RawEntry* re = raw_policy_cache().lookup(z);
         if (!re) {
-            // Not available yet — requeue for a future attempt
+            // Not ready yet — requeue under lock for later processing
             std::lock_guard<std::mutex> g(tree_mutex_);
             pending_nodes_.push_back(node);
             continue;
         }
 
-        // Determine value (prefer network-provided value if present)
+        // Compute value_white_pov:
+        // - model value (re->value) is STM-POV; flip sign for black to get White-POV
+        // - if model value missing, fall back to v_prime (print a diagnostic), else 0.0
         float value_white_pov;
         if (re->has_value) {
-            // re->value is STM-POV; flip sign for Black to convert to White-POV
-            const bool stm_white = (node->board.sideToMove() == chess::Color::WHITE);
+            const bool stm_white = (node->board.side_to_move() == "w");
             value_white_pov = stm_white ? re->value : -re->value;
         } else {
-            // Print when we actually fall back to v_prime (testing only)
             if (node->has_vprime) {
                 std::cout << "[resolve_pending] zobrist=" << z
-                        << " no NN value; falling back to v_prime=" << node->v_prime
-                        << std::endl;
+                          << " no NN value; falling back to v_prime=" << node->v_prime
+                          << std::endl;
                 value_white_pov = node->v_prime;
             } else {
                 value_white_pov = 0.0f;
             }
         }
 
-        // Grab the LegalMaskandMap pointer from the node. Must be present.
+        // Grab the LegalMaskandMap attached to the node. Must be present.
         std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
         {
             std::lock_guard<std::mutex> g(tree_mutex_);
             lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
         }
-
         if (!lm_sp) {
             std::stringstream ss;
-            ss << "resolve_pending: missing LegalMaskandMap on node (zobrist="
-               << z << "). Ensure pending_encoded_stm_pov attached it.";
+            ss << "resolve_pending: missing LegalMaskandMap on node (zobrist=" << z
+               << "). Ensure pending_encoded_stm_pov attached it.";
             throw std::runtime_error(ss.str());
         }
 
-        // Build priors by plucking the values using the lookup pairs.
+        // Pluck priors directly from the model's raw policy vector (STM-POV).
+        // NOTE: This intentionally does not perform silent fallbacks or length checks.
+        const auto &policy_vec = re->p_policy; // model-provided 4096-length vector (STM-POV)
+
+        // Use the lookup pairs (uci, idx) from the LegalMaskandMap
         const auto &pairs = lm_sp->lookup();
+
         std::vector<std::pair<std::string, float>> built_priors;
         built_priors.reserve(pairs.size());
 
+        // Simple stats for temporary debugging
+        double sum = 0.0;
+        double minv = std::numeric_limits<double>::infinity();
+        double maxv = -std::numeric_limits<double>::infinity();
+        size_t count = 0;
+
         for (const auto &p : pairs) {
             const std::string &uci = p.first;
-            const uint16_t idx = p.second;
-            if (static_cast<size_t>(idx) >= re->policy.size()) {
-                std::stringstream ss;
-                ss << "resolve_pending: policy index out of range for zobrist=" << z
-                   << " uci=" << uci << " idx=" << idx
-                   << " policy_size=" << re->policy.size();
-                throw std::runtime_error(ss.str());
-            }
-            const float prob = re->policy[idx];
+            const uint16_t idx = p.second; // 0..4095 expected
+
+            // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
+            const float prob = policy_vec[idx];
+
             built_priors.emplace_back(uci, prob);
+
+            sum += static_cast<double>(prob);
+            minv = std::min(minv, static_cast<double>(prob));
+            maxv = std::max(maxv, static_cast<double>(prob));
+            ++count;
         }
 
-        // --- diagnostics: print priors stats for debugging (delete after ~30 minutes) ---
-        if (!built_priors.empty()) {
-            // sum and mean as double for stability
-            double sum = std::accumulate(
-                built_priors.begin(), built_priors.end(), 0.0,
-                [](double s, const std::pair<std::string,float>& p){ return s + static_cast<double>(p.second); });
-
-            double mean = sum / static_cast<double>(built_priors.size());
-
-            auto mm = std::minmax_element(
-                built_priors.begin(), built_priors.end(),
-                [](const auto &a, const auto &b){ return a.second < b.second; });
-
-            double mn = mm.first->second;
-            double mx = mm.second->second;
-
+        // Temporary diagnostics: print priors stats (remove when finished testing)
+        if (count > 0) {
+            const double mean = sum / static_cast<double>(count);
             std::cout << "[resolve_pending][priors] zobrist=" << z
-                    << " count=" << built_priors.size()
-                    << " sum=" << std::fixed << std::setprecision(6) << sum
-                    << " mean=" << mean
-                    << " min=" << mn
-                    << " max=" << mx
-                    << std::endl;
+                      << " count=" << count
+                      << " sum=" << std::fixed << std::setprecision(6) << sum
+                      << " mean=" << mean
+                      << " min=" << minv
+                      << " max=" << maxv
+                      << std::endl;
         } else {
-            std::cout << "[resolve_pending][priors] zobrist=" << z << " built_priors EMPTY" << std::endl;
+            std::cout << "[resolve_pending][priors] zobrist=" << z
+                      << " built_priors EMPTY" << std::endl;
         }
-        // --- end diagnostics ---
 
-        // Finally, apply the result (same signature as before).
+        // Apply result: this will expand the node and backpropagate the value.
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
     }
 }
