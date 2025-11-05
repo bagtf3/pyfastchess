@@ -9,6 +9,11 @@
 #include "cache.hpp"
 #include "singleton_registry.hpp"
 
+#include <algorithm>
+#include <numeric>
+#include <iostream>
+#include <iomanip>
+
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
@@ -268,8 +273,10 @@ void MCTSTree::apply_result(
         CacheEntry e;
         e.priors = move_priors;
         e.value  = value_white_pov;
-        // insert into the priors cache. now threadsafe via mutex
-        priors_cache().insert(node->board.hash(), std::move(e));
+
+        // prefer node->zobrist if set; fall back to board.hash() (should be identical).
+        uint64_t key = (node->zobrist != 0) ? node->zobrist : node->board.hash();
+        priors_cache().insert(key, std::move(e));
     }
 }
 
@@ -363,10 +370,10 @@ void MCTSTree::resolve_pending() {
     // Quick check
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
-        if (pending_nodes_.empty()) {return;}
+        if (pending_nodes_.empty()) { return; }
     }
 
-    // Phase 1: move pending nodes into a local vector under lock (drain)
+    // 1: drain pending nodes into local vector
     std::vector<MCTSNode*> to_process;
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
@@ -374,47 +381,99 @@ void MCTSTree::resolve_pending() {
         pending_nodes_.clear();
     }
 
-    // Phase 2: process each node without holding tree_mutex_ 
-    // safe because node pointers are stable while tree exists)
+    // 2: process each node without holding tree_mutex_
     for (MCTSNode* node : to_process) {
         if (!node) continue;
 
         const uint64_t z = node->zobrist;
-        const RawEntry* re = raw_policy_cache().lookup(z); // Raw cache is already thread-safe
+        const RawEntry* re = raw_policy_cache().lookup(z);
         if (!re) {
-            // Not available yet — requeue the node (under lock) for future attempts
+            // Not available yet — requeue for a future attempt
             std::lock_guard<std::mutex> g(tree_mutex_);
             pending_nodes_.push_back(node);
             continue;
         }
 
-        // Have raw outputs; need prior engine to turn them into priors.
-        PriorEngine* pe = get_prior_engine_raw();
-
-        // Build FloatView wrappers expected by PriorEngine::build
-        FloatView ff{ re->p_from.empty() ? nullptr : re->p_from.data(), re->p_from.size() };
-        FloatView ft{ re->p_to.empty()   ? nullptr : re->p_to.data(),   re->p_to.size()   };
-        FloatView fp{ re->p_piece.empty()? nullptr : re->p_piece.data(), re->p_piece.size()};
-        FloatView fr{ re->p_promo.empty()? nullptr: re->p_promo.data(),  re->p_promo.size()};
-
-        // Use the nodes cached legal moves (expand_with_uniform_priors already stored them).
-        // If for some reason legal_moves is empty, fall back to asking the board.
-        std::vector<std::string> legal;
-        {
-            // small read under tree_mutex_ to safely access node->legal_moves
-            std::lock_guard<std::mutex> g(tree_mutex_);
-            if (!node->legal_moves.empty()) legal = node->legal_moves;
+        // Determine value (prefer network-provided value if present)
+        float value_white_pov;
+        if (re->has_value) {
+            // re->value is STM-POV; flip sign for Black to convert to White-POV
+            const bool stm_white = (node->board.sideToMove() == chess::Color::WHITE);
+            value_white_pov = stm_white ? re->value : -re->value;
+        } else {
+            // Print when we actually fall back to v_prime (testing only)
+            if (node->has_vprime) {
+                std::cout << "[resolve_pending] zobrist=" << z
+                        << " no NN value; falling back to v_prime=" << node->v_prime
+                        << std::endl;
+                value_white_pov = node->v_prime;
+            } else {
+                value_white_pov = 0.0f;
+            }
         }
-        if (legal.empty()) legal = node->board.legal_moves();
 
-        // Build priors (this is potentially slow but does not hold tree_mutex_)
-        auto built_priors = pe->build(node->board, legal, ff, ft, fp, fr);
+        // Grab the LegalMaskandMap pointer from the node. Must be present.
+        std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
+        {
+            std::lock_guard<std::mutex> g(tree_mutex_);
+            lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
+        }
 
-        // Determine value: prefer the network value if present in raw entry, otherwise fall back
-        // to node->v_prime if available, else 0.0f.
-        float value_white_pov = re->has_value ? re->value: (node->has_vprime ? node->v_prime : 0.0f);
+        if (!lm_sp) {
+            std::stringstream ss;
+            ss << "resolve_pending: missing LegalMaskandMap on node (zobrist="
+               << z << "). Ensure pending_encoded_stm_pov attached it.";
+            throw std::runtime_error(ss.str());
+        }
 
-        // Apply result (apply_result will take tree lock internally)
+        // Build priors by plucking the values using the lookup pairs.
+        const auto &pairs = lm_sp->lookup();
+        std::vector<std::pair<std::string, float>> built_priors;
+        built_priors.reserve(pairs.size());
+
+        for (const auto &p : pairs) {
+            const std::string &uci = p.first;
+            const uint16_t idx = p.second;
+            if (static_cast<size_t>(idx) >= re->policy.size()) {
+                std::stringstream ss;
+                ss << "resolve_pending: policy index out of range for zobrist=" << z
+                   << " uci=" << uci << " idx=" << idx
+                   << " policy_size=" << re->policy.size();
+                throw std::runtime_error(ss.str());
+            }
+            const float prob = re->policy[idx];
+            built_priors.emplace_back(uci, prob);
+        }
+
+        // --- diagnostics: print priors stats for debugging (delete after ~30 minutes) ---
+        if (!built_priors.empty()) {
+            // sum and mean as double for stability
+            double sum = std::accumulate(
+                built_priors.begin(), built_priors.end(), 0.0,
+                [](double s, const std::pair<std::string,float>& p){ return s + static_cast<double>(p.second); });
+
+            double mean = sum / static_cast<double>(built_priors.size());
+
+            auto mm = std::minmax_element(
+                built_priors.begin(), built_priors.end(),
+                [](const auto &a, const auto &b){ return a.second < b.second; });
+
+            double mn = mm.first->second;
+            double mx = mm.second->second;
+
+            std::cout << "[resolve_pending][priors] zobrist=" << z
+                    << " count=" << built_priors.size()
+                    << " sum=" << std::fixed << std::setprecision(6) << sum
+                    << " mean=" << mean
+                    << " min=" << mn
+                    << " max=" << mx
+                    << std::endl;
+        } else {
+            std::cout << "[resolve_pending][priors] zobrist=" << z << " built_priors EMPTY" << std::endl;
+        }
+        // --- end diagnostics ---
+
+        // Finally, apply the result (same signature as before).
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
     }
 }
