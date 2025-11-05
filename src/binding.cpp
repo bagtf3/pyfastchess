@@ -10,6 +10,7 @@
 #include "evaluator.hpp"
 #include "cache.hpp"
 #include "singleton_registry.hpp"
+#include <memory>
 
 namespace py = pybind11;
 
@@ -386,18 +387,30 @@ PYBIND11_MODULE(_core, m) {
                }
                return out;
                }, py::arg("nplanes") =5,"Encode pending leaves: (zobrist, planes).")
-               
+
           .def("pending_encoded_stm_pov", [](MCTSTree& t, int nplanes) {
                py::list out;
                for (MCTSNode* n : t.pending_nodes_) {
                     if (!n) continue;
-                    // 64-bit zobrist key for this node
+
+                    // 1) zobrist and planes
                     uint64_t z = n->zobrist;
-                    // encode stacked STM-POV planes for the node's board
                     py::array_t<uint8_t> planes = ::stacked_planes_stm_pov(n->board, nplanes);
-                    // encode legal-move mask for the same board (shape (4096,))
-                    py::array_t<uint8_t> mask   = legal_move_mask_py(n->board);
-                    // return (zobrist, planes, mask)
+
+                    // 2) produce a LegalMaskandMap for this node and move it to the heap
+                    //    so we can attach it to the node without copying the contents.
+                    backend::LegalMaskandMap lm = n->board.legal_move_mask();
+                    // move 'lm' into a heap object and keep a shared_ptr on the node
+                    auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
+                    // store as const-shared to indicate read-only usage by other consumers
+                    n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+
+                    // 3) convert mask -> numpy array (copy 4096 bytes into Python)
+                    const size_t mask_len = lm_sp->mask.size(); // should be 4096
+                    py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
+                    std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
+
+                    // 4) append (zobrist, planes, mask) as before
                     out.append(py::make_tuple(z, planes, mask));
                }
                return out;

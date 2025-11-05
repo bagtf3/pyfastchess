@@ -73,6 +73,10 @@ struct MCTSNode {
     bool is_expanded = false;
     float value = 0.0f;     // cached leaf value when expanded (optional)
 
+    // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
+    // heap object and store it here so the node can later access it without copies.
+    std::shared_ptr<const backend::LegalMaskandMap> legal_mask_map;
+
     // Disallow copying (because we hold unique_ptr children)
     MCTSNode(const MCTSNode&) = delete;
     MCTSNode& operator=(const MCTSNode&) = delete;

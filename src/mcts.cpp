@@ -136,7 +136,6 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         if (key == 0) {
             key = node->board.hash();
             node->zobrist = key;
-            std::cout << "[MCTS][DBG] initialized empty zobrist -> " << key << "\n";
         }
 
         if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
@@ -150,7 +149,6 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
             if (!had_vprime) {
                 back_up_along_path(node, pe->value, /*add_visit=*/true);
             } else {
-                std::cout << "[MCTS][DBG] cache fastpath: had v' -> apply_result\n";
                 apply_result(node, pe->priors, pe->value, /*cache=*/false);
             }
 

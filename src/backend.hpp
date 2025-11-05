@@ -35,16 +35,25 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
 // Fast bitboard-based STM-agnostic encoder (8*8*29 * num_frames)
 std::vector<uint8_t> stacked_planes_bytes_stm_pov(const Board& b, int num_frames = 1);
 
-
 struct LegalMaskandMap {
     // 4096-byte mask where idx = from*64 + to (STM-POV)
     std::vector<uint8_t> mask;
-    // exact Move objects in the node's POV (no flipping)
-    std::vector<chess::Move> moves;
-    // STM-POV indices 0..4095 that correspond 1:1 with moves
-    std::vector<uint16_t> idxs;
-};
 
+    // compact per-move list: pair<uci_string, stm_pov_idx>
+    // this is owned storage; callers may use this or attach an external lookup.
+    std::vector<std::pair<std::string, uint16_t>> uci_idx_pairs;
+
+    // optional non-owning pointer to an external read-only lookup that maps
+    // exactly the same (uci, idx) pairs. If non-null, lookup() will return this.
+    // This pointer is intentionally a raw pointer to avoid copies; it must outlive
+    // the LegalMaskandMap user when set.
+    const std::vector<std::pair<std::string, uint16_t>>* uci_idx_lookup = nullptr;
+
+    // helper accessor: returns external lookup if set, otherwise the owned vector
+    const std::vector<std::pair<std::string, uint16_t>>& lookup() const {
+        return uci_idx_lookup ? *uci_idx_lookup : uci_idx_pairs;
+    }
+};
 
 class Board {
 public:

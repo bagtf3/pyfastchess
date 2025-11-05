@@ -483,13 +483,9 @@ LegalMaskandMap Board::legal_move_mask() const {
 
     const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
 
-    out.moves.reserve(ml.size());
-    out.idxs.reserve(ml.size());
+    out.uci_idx_pairs.reserve(ml.size());
 
     for (const auto &mv : ml) {
-        // store original Move (node POV) for UCI conversion later
-        out.moves.push_back(mv);
-
         // compute STM-POV index (flip squares for black so model index matches)
         chess::Square sf = mv.from();
         chess::Square st = mv.to();
@@ -503,8 +499,16 @@ LegalMaskandMap Board::legal_move_mask() const {
         const uint16_t idx = static_cast<uint16_t>(from_idx * 64 + to_idx); // 0..4095
 
         out.mask[idx] = 1;
-        out.idxs.push_back(idx);
+
+        // convert move to UCI (engine's POV; castling/promotion handled by moveToUci)
+        std::string uci = chess::uci::moveToUci(mv);
+
+        // store pair (uci, index) in the owned vector
+        out.uci_idx_pairs.emplace_back(std::move(uci), idx);
     }
+
+    // leave out.uci_idx_lookup as nullptr by default; caller can set it to point to
+    // an external, read-only lookup if desired.
 
     return out;
 }
