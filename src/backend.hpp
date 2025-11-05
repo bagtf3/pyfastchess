@@ -109,6 +109,9 @@ public:
     std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
     moves_to_labels(const std::vector<std::string>& ucis) const;
 
+    // Returns a vector of (from*64 + to) indices in STM-POV order for the supplied UCIs.
+    std::vector<uint16_t> moves_to_indices(const std::vector<std::string>& ucis) const;
+
     // Return a 4096-length vector (from*64 + to) of 0/1 bytes indicating legal moves.
     LegalMaskandMap legal_move_mask() const;
 

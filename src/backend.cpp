@@ -455,6 +455,31 @@ std::tuple<int,int,int,int> Board::move_to_labels(const std::string& uci) const 
   return {from_idx, to_idx, piece_idx, promo_idx};
 }
 
+std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& ucis) const {
+    std::vector<uint16_t> out;
+    out.reserve(ucis.size());
+
+    const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
+
+    for (const auto &u : ucis) {
+        // get canonical from/to (handles castling remap inside move_to_labels)
+        int from_idx, to_idx, pc, pr;
+        std::tie(from_idx, to_idx, pc, pr) = move_to_labels(u);
+
+        // convert to chess::Square so we can flip for STM if needed (match legal_move_mask)
+        chess::Square sf(static_cast<int>(from_idx));
+        chess::Square st(static_cast<int>(to_idx));
+        if (!stm_white) {
+            sf.flip();
+            st.flip();
+        }
+
+        uint16_t idx = static_cast<uint16_t>(sf.index() * 64 + st.index());
+        out.push_back(idx);
+    }
+    return out;
+}
+
 std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
 Board::moves_to_labels(const std::vector<std::string>& ucis) const {
     const size_t N = ucis.size();
