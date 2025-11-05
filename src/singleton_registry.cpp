@@ -54,7 +54,6 @@ void RawPolicyCache::bulk_insert(
     }
 }
 
-
 const RawEntry* RawPolicyCache::lookup(uint64_t key) const {
     std::lock_guard<std::mutex> g(mutex_);
     auto it = map_.find(key);

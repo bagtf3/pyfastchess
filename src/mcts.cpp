@@ -101,7 +101,7 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
 // Internal variant of collect_one_leaf that reports reason
 std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
     last_path_.clear();
-    if (last_path_.capacity() < 32) last_path_.reserve(32);
+    if (last_path_.capacity() < 64) last_path_.reserve(64);
 
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
@@ -415,8 +415,6 @@ void MCTSTree::resolve_pending() {
         // Determine value: prefer the network value if present in raw entry, otherwise fall back
         // to node->v_prime if available, else 0.0f.
         float value_white_pov = re->has_value ? re->value: (node->has_vprime ? node->v_prime : 0.0f);
-        //TEMPORARILY IGNORING NN VALUE !!!!!!!
-        //float value_white_pov = node->v_prime;
 
         // Apply result (apply_result will take tree lock internally)
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);

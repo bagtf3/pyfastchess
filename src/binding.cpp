@@ -36,13 +36,8 @@ static py::array_t<uint8_t> stacked_planes_stm_pov(const backend::Board& b, int 
 }
 
 // wrapper returning np.uint8 array of shape (4096,)
-static py::array_t<uint8_t> legal_move_mask_py(const backend::Board& b) {
-    auto v = b.legal_move_mask(); // std::vector<uint8_t>
-    py::ssize_t N = static_cast<py::ssize_t>(v.size());
-    py::array_t<uint8_t> arr({N});
-    // copy contiguous bytes
-    std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(N * sizeof(uint8_t)));
-    return arr;
+std::vector<uint8_t> legal_move_mask_py(const Board &b) {
+    return b.legal_move_mask().mask;
 }
 
 static py::tuple board_qsearch_wrapper(backend::Board &b,

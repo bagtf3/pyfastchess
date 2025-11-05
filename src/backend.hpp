@@ -35,6 +35,17 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
 // Fast bitboard-based STM-agnostic encoder (8*8*29 * num_frames)
 std::vector<uint8_t> stacked_planes_bytes_stm_pov(const Board& b, int num_frames = 1);
 
+
+struct LegalMaskandMap {
+    // 4096-byte mask where idx = from*64 + to (STM-POV)
+    std::vector<uint8_t> mask;
+    // exact Move objects in the node's POV (no flipping)
+    std::vector<chess::Move> moves;
+    // STM-POV indices 0..4095 that correspond 1:1 with moves
+    std::vector<uint16_t> idxs;
+};
+
+
 class Board {
 public:
     Board();
@@ -90,8 +101,7 @@ public:
     moves_to_labels(const std::vector<std::string>& ucis) const;
 
     // Return a 4096-length vector (from*64 + to) of 0/1 bytes indicating legal moves.
-    // STM-agnostic: if black to move, squares are remapped via (63 - sq) before indexing.
-    std::vector<uint8_t> legal_move_mask() const;
+    LegalMaskandMap legal_move_mask() const;
 
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
     int piece_at(int square) const;

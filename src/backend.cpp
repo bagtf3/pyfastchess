@@ -473,34 +473,40 @@ Board::moves_to_labels(const std::vector<std::string>& ucis) const {
     return {froms, tos, pcs, pros};
 }
 
-std::vector<uint8_t> Board::legal_move_mask() const {
+LegalMaskandMap Board::legal_move_mask() const {
     constexpr size_t N = 64 * 64;
-    std::vector<uint8_t> mask(N, 0);
+    LegalMaskandMap out;
+    out.mask.assign(N, 0);
 
     chess::Movelist ml;
     chess::movegen::legalmoves(ml, board_);
 
     const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
 
-    for (const auto &mv : ml) {
-        int from_idx = mv.from().index(); // canonical 0..63
-        int to_idx   = mv.to().index();
+    out.moves.reserve(ml.size());
+    out.idxs.reserve(ml.size());
 
+    for (const auto &mv : ml) {
+        // store original Move (node POV) for UCI conversion later
+        out.moves.push_back(mv);
+
+        // compute STM-POV index (flip squares for black so model index matches)
+        chess::Square sf = mv.from();
+        chess::Square st = mv.to();
         if (!stm_white) {
-            // use chess::Square::flip() semantics (vertical flip)
-            chess::Square sf = mv.from();
-            chess::Square st = mv.to();
             sf.flip();
             st.flip();
-            from_idx = sf.index();
-            to_idx = st.index();
         }
 
-        size_t idx = static_cast<size_t>(from_idx) * 64 + static_cast<size_t>(to_idx);
-        mask[idx] = 1;
+        const uint16_t from_idx = static_cast<uint16_t>(sf.index()); // 0..63
+        const uint16_t to_idx   = static_cast<uint16_t>(st.index()); // 0..63
+        const uint16_t idx = static_cast<uint16_t>(from_idx * 64 + to_idx); // 0..4095
+
+        out.mask[idx] = 1;
+        out.idxs.push_back(idx);
     }
 
-    return mask;
+    return out;
 }
 
 int Board::piece_at(int square) const {
