@@ -396,15 +396,18 @@ PYBIND11_MODULE(_core, m) {
                py::list out;
                for (MCTSNode* n : t.pending_nodes_) {
                     if (!n) continue;
+                    // 64-bit zobrist key for this node
+                    uint64_t z = n->zobrist;
                     // encode stacked STM-POV planes for the node's board
                     py::array_t<uint8_t> planes = ::stacked_planes_stm_pov(n->board, nplanes);
                     // encode legal-move mask for the same board (shape (4096,))
                     py::array_t<uint8_t> mask   = legal_move_mask_py(n->board);
-                    out.append(py::make_tuple(planes, mask));
+                    // return (zobrist, planes, mask)
+                    out.append(py::make_tuple(z, planes, mask));
                }
                return out;
                }, py::arg("nplanes") = 1,
-               "Encode pending leaves as [(planes, legal_mask), ...].\n"
+               "Encode pending leaves as [(zobrist, planes, legal_mask), ...].\n"
                "planes: (8,8,29*nplanes) uint8 array (STM-POV). mask: (4096,) uint8 legal-move mask.")
 
           .def("apply_result",
@@ -549,43 +552,38 @@ PYBIND11_MODULE(_core, m) {
           .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
-               std::vector<std::tuple<uint64_t, float, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
+               std::vector<std::tuple<uint64_t, float, std::vector<float>>> vec;
+          
                // Try to reserve if length is available
                try {
                     py::ssize_t n = py::len(batch);
                     if (n > 0) vec.reserve(static_cast<size_t>(n));
-               } catch (...) {
-                    /* ignore if not sized */
-               }
+               } catch (...) {}
+
+               auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
+                    py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
+                    if (!arr) throw std::runtime_error(
+                         "raw_cache_bulk_insert: expected array convertible to float32");
+                    py::buffer_info info = arr.request();
+                    float* data = static_cast<float*>(info.ptr);
+                    size_t n = static_cast<size_t>(info.size);
+                    return std::vector<float>(data, data + n);
+               };
 
                for (py::handle item_handle : batch) {
                     py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
-                    if (t.size() != 6) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, value, p_from, p_to, p_piece, p_promo)");
-
+                    if (t.size() != 3) throw std::runtime_error(
+                         "raw_cache_bulk_insert: each item must be (key, value, policy_vector)");
                     uint64_t key = t[0].cast<uint64_t>();
                     float net_value = t[1].cast<float>();
-
-                    auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
-                         py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
-                         if (!arr) throw std::runtime_error("raw_cache_bulk_insert: expected array convertible to float32");
-                         py::buffer_info info = arr.request();
-                         float* data = static_cast<float*>(info.ptr);
-                         size_t n = static_cast<size_t>(info.size);
-                         return std::vector<float>(data, data + n);
-                    };
-
-                    std::vector<float> pf = to_vec(t[2]);
-                    std::vector<float> pt = to_vec(t[3]);
-                    std::vector<float> pp = to_vec(t[4]);
-                    std::vector<float> pr = to_vec(t[5]);
-
-                    vec.emplace_back(key, net_value, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
+                    std::vector<float> policy = to_vec(t[2]);
+                    if (policy.size() != 4096) throw std::runtime_error(
+                         "raw_cache_bulk_insert: policy_vector must have length 4096");
+                    vec.emplace_back(key, net_value, std::move(policy));
                }
 
-               // Move the batch into the RawPolicyCache
                raw_policy_cache().bulk_insert(std::move(vec));
-               }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
-               "Each batch item must be (key:int, value:float, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+          });
           
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_stats", []() {
