@@ -480,18 +480,11 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
     const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
 
     for (const auto &u : ucis) {
-        // get canonical from/to (handles castling remap inside move_to_labels)
-        int from_idx, to_idx, pc, pr;
-        std::tie(from_idx, to_idx, pc, pr) = move_to_labels(u);
-
-        // convert to chess::Square so we can flip for STM if needed (match legal_move_mask)
-        chess::Square sf(static_cast<int>(from_idx));
-        chess::Square st(static_cast<int>(to_idx));
-        if (!stm_white) {
-            sf.flip();
-            st.flip();
-        }
-
+        if (u.size() < 4) throw std::invalid_argument("invalid UCI: " + u);
+        auto [from_idx, to_idx, pc, pr] = move_to_labels(u); // handles castling remap
+        chess::Square sf(static_cast<chess::Square::underlying>(from_idx));
+        chess::Square st(static_cast<chess::Square::underlying>(to_idx));
+        if (!stm_white) { sf.flip(); st.flip(); }
         uint16_t idx = static_cast<uint16_t>(sf.index() * 64 + st.index());
         out.push_back(idx);
     }
@@ -511,9 +504,17 @@ LegalMaskandMap Board::legal_move_mask() const {
     out.uci_idx_pairs.reserve(ml.size());
 
     for (const auto &mv : ml) {
-        // compute STM-POV index (flip squares for black so model index matches)
+        // engine from/to (may be rook for castling)
         chess::Square sf = mv.from();
         chess::Square st = mv.to();
+
+        // remap castling to canonical king destination
+        if (mv.typeOf() == chess::Move::CASTLING) {
+            const bool king_side = (mv.to() > mv.from());
+            st = chess::Square::castling_king_square(king_side, board_.sideToMove());
+        }
+
+        // compute STM-POV index (flip squares for black so model index matches)
         if (!stm_white) {
             sf.flip();
             st.flip();
@@ -532,11 +533,9 @@ LegalMaskandMap Board::legal_move_mask() const {
         out.uci_idx_pairs.emplace_back(std::move(uci), idx);
     }
 
-    // leave out.uci_idx_lookup as nullptr by default; caller can set it to point to
-    // an external, read-only lookup if desired.
-
     return out;
 }
+
 
 int Board::piece_at(int square) const {
     chess::Square s(static_cast<chess::Square::underlying>(square));
