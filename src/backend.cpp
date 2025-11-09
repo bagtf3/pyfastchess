@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm> 
 #include <cstring>
+#include <array>
 #include "chess.hpp" 
 #include "backend.hpp"
 #include "evaluator.hpp"
@@ -247,17 +248,9 @@ std::string Board::side_to_move() const {
 }
 
 std::string Board::enpassant_sq() const {
-    // Safest: parse FEN field #4 (0-based idx 3)
-    // FEN: pieces side castle ep halfmove fullmove
-    std::string f = board_.getFen(true);
-    std::istringstream iss(f);
-    std::string parts[6];
-    for (int i = 0; i < 6 && (iss >> parts[i]); ++i) {}
-
-    if (!parts[3].empty()) {
-        return parts[3]; // already "-" or "e3"
-    }
-    return "-";
+    const chess::Square sq = board_.enpassantSq();   // cheap accessor (returns Square::NO_SQ if none)
+    if (sq == chess::Square::NO_SQ) return std::string("-");
+    return static_cast<std::string>(sq);
 }
 
 std::string Board::castling_rights() const {
@@ -829,183 +822,31 @@ static void make_frame_14_bitboards(const backend::Board& b, uint8_t out[8*8*14]
     }
 }
 
-// --- STM-POV 29-plane frame builder -----------------
-// Place this in the same anonymous namespace as make_frame_14_bitboards
-// Layout (planes 0..28):
-// 0-5   : "us" piece bitboards (pawn, knight, bishop, rook, queen, king)
-// 6-11  : "us" attack maps per piece-type (squares attacked BY each us piece-type)
-// 12-17 : "them" piece bitboards (pawn..king)
-// 18-23 : "them" attack maps per piece-type
-// 24    : us kingside castling (full plane 0/1)
-// 25    : us queenside castling
-// 26    : them kingside castling
-// 27    : them queenside castling
-// 28    : en-passant file plane (full file set to 1 if ep exists)
-//
-// This ALWAYS orients to White's POV. If side-to-move is Black,
-// we map canonical-square -> STM-POV by vertically flipping the square
-// using chess::Square::flip() (preserves file order; no 180° rotation).
-// --- STM-POV 29-plane frame builder -----------------
-// See comments in previous messages about plane layout.
-static void make_frame_29_bitboards(const backend::Board& b, uint8_t out[8*8*29]) {
-    std::fill(out, out + 8*8*29, (uint8_t)0);
+static constexpr int BASE = 9;
+static constexpr int PAWN = 1;
+static constexpr int KNIGHT = 2;
+static constexpr int BISHOP = 3;
+static constexpr int ROOK = 4;
+static constexpr int QUEEN = 5;
+static constexpr int KING_NO_CASTLE = 6;
+static constexpr int KING_KS_ONLY = 7;
+static constexpr int KING_QS_ONLY = 8;
+static constexpr int KING_BOTH = 9;
+static constexpr int EP_POSSIBLE = 19;
 
+// board_to_64_tokens: bitboard-based implementation
+static inline int get_king_type_for_color(const backend::Board &b, chess::Color color) {
+    // use the raw chess board to access typed castling rights
     const chess::Board &rb = b.raw_board();
+    const auto cr = rb.castlingRights(); // typed CastlingRights object
 
-    // gather per-piece bitboards (pawn=0, knight=1, bishop=2, rook=3, queen=4, king=5)
-    uint64_t white_by_pt[6] = {0}, black_by_pt[6] = {0};
-    for (int pt = 0; pt < 6; ++pt) {
-        auto pt_e = chess::PieceType(static_cast<chess::PieceType::underlying>(pt));
-        white_by_pt[pt] = rb.pieces(pt_e, chess::Color::WHITE).getBits();
-        black_by_pt[pt] = rb.pieces(pt_e, chess::Color::BLACK).getBits();
-    }
+    const bool ks = cr.has(color, chess::Board::CastlingRights::Side::KING_SIDE);
+    const bool qs = cr.has(color, chess::Board::CastlingRights::Side::QUEEN_SIDE);
 
-    // ---- compute attack masks per piece-type ----
-    uint64_t white_attacks_by_pt[6] = {0}, black_attacks_by_pt[6] = {0};
-
-    // pawn attacks: use template helpers for left/right pawn attacks
-    white_attacks_by_pt[0] =
-        chess::attacks::pawnLeftAttacks<
-            static_cast<chess::Color::underlying>(chess::Color::WHITE)
-        >(chess::Bitboard(white_by_pt[0])).getBits()
-      | chess::attacks::pawnRightAttacks<
-            static_cast<chess::Color::underlying>(chess::Color::WHITE)
-        >(chess::Bitboard(white_by_pt[0])).getBits();
-
-    black_attacks_by_pt[0] =
-        chess::attacks::pawnLeftAttacks<
-            static_cast<chess::Color::underlying>(chess::Color::BLACK)
-        >(chess::Bitboard(black_by_pt[0])).getBits()
-      | chess::attacks::pawnRightAttacks<
-            static_cast<chess::Color::underlying>(chess::Color::BLACK)
-        >(chess::Bitboard(black_by_pt[0])).getBits();
-
-    // knights/bishops/rooks/queens/kings: per-piece iteration (one attacks call per piece)
-    auto accumulate_attacks_from_mask = [&](uint64_t mask, uint64_t *out_by_pt, int pt_idx) {
-        while (mask) {
-#ifdef _MSC_VER
-            unsigned long idx;
-            _BitScanForward64(&idx, mask);
-            int sq = static_cast<int>(idx);
-#else
-            int sq = __builtin_ctzll(mask);
-#endif
-            mask &= (mask - 1ULL);
-
-            uint64_t atk = 0ULL;
-            switch (pt_idx) {
-                case 1: // knight
-                    atk = chess::attacks::knight(chess::Square(sq)).getBits();
-                    break;
-                case 2: // bishop
-                    atk = chess::attacks::bishop(chess::Square(sq), rb.occ()).getBits();
-                    break;
-                case 3: // rook
-                    atk = chess::attacks::rook(chess::Square(sq), rb.occ()).getBits();
-                    break;
-                case 4: // queen
-                    atk = chess::attacks::queen(chess::Square(sq), rb.occ()).getBits();
-                    break;
-                case 5: // king
-                    atk = chess::attacks::king(chess::Square(sq)).getBits();
-                    break;
-                default: break;
-            }
-            out_by_pt[pt_idx] |= atk;
-        }
-    };
-
-    for (int pt = 1; pt <= 5; ++pt) {
-        accumulate_attacks_from_mask(white_by_pt[pt], white_attacks_by_pt, pt);
-        accumulate_attacks_from_mask(black_by_pt[pt], black_attacks_by_pt, pt);
-    }
-
-    // parse ep-file via the Board wrapper (returns "-" or like "e3")
-    int ep_file = -1;
-    std::string ep_s = b.enpassant_sq();
-    if (!ep_s.empty() && ep_s != "-") {
-        try {
-            chess::Square esf(ep_s);               // construct from algebraic like "e3"
-            ep_file = esf.index() & 7;             // 0..7 file
-        } catch (...) {
-            ep_file = -1;
-        }
-    }
-
-    const bool stm_white = (b.side_to_move() == "w");
-
-    // choose which arrays correspond to "us" and "them" (us==side_to_move)
-    uint64_t us_by_pt[6], them_by_pt[6], us_attacks[6], them_attacks[6];
-    if (stm_white) {
-        for (int i=0;i<6;++i) { us_by_pt[i] = white_by_pt[i]; them_by_pt[i] = black_by_pt[i]; us_attacks[i] = white_attacks_by_pt[i]; them_attacks[i] = black_attacks_by_pt[i]; }
-    } else {
-        for (int i=0;i<6;++i) { us_by_pt[i] = black_by_pt[i]; them_by_pt[i] = white_by_pt[i]; us_attacks[i] = black_attacks_by_pt[i]; them_attacks[i] = white_attacks_by_pt[i]; }
-    }
-
-    // castling string once
-    std::string cs = b.castling_rights();
-    bool us_k = false, us_q = false, them_k = false, them_q = false;
-    if (stm_white) {
-        us_k = cs.find('K') != std::string::npos;
-        us_q = cs.find('Q') != std::string::npos;
-        them_k = cs.find('k') != std::string::npos;
-        them_q = cs.find('q') != std::string::npos;
-    } else {
-        us_k = cs.find('k') != std::string::npos;
-        us_q = cs.find('q') != std::string::npos;
-        them_k = cs.find('K') != std::string::npos;
-        them_q = cs.find('Q') != std::string::npos;
-    }
-
-    // Iterate canonical squares, compute STM-POV square by vertical flip if needed,
-    // then set the 29 planes at that STM-POV cell using canonical bit positions.
-    for (int sq = 0; sq < 64; ++sq) {
-        // STM-POV mapping for this square:
-        int sq_actual;
-        if (stm_white) {
-            sq_actual = sq;
-        } else {
-            chess::Square s(static_cast<int>(sq));
-            s.flip();                // vertical flip: rank -> 7-r ; preserves file
-            sq_actual = s.index();
-        }
-
-        int r = sq_actual / 8;
-        int c = sq_actual % 8;
-        int base = (r * 8 + c) * 29;
-
-        // planes 0..5 : us pieces by pt  (read from canonical square 'sq')
-        for (int pt = 0; pt < 6; ++pt) {
-            if (((us_by_pt[pt] >> sq) & 1ULL) != 0ULL) out[base + pt] = 1;
-        }
-
-        // planes 6..11 : us attack maps
-        for (int pt = 0; pt < 6; ++pt) {
-            if (((us_attacks[pt] >> sq) & 1ULL) != 0ULL) out[base + 6 + pt] = 1;
-        }
-
-        // planes 12..17 : them pieces by pt
-        for (int pt = 0; pt < 6; ++pt) {
-            if (((them_by_pt[pt] >> sq) & 1ULL) != 0ULL) out[base + 12 + pt] = 1;
-        }
-
-        // planes 18..23 : them attack maps
-        for (int pt = 0; pt < 6; ++pt) {
-            if (((them_attacks[pt] >> sq) & 1ULL) != 0ULL) out[base + 18 + pt] = 1;
-        }
-
-        // planes 24..27: castling (same full-plane flag for every cell)
-        out[base + 24] = us_k ? 1 : 0;
-        out[base + 25] = us_q ? 1 : 0;
-        out[base + 26] = them_k ? 1 : 0;
-        out[base + 27] = them_q ? 1 : 0;
-
-        // plane 28: en-passant file plane (if ep_file defined, set any canonical sq with same file)
-        if (ep_file >= 0) {
-            int file_idx = sq & 7;
-            if (file_idx == ep_file) out[base + 28] = 1;
-        }
-    }
+    if (ks && qs) return KING_BOTH;
+    if (ks)       return KING_KS_ONLY;
+    if (qs)       return KING_QS_ONLY;
+    return KING_NO_CASTLE;
 }
 
 } // anonymous
@@ -1035,28 +876,77 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
     return out;
 }
 
-std::vector<uint8_t> stacked_planes_bytes_stm_pov(const Board& b, int num_frames) {
-    constexpr int H = 8, W = 8, C = 29;
-    int F = (num_frames > 0) ? num_frames : 1;
-    std::vector<uint8_t> out((size_t)H * W * C * F);
+// board_to_64_tokens: bitboard-based implementation
+std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) {
+    std::array<int16_t,64> out;
+    out.fill(0);
 
-    // copy board so unmake() is safe
-    Board tmp = b;
-    std::vector<uint8_t> frame(H * W * C);
+    using Color = chess::Color;
+    using PieceType = chess::PieceType;
+    using Square = chess::Square;
 
-    // Fill frames from newest to oldest (compat with previous stacked_planes)
-    for (int f = F - 1; f >= 0; --f) {
-        make_frame_29_bitboards(tmp, frame.data());
-        // frame layout is (r*c)*C ; out layout packs frames per cell
-        for (int r = 0; r < H; ++r) {
-            for (int c = 0; c < W; ++c) {
-                uint8_t* src = frame.data() + (r * W + c) * C;
-                uint8_t* dst = out.data() + ((r * W + c) * C * F + f * C);
-                std::memcpy(dst, src, C);
+    const chess::Board &rb = board.raw_board();
+
+    // STM color and quick flag
+    const Color stm = rb.sideToMove();
+    const bool stm_is_white = (stm == Color::WHITE);
+
+    // compute king-types in STM-as-white semantics
+    int wht_king = stm_is_white ? get_king_type_for_color(board, Color::WHITE)
+                                : get_king_type_for_color(board, Color::BLACK);
+    int blk_king = stm_is_white ? get_king_type_for_color(board, Color::BLACK)
+                                : get_king_type_for_color(board, Color::WHITE);
+
+    // EP: cheap accessor (Square or NO_SQ). convert to index and flip if needed.
+    Square ep_sq = rb.enpassantSq();
+    if (ep_sq != Square::NO_SQ) {
+        // adjust this line if Square requires
+        int ep_idx = ep_sq.index();
+        if (!stm_is_white) ep_idx ^= 56;
+        out[ep_idx] = EP_POSSIBLE;
+    }
+
+    // helper lambda to write a token at a square index (STM flipped if needed)
+    auto write_token_at_sq = [&](int sq, int16_t token) {
+        const int idx = stm_is_white ? sq : (sq ^ 56);
+        out[idx] = token;
+    };
+
+    // Iterate piece types and colors using bitboards. This avoids scanning empty squares.
+    // NOTE: adapt casting from Bitboard -> uint64_t if your Bitboard type uses .bits() or .raw()
+    const std::array<PieceType,6> piece_types = {
+        PieceType::PAWN, PieceType::KNIGHT, PieceType::BISHOP,
+        PieceType::ROOK, PieceType::QUEEN, PieceType::KING
+    };
+
+    for (PieceType pt : piece_types) {
+        // loop white then black to compute tokens (we need color relative to stm)
+        for (Color col : { Color::WHITE, Color::BLACK }) {
+            // get bitboard for this piece type and color
+            // if Bitboard is not directly convertible, replace the cast with `.bits()` or `.raw()`
+            uint64_t bb = rb.pieces(pt, col).getBits();
+
+            while (bb) {
+                int sq = ctzll_u64(bb);      // 0..63 index of least-significant bit
+                bb &= bb - 1ULL;             // pop lsb
+
+                // token base depends on whether this piece is same color as STM
+                const bool same_as_stm = (col == stm);
+                const int base = same_as_stm ? 0 : BASE;
+
+                if (pt != PieceType::KING) {
+                    const int16_t token = static_cast<int16_t>(base + static_cast<int>(pt));
+                    write_token_at_sq(sq, token);
+                } else {
+                    // king tokens depend on castling rights computed above
+                    int king_val = same_as_stm ? wht_king : blk_king;
+                    const int16_t token = static_cast<int16_t>(base + king_val);
+                    write_token_at_sq(sq, token);
+                }
             }
         }
-        if (!tmp.unmake()) break;
     }
+
     return out;
 }
 

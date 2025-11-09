@@ -25,15 +25,12 @@ static py::array_t<uint8_t> stacked_planes_bitboards(const backend::Board& b, in
     return arr;
 }
 
-// wrapper: STM-agnostic stacked frames using bitboard encoder (8,8,29 * num_frames)
-static py::array_t<uint8_t> stacked_planes_stm_pov(const backend::Board& b, int num_frames = 1) {
-    auto v = backend::stacked_planes_bytes_stm_pov(b, num_frames);
-    py::ssize_t H = 8, W = 8, C = 29;
-    std::vector<py::ssize_t> shape = { H, W, C * static_cast<py::ssize_t>(num_frames) };
-    py::array_t<uint8_t> arr(shape);
-    // memcopy into numpy array (dest, src, bytes)
-    std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(v.size() * sizeof(uint8_t)));
-    return arr;
+// wrapper: board_to_64_tokens -> returns np.int16 array (64,)
+static py::array_t<int16_t> board_to_64_tokens_py(const backend::Board& b) {
+    auto arr = backend::board_to_64_tokens(b); // std::array<int16_t,64>
+    py::array_t<int16_t> out({ static_cast<py::ssize_t>(64) });
+    std::memcpy(out.mutable_data(), arr.data(), 64 * sizeof(int16_t));
+    return out;
 }
 
 // wrapper returning np.uint8 array of shape (4096,)
@@ -177,14 +174,6 @@ PYBIND11_MODULE(_core, m) {
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
-
-          .def("stacked_planes_stm_pov", &stacked_planes_stm_pov,
-               py::arg("num_frames") = 1,
-               "Return (8,8,29*num_frames) uint8 array encoding a STM-agnostic view:\n"
-               "planes 0..5 = us pieces, 6..11 = us attacked-squares per piece-type,\n"
-               "12..17 = them pieces, 18..23 = them attacked-squares per piece-type,\n"
-               "24..27 = castling rights (us_k, us_q, them_k, them_q), 28 = ep-file plane.\n"
-               "Orientation is always White POV; if Black to move, squares are mirrored.")
           
           .def("legal_move_mask", &legal_move_mask_py,
                "Return a (4096,) uint8 array mask of legal moves. Index = from*64 + to, STM-agnostic.")
@@ -392,35 +381,32 @@ PYBIND11_MODULE(_core, m) {
                return out;
                }, py::arg("nplanes") =5,"Encode pending leaves: (zobrist, planes).")
 
-          .def("pending_encoded_stm_pov", [](MCTSTree& t, int nplanes) {
-               py::list out;
-               for (MCTSNode* n : t.pending_nodes_) {
-                    if (!n) continue;
+          .def("pending_encoded_64_tokens", [](MCTSTree& t) {
+          py::list out;
+          for (MCTSNode* n : t.pending_nodes_) {
+               if (!n) continue;
 
-                    // 1) zobrist and planes
-                    uint64_t z = n->zobrist;
-                    py::array_t<uint8_t> planes = ::stacked_planes_stm_pov(n->board, nplanes);
+               uint64_t z = n->zobrist;
 
-                    // 2) produce a LegalMaskandMap for this node and move it to the heap
-                    //    so we can attach it to the node without copying the contents.
-                    backend::LegalMaskandMap lm = n->board.legal_move_mask();
-                    // move 'lm' into a heap object and keep a shared_ptr on the node
-                    auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
-                    // store as const-shared to indicate read-only usage by other consumers
-                    n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+               // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
+               py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
 
-                    // 3) convert mask -> numpy array (copy 4096 bytes into Python)
-                    const size_t mask_len = lm_sp->mask.size(); // should be 4096
-                    py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
-                    std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
+               // produce LegalMaskandMap and attach it to node (move -> heap)
+               backend::LegalMaskandMap lm = n->board.legal_move_mask();
+               auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
+               n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
 
-                    // 4) append (zobrist, planes, mask) as before
-                    out.append(py::make_tuple(z, planes, mask));
-               }
-               return out;
-               }, py::arg("nplanes") = 1,
-               "Encode pending leaves as [(zobrist, planes, legal_mask), ...].\n"
-               "planes: (8,8,29*nplanes) uint8 array (STM-POV). mask: (4096,) uint8 legal-move mask.")
+               // convert mask -> numpy array (copy)
+               const size_t mask_len = lm_sp->mask.size(); // should be 4096
+               py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
+               std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
+
+               // append (zobrist, tokens64, mask)
+               out.append(py::make_tuple(z, tokens, mask));
+          }
+          return out;
+          }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
+          "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4096,) uint8 legal-move mask.")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,

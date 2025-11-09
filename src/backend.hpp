@@ -32,8 +32,9 @@ class Board;
 // Fast bitboard-based variant — same output layout as stacked_planes_bytes,
 // but built directly from chess::Bitboard u64s for speed.
 std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_frames = 5);
-// Fast bitboard-based STM-agnostic encoder (8*8*29 * num_frames)
-std::vector<uint8_t> stacked_planes_bytes_stm_pov(const Board& b, int num_frames = 1);
+
+// Return token ids, STM made white. Indexing is 0..63 (a1..h8), int16_t.
+std::array<int16_t, 64> board_to_64_tokens(const Board& b);
 
 struct LegalMaskandMap {
     // 4096-byte mask where idx = from*64 + to (STM-POV)
