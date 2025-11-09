@@ -823,11 +823,6 @@ static void make_frame_14_bitboards(const backend::Board& b, uint8_t out[8*8*14]
 }
 
 static constexpr int BASE = 9;
-static constexpr int PAWN = 1;
-static constexpr int KNIGHT = 2;
-static constexpr int BISHOP = 3;
-static constexpr int ROOK = 4;
-static constexpr int QUEEN = 5;
 static constexpr int KING_NO_CASTLE = 6;
 static constexpr int KING_KS_ONLY = 7;
 static constexpr int KING_QS_ONLY = 8;
@@ -934,11 +929,12 @@ std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) 
                 const bool same_as_stm = (col == stm);
                 const int base = same_as_stm ? 0 : BASE;
 
-                if (pt != PieceType::KING) {
-                    const int16_t token = static_cast<int16_t>(base + static_cast<int>(pt));
+                if (pt != chess::PieceType::KING) {
+                    // NOTE: chess::PieceType is 0-based in C++; Python uses 1..6.
+                    const int piece_val = static_cast<int>(pt) + 1; // map 0..5 -> 1..6
+                    const int16_t token = static_cast<int16_t>(base + piece_val);
                     write_token_at_sq(sq, token);
                 } else {
-                    // king tokens depend on castling rights computed above
                     int king_val = same_as_stm ? wht_king : blk_king;
                     const int16_t token = static_cast<int16_t>(base + king_val);
                     write_token_at_sq(sq, token);

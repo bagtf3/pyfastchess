@@ -174,7 +174,11 @@ PYBIND11_MODULE(_core, m) {
                py::arg("num_frames")=5,
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
-          
+
+          .def("encode_64_tokens", &board_to_64_tokens_py,
+               "Return a (64,) int16 NumPy array of token ids (STM-made-white canonical).\n"
+               "This is the 1D token encoding alternative to stacked_planes and takes no arguments.")
+
           .def("legal_move_mask", &legal_move_mask_py,
                "Return a (4096,) uint8 array mask of legal moves. Index = from*64 + to, STM-agnostic.")
 
