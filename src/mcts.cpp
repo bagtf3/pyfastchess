@@ -4,15 +4,12 @@
 #include <atomic>
 #include <mutex>
 #include <iostream>
+#include <random>
+#include <iomanip>
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
 #include "singleton_registry.hpp"
-
-#include <algorithm>
-#include <numeric>
-#include <iostream>
-#include <iomanip>
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -98,9 +95,9 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
     prior_engine_raw_ = get_prior_engine_raw();
 
     // prebuild QOptions once
-    qopts_shallow_.max_qply = 5;
+    qopts_shallow_.max_qply = 3;
     qopts_shallow_.max_qcaptures = 24;
-    qopts_shallow_.time_limit_ms = 3;
+    qopts_shallow_.time_limit_ms = 2;
 }
 
 // Internal variant of collect_one_leaf that reports reason
@@ -348,6 +345,79 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
     }
 
     node->is_expanded = true;
+}
+
+void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
+    if (eps <= 0.0f) return;
+    if (alpha <= 0.0f) return;
+
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    MCTSNode* r = root_.get();
+    if (!r) return;
+
+    // Ensure root has priors/legals: expand with uniform if not expanded
+    if (!r->is_expanded) {
+        expand_with_uniform_priors(r);
+    }
+
+    // gather legal moves and current priors
+    std::vector<std::string> legal;
+    std::vector<float> pri;
+    legal.reserve(r->P.size());
+    pri.reserve(r->P.size());
+    for (const auto &kv : r->P) {
+        legal.push_back(kv.first);
+        pri.push_back(kv.second);
+    }
+    const size_t n = legal.size();
+    if (n == 0) return;
+
+    // sample gamma per component to make Dirichlet
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::gamma_distribution<float> gdist(alpha, 1.0f);
+
+    std::vector<float> dir(n);
+    double dir_sum = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        dir[i] = gdist(gen);
+        dir_sum += (double)dir[i];
+    }
+    if (dir_sum <= 0.0) {
+        // fallback to uniform if numerical trouble
+        const float u = 1.0f / static_cast<float>(n);
+        for (size_t i = 0; i < n; ++i) dir[i] = u;
+    } else {
+        const float inv = 1.0f / static_cast<float>(dir_sum);
+        for (size_t i = 0; i < n; ++i) dir[i] *= inv;
+    }
+
+    // mix: new_p = (1 - eps) * p + eps * dir
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        float p0 = pri[i];
+        float pnew = (1.0f - eps) * p0 + eps * dir[i];
+        // optional clip: keep values >= 0
+        if (pnew < 0.0f) pnew = 0.0f;
+        pri[i] = pnew;
+        s += static_cast<double>(pri[i]);
+    }
+
+    // renormalize (should be >0)
+    if (s > 0.0) {
+        const float invs = static_cast<float>(1.0 / s);
+        // rewrite root_->P (must preserve same iteration order used above)
+        size_t idx = 0;
+        for (auto &kv : r->P) {
+            kv.second = pri[idx++] * invs;
+        }
+    } else {
+        // fallback to uniform
+        const float u = 1.0f / static_cast<float>(n);
+        for (auto &kv : r->P) kv.second = u;
+    }
+
+    // children map should already have placeholders (expand_with_* did that).
 }
 
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {

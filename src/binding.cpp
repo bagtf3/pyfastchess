@@ -424,6 +424,9 @@ PYBIND11_MODULE(_core, m) {
                t.resolve_pending();
           }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
 
+          .def("add_root_dirichlet_noise", &MCTSTree::add_root_dirichlet_noise,
+               py::arg("eps") = 0.25f, py::arg("alpha") = 0.1f)
+          
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
           .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
 

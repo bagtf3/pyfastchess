@@ -130,6 +130,9 @@ public:
     // Accessors
     MCTSNode* root() { return root_.get(); }
     const MCTSNode* root() const { return root_.get(); }
+    
+    // Add Dirichlet noise to root priors (thread-safe)
+    void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
 
     bool advance_root(const std::string& move_uci);
     int  epoch() const { return epoch_; }
