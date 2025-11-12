@@ -36,12 +36,17 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
 // Return token ids, STM made white. Indexing is 0..63 (a1..h8), int16_t.
 std::array<int16_t, 64> board_to_64_tokens(const Board& b);
 
+static constexpr size_t MOVE_TO_RANKS = 11;         // 8 real ranks + 3 promo ranks
+static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_RANKS * 8; // 88
+static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 5632
+
 struct LegalMaskandMap {
-    // 4096-byte mask where idx = from*64 + to (STM-POV)
+    // mask where idx = from*MOVE_TO_WIDTH + to_slot (STM-POV)
+    // to_slot = file + rank_index*8, where rank_index in [0..7] = real board ranks,
+    // and rank_index in [8..10] encodes underpromotions: 8=N, 9=B, 10=R.
     std::vector<uint8_t> mask;
 
     // compact per-move list: pair<uci_string, stm_pov_idx>
-    // this is owned storage; callers may use this or attach an external lookup.
     std::vector<std::pair<std::string, uint16_t>> uci_idx_pairs;
 
     // optional non-owning pointer to an external read-only lookup that maps
@@ -113,7 +118,6 @@ public:
     // Returns a vector of (from*64 + to) indices in STM-POV order for the supplied UCIs.
     std::vector<uint16_t> moves_to_indices(const std::vector<std::string>& ucis) const;
 
-    // Return a 4096-length vector (from*64 + to) of 0/1 bytes indicating legal moves.
     LegalMaskandMap legal_move_mask() const;
 
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king

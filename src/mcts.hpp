@@ -142,7 +142,7 @@ public:
     std::pair<float,int> depth_stats() const;
     
     std::vector<PVItem> principal_variation(int max_len = 24) const;
-    // Optional runtime updater (you can keep it but if you never swap evaluators it's unused)
+    // Optional runtime updater
     void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
     std::shared_ptr<evaluator::Evaluator> get_evaluator() const;
 
@@ -162,6 +162,7 @@ private:
     int epoch_ = 0;
     
     void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
+    void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
     void expand_with_priors(
         MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);

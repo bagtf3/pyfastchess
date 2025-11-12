@@ -474,18 +474,44 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
 
     for (const auto &u : ucis) {
         if (u.size() < 4) throw std::invalid_argument("invalid UCI: " + u);
-        auto [from_idx, to_idx, pc, pr] = move_to_labels(u); // handles castling remap
+
+        // get robust from/to (handles castling remap) using move_to_labels
+        auto [from_idx, to_idx_dummy, pc, pr] = move_to_labels(u);
+
+        // compute file/rank from the nominal destination square
+        int to_sq = to_idx_dummy;            // 0..63
+        int to_file = to_sq % 8;
+        int to_rank = to_sq / 8;             // 0..7
+
+        // check if this UCI encodes an explicit promotion char (u[4])
+        int to_rank_index = to_rank;         // default: real board rank
+        if (u.size() > 4) {
+            char ch = std::tolower(static_cast<unsigned char>(u[4]));
+            if (ch == 'n') to_rank_index = 8;   // knight underpromo
+            else if (ch == 'b') to_rank_index = 9;
+            else if (ch == 'r') to_rank_index = 10;
+            else /* 'q' or anything else */ to_rank_index = to_rank; // queen -> real rank
+        }
+
         chess::Square sf(static_cast<chess::Square::underlying>(from_idx));
-        chess::Square st(static_cast<chess::Square::underlying>(to_idx));
+        chess::Square st(static_cast<chess::Square::underlying>(to_sq));
+
         if (!stm_white) { sf.flip(); st.flip(); }
-        uint16_t idx = static_cast<uint16_t>(sf.index() * 64 + st.index());
+
+        const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
+        // recompute file after flipping (to be safe)
+        const int st_index = st.index();
+        const int st_file = st_index % 8;
+        // final to_slot = file + rank_index*8
+        const uint16_t to_slot = static_cast<uint16_t>(st_file + to_rank_index * 8);
+        const uint16_t idx = static_cast<uint16_t>(from_slot * MOVE_TO_WIDTH + to_slot);
         out.push_back(idx);
     }
     return out;
 }
 
 LegalMaskandMap Board::legal_move_mask() const {
-    constexpr size_t N = 64 * 64;
+    constexpr size_t N = 64 * MOVE_TO_WIDTH; // 5632
     LegalMaskandMap out;
     out.mask.assign(N, 0);
 
@@ -497,7 +523,6 @@ LegalMaskandMap Board::legal_move_mask() const {
     out.uci_idx_pairs.reserve(ml.size());
 
     for (const auto &mv : ml) {
-        // engine from/to (may be rook for castling)
         chess::Square sf = mv.from();
         chess::Square st = mv.to();
 
@@ -507,22 +532,36 @@ LegalMaskandMap Board::legal_move_mask() const {
             st = chess::Square::castling_king_square(king_side, board_.sideToMove());
         }
 
-        // compute STM-POV index (flip squares for black so model index matches)
+        // compute STM-POV flip first
         if (!stm_white) {
             sf.flip();
             st.flip();
         }
 
-        const uint16_t from_idx = static_cast<uint16_t>(sf.index()); // 0..63
-        const uint16_t to_idx   = static_cast<uint16_t>(st.index()); // 0..63
-        const uint16_t idx = static_cast<uint16_t>(from_idx * 64 + to_idx); // 0..4095
+        const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
 
-        out.mask[idx] = 1;
-
-        // convert move to UCI (engine's POV; castling/promotion handled by moveToUci)
+        // convert move to UCI string (engine's POV)
         std::string uci = chess::uci::moveToUci(mv);
 
-        // store pair (uci, index) in the owned vector
+        // get base file/rank of st (after flip)
+        const int st_index = st.index(); // 0..63
+        const int st_file = st_index % 8;
+        const int st_rank = st_index / 8; // 0..7
+
+        // determine to_rank_index (handle underpromotions)
+        int to_rank_index = st_rank; // default
+        if (uci.size() > 4) {
+            char ch = std::tolower(static_cast<unsigned char>(uci[4]));
+            if (ch == 'n') to_rank_index = 8;
+            else if (ch == 'b') to_rank_index = 9;
+            else if (ch == 'r') to_rank_index = 10;
+            else to_rank_index = st_rank; // queen => real rank
+        }
+
+        const uint16_t to_slot = static_cast<uint16_t>(st_file + to_rank_index * 8);
+        const uint16_t idx = static_cast<uint16_t>(from_slot * MOVE_TO_WIDTH + to_slot);
+
+        out.mask[idx] = 1;
         out.uci_idx_pairs.emplace_back(std::move(uci), idx);
     }
 

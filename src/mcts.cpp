@@ -299,15 +299,14 @@ void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
     }
 }
 
-void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
+// new helper: perform expansion -- ASSUMES caller holds tree_mutex_
+void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     if (!node) return;
-    std::lock_guard<std::mutex> g(tree_mutex_);
-
     node->P.clear();
     node->children.clear();
 
     const auto legal = node->board.legal_moves();
-    node->legal_moves = legal;   // caching here. will need them later
+    node->legal_moves = legal;
     const size_t n = legal.size();
     if (n == 0) {
         node->is_expanded = false;
@@ -318,12 +317,18 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     node->P.reserve(n);
     node->children.reserve(n);
 
-    for (const auto& mv : legal) {
+    for (const auto &mv : legal) {
         node->P.emplace(mv, u);
-        // Lazy child creation: mark slot but don't build board yet
-        node->children.emplace(mv, nullptr);
+        node->children.emplace(mv, nullptr); // placeholder child
     }
     node->is_expanded = true;
+}
+
+// existing function becomes thin: lock + delegate
+void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
+    if (!node) return;
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    expand_with_uniform_priors_nolock(node);
 }
 
 void MCTSTree::expand_with_priors(MCTSNode* node,
@@ -355,9 +360,9 @@ void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
     MCTSNode* r = root_.get();
     if (!r) return;
 
-    // Ensure root has priors/legals: expand with uniform if not expanded
+    // call nolock variant because we already hold tree_mutex_
     if (!r->is_expanded) {
-        expand_with_uniform_priors(r);
+        expand_with_uniform_priors_nolock(r);
     }
 
     // gather legal moves and current priors
@@ -499,7 +504,7 @@ void MCTSTree::resolve_pending() {
 
         // Pluck priors directly from the model's raw policy vector (STM-POV).
         // NOTE: This intentionally does not perform silent fallbacks or length checks.
-        const auto &policy_vec = re->p_policy; // model-provided 4096-length vector (STM-POV)
+        const auto &policy_vec = re->p_policy; // model-provided 5632-length vector (STM-POV)
 
         // Use the lookup pairs (uci, idx) from the LegalMaskandMap
         const auto &pairs = lm_sp->lookup();
@@ -509,7 +514,7 @@ void MCTSTree::resolve_pending() {
 
         for (const auto &p : pairs) {
             const std::string &uci = p.first;
-            const uint16_t idx = p.second; // 0..4095 expected
+            const uint16_t idx = p.second; // 0..5632 expected
 
             // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
             const float prob = policy_vec[idx];
