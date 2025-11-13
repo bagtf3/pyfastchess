@@ -49,7 +49,7 @@ struct MCTSNode {
     std::string uci;
 
     // --- Stats ---
-    int   N     = 0;      // visits
+    std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
     float W     = 0.0f;   // total value (white-POV)
     float Q     = 0.0f;   // mean value
 
@@ -89,6 +89,16 @@ struct MCTSNode {
     
     // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
     MCTSNode* select_child_lazy_ptr(float c_puct);
+
+    // safe, convenient accessors for the atomic visit counter
+    int visit_count() const noexcept {
+        return N.load(std::memory_order_relaxed);
+    }
+
+    // increment visits (hot path): uses relaxed ordering
+    void add_visit(int delta = 1) noexcept {
+        N.fetch_add(delta, std::memory_order_relaxed);
+    }
 
 };
 
@@ -161,7 +171,9 @@ private:
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
     
-    void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
+    // Backprop of value along path (adds v to W and recomputes Q).
+    // Visit increments happen during selection-time; backprop DOES NOT modify N.
+    void back_up_along_path(MCTSNode* leaf, float v);
     void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
     void expand_with_priors(

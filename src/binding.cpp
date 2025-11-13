@@ -310,18 +310,19 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("P", &PVItem::P)
           .def_readonly("Q", &PVItem::Q);
      
-     // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
      py::class_<MCTSNode>(m, "MCTSNode")
-          .def("__repr__", [](const MCTSNode& n){
+          .def("__repr__", [](const MCTSNode& n) {
                std::ostringstream oss;
-               oss << "<MCTSNode uci=" << (n.uci.empty() ? "\"<root>\"" : n.uci)
-                    << " N=" << n.N
+               oss << "<MCTSNode uci="
+                    << (n.uci.empty() ? "\"<root>\"" : n.uci)
+                    << " N=" << n.visit_count()
                     << " Q=" << n.Q
                     << " expanded=" << (n.is_expanded ? "1" : "0")
                     << ">";
                return oss.str();
-               })
-          .def_property_readonly("N",    [](const MCTSNode& n){ return n.N; })
+          })
+          // return int visits (not the atomic object)
+          .def_property_readonly("N", [](const MCTSNode &n) { return n.visit_count(); })
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
           .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
@@ -346,7 +347,7 @@ PYBIND11_MODULE(_core, m) {
      py::class_<MCTSTree>(m, "MCTSTree")
           .def("__repr__", [](const MCTSTree& t){
                const MCTSNode* r = t.root();
-               int    N   = r ? r->N : 0;
+               int    N   = r ? r->visit_count() : 0;
                float  Q   = r ? r->Q : 0.0f;
                size_t kids= r ? r->children.size() : 0;
                std::string stm = r ? r->board.side_to_move() : "?";
