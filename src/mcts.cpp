@@ -235,7 +235,7 @@ void MCTSTree::apply_result(
     // N was incremented at selection-time during descent.
     // Now apply the real-value contribution (W) and recompute Q along path.
     // back_up_along_path assumes it will not modify N.
-    back_up_along_path(node, value_white_pov);
+    back_up_along_path_nolock(node, value_white_pov);
 
     if (cache) {
         CacheEntry e;
@@ -248,30 +248,41 @@ void MCTSTree::apply_result(
     }
 }
 
-
+// Public wrapper: acquires the lock and delegates to the nolock variant.
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
     if (!leaf) return;
+
+    // Build path (no lock needed for traversal)
     std::vector<MCTSNode*> path;
     for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
     if (path.empty()) return;
 
-    // Validate root relationship under lock
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        if (path.back() != root_.get()) return;
-    }
-
-    // Mutate along path under lock. N is assumed incremented at selection-time
+    // Acquire lock and validate root ownership, then delegate.
     std::lock_guard<std::mutex> g(tree_mutex_);
+    if (path.back() != root_.get()) return;
+
+    back_up_along_path_nolock(leaf, v);
+}
+
+// Nolock variant: caller must hold tree_mutex_. Applies W and recomputes Q.
+// This mirrors the naming/semantics used by your expand_*_nolock helpers.
+void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
+    if (!leaf) return;
+
+    // Rebuild path under the assumption the caller holds the lock.
+    std::vector<MCTSNode*> path;
+    for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
+    if (path.empty()) return;
+    if (path.back() != root_.get()) return;
+
+    // Apply updates from root->...->leaf (iterate reversed).
     for (auto it = path.rbegin(); it != path.rend(); ++it) {
         MCTSNode* n = *it;
         n->W += v;
-        // N is atomic<int>; use relaxed load for the read under the mutex.
-        const int nvis = n->visit_count();
+        const int nvis = n->visit_count(); // atomic load (relaxed)
         n->Q = (nvis > 0) ? (n->W / static_cast<float>(nvis)) : 0.0f;
     }
 }
-
 
 void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     if (!node) return;
@@ -438,29 +449,36 @@ void MCTSTree::resolve_pending() {
         // Lookup the raw network entry by zobrist (non-blocking)
         const RawEntry* re = raw_policy_cache().lookup(z);
         if (!re) {
-            // Not ready yet — requeue under lock for later processing
-            std::lock_guard<std::mutex> g(tree_mutex_);
-            pending_nodes_.push_back(node);
+            {
+                // Not ready yet — requeue under lock for later processing
+                std::lock_guard<std::mutex> g(tree_mutex_);
+                pending_nodes_.push_back(node);
+            }
+            // Diagnostic: show we missed a cache hit and requeued the node.
+            std::cout << "[resolve_pending] CACHE MISS: zobrist=0x"
+                    << std::hex << z << std::dec
+                    << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
+                    << " - requeued\n" << std::flush;
+            continue;
+        }   
+
+        // If the model hasn't produced a real value yet, requeue and wait.
+        if (!re->has_value) {
+            {
+                std::lock_guard<std::mutex> g(tree_mutex_);
+                pending_nodes_.push_back(node);
+            }
+            // Diagnostic: raw entry present but missing value; show and requeue.
+            std::cout << "[resolve_pending] NO VALUE YET: zobrist=0x"
+                    << std::hex << z << std::dec
+                    << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
+                    << " - requeued\n" << std::flush;
             continue;
         }
 
-        // Compute value_white_pov:
-        // - model value (re->value) is STM-POV; flip sign for black to get White-POV
-        // - if model value missing, fall back to v_prime (print a diagnostic), else 0.0
-        float value_white_pov;
-        if (re->has_value) {
-            const bool stm_white = (node->board.side_to_move() == "w");
-            value_white_pov = stm_white ? re->value : -re->value;
-        } else {
-            if (node->has_vprime) {
-                std::cout << "[resolve_pending] zobrist=" << z
-                          << " no NN value; falling back to v_prime=" << node->v_prime
-                          << std::endl;
-                value_white_pov = node->v_prime;
-            } else {
-                value_white_pov = 0.0f;
-            }
-        }
+        // Compute value_white_pov from model value (model gives STM-POV)
+        const bool stm_white = (node->board.side_to_move() == "w");
+        const float value_white_pov = stm_white ? re->value : -re->value;
 
         // Grab the LegalMaskandMap attached to the node. Must be present.
         std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
@@ -476,10 +494,7 @@ void MCTSTree::resolve_pending() {
         }
 
         // Pluck priors directly from the model's raw policy vector (STM-POV).
-        // NOTE: This intentionally does not perform silent fallbacks or length checks.
-        const auto &policy_vec = re->p_policy; // model-provided 4288-length vector (STM-POV)
-
-        // Use the lookup pairs (uci, idx) from the LegalMaskandMap
+        const auto &policy_vec = re->p_policy; // model-provided vector (STM-POV)
         const auto &pairs = lm_sp->lookup();
 
         std::vector<std::pair<std::string, float>> built_priors;
@@ -487,14 +502,14 @@ void MCTSTree::resolve_pending() {
 
         for (const auto &p : pairs) {
             const std::string &uci = p.first;
-            const uint16_t idx = p.second; // 0..4288 expected
+            const uint16_t idx = p.second; // expected index into policy_vec
 
             // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
             const float prob = policy_vec[idx];
             built_priors.emplace_back(uci, prob);
         }
 
-        // Apply result: this will expand the node and backpropagate the value.
+        // Apply result: this will overwrite priors and backpropagate the value.
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
     }
 }

@@ -173,7 +173,9 @@ private:
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
-    void back_up_along_path(MCTSNode* leaf, float v);
+    void back_up_along_path(MCTSNode* leaf, float v);           // locks internally
+    void back_up_along_path_nolock(MCTSNode* leaf, float v);    // assumes caller holds tree_mutex_
+
     void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
     void expand_with_priors(
