@@ -11,7 +11,7 @@ std::atomic<PriorEngine*>   g_prior_engine_raw{nullptr};
 // ---------- RawPolicyCache implementation ----------
 RawPolicyCache::RawPolicyCache(size_t capacity)
   : capacity_(capacity) {
-    map_.reserve(std::min<size_t>(capacity, 5632));
+    map_.reserve(std::min<size_t>(capacity, 4288));
 }
 
 void RawPolicyCache::evict_if_needed_unlocked() {
@@ -36,7 +36,7 @@ void RawPolicyCache::bulk_insert(
     for (auto &t : batch) {
         uint64_t key = std::get<0>(t);
         float net_value = std::get<1>(t);
-        std::vector<float> pol = std::move(std::get<2>(t)); // expect length 5632
+        std::vector<float> pol = std::move(std::get<2>(t)); // expect length 4288
 
         auto it = map_.find(key);
         if (it != map_.end()) {

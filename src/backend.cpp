@@ -470,48 +470,67 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
     std::vector<uint16_t> out;
     out.reserve(ucis.size());
 
+    // STM-POV: true if white to move, false if black (we flip squares later)
     const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
 
     for (const auto &u : ucis) {
-        if (u.size() < 4) throw std::invalid_argument("invalid UCI: " + u);
-
-        // get robust from/to (handles castling remap) using move_to_labels
-        auto [from_idx, to_idx_dummy, pc, pr] = move_to_labels(u);
-
-        // compute file/rank from the nominal destination square
-        int to_sq = to_idx_dummy;            // 0..63
-        int to_file = to_sq % 8;
-        int to_rank = to_sq / 8;             // 0..7
-
-        // check if this UCI encodes an explicit promotion char (u[4])
-        int to_rank_index = to_rank;         // default: real board rank
-        if (u.size() > 4) {
-            char ch = std::tolower(static_cast<unsigned char>(u[4]));
-            if (ch == 'n') to_rank_index = 8;   // knight underpromo
-            else if (ch == 'b') to_rank_index = 9;
-            else if (ch == 'r') to_rank_index = 10;
-            else /* 'q' or anything else */ to_rank_index = to_rank; // queen -> real rank
+        if (u.size() < 4) {
+            throw std::invalid_argument("moves_to_indices: invalid UCI (too short): " + u);
         }
 
-        chess::Square sf(static_cast<chess::Square::underlying>(from_idx));
-        chess::Square st(static_cast<chess::Square::underlying>(to_sq));
+        // move_to_labels should return robust from/to indices on the raw board coords
+        auto [from_idx_raw, to_idx_raw, piece_type, promo_char_dummy] = move_to_labels(u);
 
-        if (!stm_white) { sf.flip(); st.flip(); }
+        // Build chess::Square from raw indices
+        chess::Square sf(static_cast<chess::Square::underlying>(from_idx_raw));
+        chess::Square st(static_cast<chess::Square::underlying>(to_idx_raw));
+
+        // STM-POV flip first so indices are computed in STM coordinates
+        if (!stm_white) {
+            sf.flip();
+            st.flip();
+        }
 
         const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
-        // recompute file after flipping (to be safe)
-        const int st_index = st.index();
-        const int st_file = st_index % 8;
-        // final to_slot = file + rank_index*8
-        const uint16_t to_slot = static_cast<uint16_t>(st_file + to_rank_index * 8);
-        const uint16_t idx = static_cast<uint16_t>(from_slot * MOVE_TO_WIDTH + to_slot);
-        out.push_back(idx);
+
+        // canonical file/rank of destination (after STM flip)
+        const int st_index = st.index(); // 0..63
+        const int st_file  = st_index % 8;
+        const int st_rank  = st_index / 8; // 0..7
+
+        // detect underpromotion (n/b/r) from UCI (fifth char)
+        int underpromo_type = -1; // 0=N,1=B,2=R, -1 = not underpromo (includes queen)
+        if (u.size() > 4) {
+            char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(u[4])));
+            if (ch == 'n') underpromo_type = 0;
+            else if (ch == 'b') underpromo_type = 1;
+            else if (ch == 'r') underpromo_type = 2;
+            // 'q' and other -> not an underpromo (map to normal dest)
+        }
+
+        uint32_t flat = 0;
+        if (underpromo_type >= 0) {
+            // unique 0..191 = from_file + 8*to_file + 64*underpromo_type
+            const int from_file = from_slot % 8;
+            const int to_file   = st_file;
+            const uint32_t unique = static_cast<uint32_t>(from_file + 8 * to_file + 64 * underpromo_type);
+            flat = 4096u + unique; // maps into 4096..4287
+        } else {
+            // standard mapping (includes queen promotions)
+            const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63
+            flat = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
+        }
+
+        out.push_back(static_cast<uint16_t>(flat));
     }
+
     return out;
 }
 
+
 LegalMaskandMap Board::legal_move_mask() const {
-    constexpr size_t N = 64 * MOVE_TO_WIDTH; // 5632
+    // size = TOTAL_MOVE_SPACE (64 * MOVE_TO_WIDTH == 4288)
+    constexpr size_t N = TOTAL_MOVE_SPACE;
     LegalMaskandMap out;
     out.mask.assign(N, 0);
 
@@ -545,24 +564,31 @@ LegalMaskandMap Board::legal_move_mask() const {
 
         // get base file/rank of st (after flip)
         const int st_index = st.index(); // 0..63
-        const int st_file = st_index % 8;
-        const int st_rank = st_index / 8; // 0..7
+        const int st_file  = st_index % 8;
+        const int st_rank  = st_index / 8; // 0..7
 
-        // determine to_rank_index (handle underpromotions)
-        int to_rank_index = st_rank; // default
+        // detect underpromotion char (n/b/r)
+        int underpromo_type = -1; // -1 -> not underpromo
         if (uci.size() > 4) {
-            char ch = std::tolower(static_cast<unsigned char>(uci[4]));
-            if (ch == 'n') to_rank_index = 8;
-            else if (ch == 'b') to_rank_index = 9;
-            else if (ch == 'r') to_rank_index = 10;
-            else to_rank_index = st_rank; // queen => real rank
+            char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
+            if (ch == 'n') underpromo_type = 0;
+            else if (ch == 'b') underpromo_type = 1;
+            else if (ch == 'r') underpromo_type = 2;
         }
 
-        const uint16_t to_slot = static_cast<uint16_t>(st_file + to_rank_index * 8);
-        const uint16_t idx = static_cast<uint16_t>(from_slot * MOVE_TO_WIDTH + to_slot);
+        uint32_t idx = 0;
+        if (underpromo_type >= 0) {
+            const int from_file = from_slot % 8;
+            const int to_file   = st_file;
+            const uint32_t unique = static_cast<uint32_t>(from_file + 8 * to_file + 64 * underpromo_type); // 0..191
+            idx = 4096u + unique; // 4096..4287
+        } else {
+            const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63 (queen promos included)
+            idx = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
+        }
 
         out.mask[idx] = 1;
-        out.uci_idx_pairs.emplace_back(std::move(uci), idx);
+        out.uci_idx_pairs.emplace_back(std::move(uci), static_cast<uint16_t>(idx));
     }
 
     return out;

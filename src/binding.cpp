@@ -33,7 +33,7 @@ static py::array_t<int16_t> board_to_64_tokens_py(const backend::Board& b) {
     return out;
 }
 
-// wrapper returning np.uint8 array of shape (5632,)
+// wrapper returning np.uint8 array of shape (4288,)
 std::vector<uint8_t> legal_move_mask_py(const backend::Board &b) {
     return b.legal_move_mask().mask;
 }
@@ -180,7 +180,7 @@ PYBIND11_MODULE(_core, m) {
                "This is the 1D token encoding alternative to stacked_planes and takes no arguments.")
 
           .def("legal_move_mask", &legal_move_mask_py,
-               "Return a flattened uint8 mask (length = 64 * MOVE_TO_WIDTH = 5632). "
+               "Return a flattened uint8 mask (length = 64 * MOVE_TO_WIDTH = 4288). "
                "Index = from*MOVE_TO_WIDTH + to_slot, STM-POV.")
 
           .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
@@ -402,7 +402,7 @@ PYBIND11_MODULE(_core, m) {
                n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
 
                // convert mask -> numpy array (copy)
-               const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (5632)
+               const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)
                py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
                std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
 
@@ -411,7 +411,7 @@ PYBIND11_MODULE(_core, m) {
           }
           return out;
           }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
-          "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (5632,) uint8 legal-move mask.")
+          "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
@@ -582,8 +582,8 @@ PYBIND11_MODULE(_core, m) {
                     uint64_t key = t[0].cast<uint64_t>();
                     float net_value = t[1].cast<float>();
                     std::vector<float> policy = to_vec(t[2]);
-                    if (policy.size() != 5632) throw std::runtime_error(
-                              "raw_cache_bulk_insert: policy_vector must have length 5632");
+                    if (policy.size() != 4288) throw std::runtime_error(
+                              "raw_cache_bulk_insert: policy_vector must have length 4288");
                     vec.emplace_back(key, net_value, std::move(policy));
                }
 

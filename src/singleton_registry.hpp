@@ -22,7 +22,7 @@
 
 // ---------------- Raw entry + stats ----------------
 struct RawEntry {
-    // single full policy vector (5632) for new model
+    // single full policy vector (4288) for new model
     std::vector<float> p_policy;
     bool has_policy = false;
 

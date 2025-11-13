@@ -36,9 +36,10 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
 // Return token ids, STM made white. Indexing is 0..63 (a1..h8), int16_t.
 std::array<int16_t, 64> board_to_64_tokens(const Board& b);
 
-static constexpr size_t MOVE_TO_RANKS = 11;         // 8 real ranks + 3 promo ranks
-static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_RANKS * 8; // 88
-static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 5632
+static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
+static constexpr size_t NUM_UNDERPROMOS = 3;         // N, B, R underpromos
+static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67
+static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 4288
 
 struct LegalMaskandMap {
     // mask where idx = from*MOVE_TO_WIDTH + to_slot (STM-POV)

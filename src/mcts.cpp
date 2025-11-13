@@ -504,7 +504,7 @@ void MCTSTree::resolve_pending() {
 
         // Pluck priors directly from the model's raw policy vector (STM-POV).
         // NOTE: This intentionally does not perform silent fallbacks or length checks.
-        const auto &policy_vec = re->p_policy; // model-provided 5632-length vector (STM-POV)
+        const auto &policy_vec = re->p_policy; // model-provided 4288-length vector (STM-POV)
 
         // Use the lookup pairs (uci, idx) from the LegalMaskandMap
         const auto &pairs = lm_sp->lookup();
@@ -514,7 +514,7 @@ void MCTSTree::resolve_pending() {
 
         for (const auto &p : pairs) {
             const std::string &uci = p.first;
-            const uint16_t idx = p.second; // 0..5632 expected
+            const uint16_t idx = p.second; // 0..4288 expected
 
             // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
             const float prob = policy_vec[idx];
