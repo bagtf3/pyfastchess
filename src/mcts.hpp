@@ -15,6 +15,27 @@
 #include "evaluator.hpp"
 #include "singleton_registry.hpp"
 
+// forward decl so CollectCounts can hold a MCTSNode*
+struct MCTSNode;
+
+// Telemetry/return types used by collect_one_leaf_tagged / collect_many_leaves
+enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
+
+struct CollectCounts {
+    CollectTag tag = CollectTag::NEW_LEAF;
+    MCTSNode* leaf = nullptr;       // the leaf node reached
+    uint32_t count_priorless = 0;   // times uniform selection was taken during this descent
+    uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
+};
+
+struct CollectResults {
+    size_t count_new = 0;
+    size_t count_terminal = 0;
+    size_t count_cached = 0;
+    uint64_t total_priorless = 0;
+    uint64_t total_puct = 0;
+};
+
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
     std::string uci;
@@ -163,27 +184,6 @@ public:
 
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
-
-    enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
-
-    // returned by collect_one_leaf_tagged()
-    // contains the leaf pointer, the tag, and per-descent counters
-    struct CollectCounts {
-        CollectTag tag = CollectTag::NEW_LEAF;
-        MCTSNode* leaf = nullptr;       // the leaf node reached
-        uint32_t count_priorless = 0;   // times uniform selection was taken during this descent
-        uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
-    };
-
-    // returned by collect_many_leaves()
-    // aggregated summary of many collect_one_leaf_tagged() calls
-    struct CollectResults {
-        size_t count_new = 0;
-        size_t count_terminal = 0;
-        size_t count_cached = 0;
-        uint64_t total_priorless = 0;
-        uint64_t total_puct = 0;
-    };
     
 private:
     std::unique_ptr<MCTSNode> root_;

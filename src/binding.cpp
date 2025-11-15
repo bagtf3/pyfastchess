@@ -480,12 +480,12 @@ PYBIND11_MODULE(_core, m) {
                py::arg("p_promo"),
                py::arg("mix") = 0.5f);
      
-     py::class_<MCTSTree::CollectResults>(m, "CollectResults")
-          .def_readonly("count_new", &MCTSTree::CollectResults::count_new)
-          .def_readonly("count_terminal", &MCTSTree::CollectResults::count_terminal)
-          .def_readonly("count_cached", &MCTSTree::CollectResults::count_cached)
-          .def_readonly("total_priorless", &MCTSTree::CollectResults::total_priorless)
-          .def_readonly("total_puct", &MCTSTree::CollectResults::total_puct);
+     py::class_<CollectResults>(m, "CollectResults")
+          .def_readonly("count_new", &CollectResults::count_new)
+          .def_readonly("count_terminal", &CollectResults::count_terminal)
+          .def_readonly("count_cached", &CollectResults::count_cached)
+          .def_readonly("total_priorless", &CollectResults::total_priorless)
+          .def_readonly("total_puct", &CollectResults::total_puct);
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())
