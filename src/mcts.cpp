@@ -11,6 +11,7 @@
 #include "cache.hpp"
 #include "singleton_registry.hpp"
 
+
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
@@ -21,17 +22,48 @@ MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_f
     zobrist = 0ULL;  // lazy: compute at first selection
 }
 
-MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct) {
+MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
+    // fast-path: if children don't have priors, pick round-robin per thread
+    if (!children_have_priors) {
+        const size_t n = legal_moves.size();
+        if (n == 0) return nullptr;
+
+        // per-thread round-robin counter
+        thread_local uint64_t rr_counter = 0;
+        const size_t idx = static_cast<size_t>((rr_counter++) % n);
+        const std::string &mv = legal_moves[idx];
+
+        // increment priorless counter for this descent
+        if (cc) ++cc->count_priorless;
+
+        // lazy-child semantics
+        auto it = children.find(mv);
+        MCTSNode* ch = (it != children.end() ? it->second.get() : nullptr);
+        if (!ch) {
+            backend::Board childb = board;
+            if (!childb.push_uci(mv)) return nullptr;
+            auto up = std::make_unique<MCTSNode>(childb, this, mv);
+            up->zobrist = childb.hash();
+            up->Q = this->Q;                 // init child Q to parent snapshot
+            ch = up.get();
+            children[mv] = std::move(up);
+        }
+        return ch;
+    }
+
+    // PUCT branch: increment PUCT counter (one per node where PUCT is evaluated)
+    if (cc) ++cc->count_puct;
+
     if (P.empty()) return nullptr;
 
     const float parentN = static_cast<float>(std::max(1, this->visit_count()));
     const float u_scale = c_puct * std::sqrt(parentN);
     const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
-    const float parent_q = pov_sign*this->Q;
+    const float parent_q = pov_sign * this->Q;
 
     const std::string* best_mv = nullptr;
     MCTSNode* best_child = nullptr;
-    float best_score = -200.0f;
+    float best_score = -INFINITY;
 
     for (const auto& kv : P) {
         const std::string& mv = kv.first;
@@ -39,32 +71,25 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct) {
 
         auto it = children.find(mv);
         const MCTSNode* ch = (it != children.end() ? it->second.get() : nullptr);
-
-        // if child exists, read its N atomically; otherwise n=0
         const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
-
-        // Use child's Q if present; otherwise fall back to parent's Q snapshot.
-        // Flip sign for STM POV.
-        const float q = (ch ? pov_sign*ch->Q : parent_q);
+        const float q = (ch ? pov_sign * ch->Q : parent_q);
         const float u = u_scale * prior / (1.0f + n);
         const float score = q + u;
-
         if (score > best_score) {
             best_score = score;
-            best_mv    = &mv;
+            best_mv = &mv;
             best_child = const_cast<MCTSNode*>(ch);
         }
     }
 
     if (!best_mv) return nullptr;
 
-    // lazily instantiate if not present
+    // lazy create if needed
     if (!best_child) {
         backend::Board childb = board;
         if (!childb.push_uci(*best_mv)) return nullptr;
         auto up = std::make_unique<MCTSNode>(childb, this, *best_mv);
         up->zobrist = childb.hash();
-        // initialize child Q to parent's snapshot to avoid eval-gap pathology
         up->Q = this->Q;
         best_child = up.get();
         children[*best_mv] = std::move(up);
@@ -106,18 +131,21 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
 }
 
 // Internal variant of collect_one_leaf that reports reason
-std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
+CollectCounts MCTSTree::collect_one_leaf_tagged() {
+    CollectCounts cc;              // per-descent counters (starts zero)
+
     last_path_.clear();
     if (last_path_.capacity() < 64) last_path_.reserve(64);
 
-    // push root and mark a visit (atomic, cheap)
+    // push root and mark a visit atomically
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
     node->add_visit();
 
     // descend while expanded and has children
     while (node->is_expanded && !node->children.empty()) {
-        MCTSNode* child = node->select_child_lazy_ptr(c_puct_);
+        // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
+        MCTSNode* child = node->select_child_lazy_ptr(c_puct_, &cc);
         if (!child) break;
         node = child;
         last_path_.push_back(node);
@@ -125,11 +153,15 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         node->add_visit();
     }
 
+    // set leaf pointer for the caller
+    cc.leaf = node;
+
     // Known terminal
     if (node->is_terminal) {
+        cc.tag = CollectTag::TERMINAL;
         const float v = node->value;
         back_up_along_path(node, v);
-        return { node, MCTSTree::CollectTag::TERMINAL };
+        return cc;
     }
 
     // Fresh terminal? catches repetition draws
@@ -137,8 +169,9 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         node->is_terminal = true;
         node->value = *tv;
         node->is_expanded = true;
+        cc.tag = CollectTag::TERMINAL;
         back_up_along_path(node, node->value);
-        return { node, MCTSTree::CollectTag::TERMINAL };
+        return cc;
     }
 
     // Try priors cache fast-path
@@ -151,65 +184,77 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
 
         if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
             // expand with cached priors (placeholders; lazy children)
+            // expand_with_priors should set children_have_priors = true
             expand_with_priors(node, pe->priors);
 
             // N was already incremented during descent; just backprop the cached value.
             back_up_along_path(node, pe->value);
 
-            return { node, MCTSTree::CollectTag::CACHED };
+            cc.tag = CollectTag::CACHED;
+            return cc;
         }
     }
 
     // Fresh non-terminal leaf: expand with uniform priors and return as pending.
     expand_with_uniform_priors(node);
 
-    // No qsearch / v_prime logic. The selection-time N increments act as the
-    // lightweight occupancy (virtual-loss-like) until the NN provides the real value.
-    return { node, MCTSTree::CollectTag::NEW_LEAF };
+    cc.tag = CollectTag::NEW_LEAF;
+    return cc;
 }
 
 // Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
 MCTSNode* MCTSTree::collect_one_leaf() {
-    return collect_one_leaf_tagged().first;
+    CollectCounts cc = collect_one_leaf_tagged();
+    return cc.leaf;
 }
 
 // collect_many_leaves: collect up to `n_new` new leaves (non-terminal,
 // non-cached) and stop early if we've applied `n_fastpath` fast-path results
 // (cached OR terminal). This method fills pending_nodes_
-std::tuple<size_t, size_t, size_t>
-MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
-    count_new_ = count_terminal_ = count_cached_ = 0;
-
+CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t new_count = 0;
     size_t cached_count = 0;
     size_t terminal_count = 0;
+    uint64_t total_priorless = 0;
+    uint64_t total_puct = 0;
+
     size_t attempts = 0;
     const size_t try_break = 10000;
 
     while ((new_count < n_new) &&
            (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
            (attempts < try_break)) {
-        auto pr = collect_one_leaf_tagged();
-        MCTSNode* node = pr.first;
-        MCTSTree::CollectTag tag = pr.second;
+
+        CollectCounts cc = collect_one_leaf_tagged();
         ++attempts;
+
+        // accumulate per-descent counters
+        total_priorless += cc.count_priorless;
+        total_puct += cc.count_puct;
+
+        MCTSNode* node = cc.leaf;
+        CollectTag tag = cc.tag;
+
         if (!node) break;
 
-        if (tag == MCTSTree::CollectTag::NEW_LEAF) {
+        if (tag == CollectTag::NEW_LEAF) {
             uint64_t z = this->queue_pending(node);
             ++new_count;
-        } else if (tag == MCTSTree::CollectTag::CACHED) {
+        } else if (tag == CollectTag::CACHED) {
             ++cached_count;
-        } else if (tag == MCTSTree::CollectTag::TERMINAL) {
+        } else if (tag == CollectTag::TERMINAL) {
             ++terminal_count;
         }
     }
 
-    count_new_      = new_count;
-    count_cached_   = cached_count;
-    count_terminal_ = terminal_count;
-
-    return { count_new_, count_terminal_, count_cached_ };
+    // build the return struct
+    CollectResults res;
+    res.count_new = new_count;
+    res.count_cached = cached_count;
+    res.count_terminal = terminal_count;
+    res.total_priorless = total_priorless;
+    res.total_puct = total_puct;
+    return res;
 }
 
 void MCTSTree::apply_result(
@@ -228,6 +273,9 @@ void MCTSTree::apply_result(
     node->P.reserve(move_priors.size());
     for (const auto& mp : move_priors)
         node->P.emplace(mp.first, mp.second);
+
+    // nodes children priors are now set
+    node->children_have_priors = true;
 
     // Cache canonical leaf value for introspection
     node->value = value_white_pov;
@@ -334,6 +382,8 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
     }
 
     node->is_expanded = true;
+    node->children_have_priors = true;
+    
 }
 
 void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
@@ -420,9 +470,6 @@ uint64_t MCTSTree::queue_pending(MCTSNode* n) {
 void MCTSTree::clear_pending() {
     std::lock_guard<std::mutex> g(tree_mutex_);
     pending_nodes_.clear();
-    count_new_ = 0;
-    count_terminal_ = 0;
-    count_cached_ = 0;
 }
 
 void MCTSTree::resolve_pending() {
@@ -551,7 +598,6 @@ float MCTSTree::visit_weighted_Q() const {
 
     return (sum_w > 0.0) ? static_cast<float>(sum_wq / sum_w) : 0.0f;
 }
-
 
 std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     std::lock_guard<std::mutex> g(tree_mutex_);

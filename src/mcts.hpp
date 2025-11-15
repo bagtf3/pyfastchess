@@ -71,6 +71,7 @@ struct MCTSNode {
     std::vector<std::string> legal_moves;  // filled on expand; reused later
 
     bool is_expanded = false;
+    bool children_have_priors = false;
     float value = 0.0f;     // cached leaf value when expanded (optional)
 
     // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
@@ -88,7 +89,7 @@ struct MCTSNode {
     MCTSNode(const backend::Board& b, MCTSNode* parent_=nullptr, std::string uci_from_parent="");
     
     // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
-    MCTSNode* select_child_lazy_ptr(float c_puct);
+    MCTSNode* select_child_lazy_ptr(float c_puct, CollectCounts* cc = nullptr);
 
     // safe, convenient accessors for the atomic visit counter
     int visit_count() const noexcept {
@@ -114,7 +115,7 @@ public:
     MCTSNode* collect_one_leaf();
 
     // collects many leaves, stores in a pending queue, returns counts
-    std::tuple<size_t, size_t, size_t> collect_many_leaves(size_t n_new, size_t n_fastpath);
+    CollectResults collect_many_leaves(size_t n_new, size_t n_fastpath);
 
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
     // Also pops virtual losses along the stored path and calls backup().
@@ -150,7 +151,7 @@ public:
     std::vector<ChildDetail> root_child_details() const;
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
-    
+
     std::vector<PVItem> principal_variation(int max_len = 24) const;
     // Optional runtime updater
     void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
@@ -163,9 +164,28 @@ public:
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
 
-private:
     enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
 
+    // returned by collect_one_leaf_tagged()
+    // contains the leaf pointer, the tag, and per-descent counters
+    struct CollectCounts {
+        CollectTag tag = CollectTag::NEW_LEAF;
+        MCTSNode* leaf = nullptr;       // the leaf node reached
+        uint32_t count_priorless = 0;   // times uniform selection was taken during this descent
+        uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
+    };
+
+    // returned by collect_many_leaves()
+    // aggregated summary of many collect_one_leaf_tagged() calls
+    struct CollectResults {
+        size_t count_new = 0;
+        size_t count_terminal = 0;
+        size_t count_cached = 0;
+        uint64_t total_priorless = 0;
+        uint64_t total_puct = 0;
+    };
+    
+private:
     std::unique_ptr<MCTSNode> root_;
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
@@ -181,7 +201,7 @@ private:
     void expand_with_priors(
         MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
 
-    std::pair<MCTSNode*, CollectTag> collect_one_leaf_tagged();
+    CollectCounts collect_one_leaf_tagged();
 
     // Ownership to keep evaluator alive for lifetime of tree:
     std::shared_ptr<evaluator::Evaluator> evaluator_;
@@ -191,11 +211,6 @@ private:
 
     // Tunable scale for cp -> [-1,1] mapping
     float vprime_scale_ = 1500.0f;
-
-    size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
-    size_t count_terminal_ = 0;  // number of terminal hits in last collection
-    size_t count_cached_ = 0;    // number of cached hits in last collection
-
     mutable std::mutex tree_mutex_; 
 };
 
