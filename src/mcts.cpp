@@ -51,10 +51,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         return ch;
     }
 
-    // PUCT branch: increment PUCT counter (one per node where PUCT is evaluated)
-    if (cc) ++cc->count_puct;
-
     if (P.empty()) return nullptr;
+    // PUCT branch: increment PUCT counter (one per node where PUCT is evaluated)
+    if (cc) cc->count_puct += static_cast<uint64_t>(P.size());
 
     const float parentN = static_cast<float>(std::max(1, this->visit_count()));
     const float u_scale = c_puct * std::sqrt(parentN);
