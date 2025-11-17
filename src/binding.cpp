@@ -448,11 +448,12 @@ PYBIND11_MODULE(_core, m) {
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
           .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
-          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
+          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
+               py::call_guard<py::gil_scoped_acquire>())
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers
-          // already-scored per-legal version (yours today)
+          // already-scored per-legal version
           m.def("priors_from_heads",
                py::overload_cast<
                     const std::vector<std::string>&,
