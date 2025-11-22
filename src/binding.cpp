@@ -388,31 +388,31 @@ PYBIND11_MODULE(_core, m) {
                }, py::arg("nplanes") =5,"Encode pending leaves: (zobrist, planes).")
 
           .def("pending_encoded_64_tokens", [](MCTSTree& t) {
-          py::list out;
-          for (MCTSNode* n : t.pending_nodes_) {
-               if (!n) continue;
+               py::list out;
+               for (MCTSNode* n : t.pending_nodes_) {
+                    if (!n) continue;
 
-               uint64_t z = n->zobrist;
+                    uint64_t z = n->zobrist;
 
-               // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
-               py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
+                    // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
+                    py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
 
-               // produce LegalMaskandMap and attach it to node (move -> heap)
-               backend::LegalMaskandMap lm = n->board.legal_move_mask();
-               auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
-               n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+                    // produce LegalMaskandMap and attach it to node (move -> heap)
+                    backend::LegalMaskandMap lm = n->board.legal_move_mask();
+                    auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
+                    n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
 
-               // convert mask -> numpy array (copy)
-               const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)
-               py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
-               std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
+                    // convert mask -> numpy array (copy)
+                    const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)
+                    py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
+                    std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
 
-               // append (zobrist, tokens64, mask)
-               out.append(py::make_tuple(z, tokens, mask));
-          }
-          return out;
-          }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
-          "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
+                    // append (zobrist, tokens64, mask)
+                    out.append(py::make_tuple(z, tokens, mask));
+               }
+               return out;
+               }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
+               "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
@@ -448,11 +448,12 @@ PYBIND11_MODULE(_core, m) {
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
           .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
-          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
+          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
+               py::call_guard<py::gil_scoped_acquire>())
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers
-          // already-scored per-legal version (yours today)
+          // already-scored per-legal version
           m.def("priors_from_heads",
                py::overload_cast<
                     const std::vector<std::string>&,
@@ -479,6 +480,13 @@ PYBIND11_MODULE(_core, m) {
                py::arg("p_piece"),
                py::arg("p_promo"),
                py::arg("mix") = 0.5f);
+     
+     py::class_<CollectResults>(m, "CollectResults")
+          .def_readonly("count_new", &CollectResults::count_new)
+          .def_readonly("count_terminal", &CollectResults::count_terminal)
+          .def_readonly("count_cached", &CollectResults::count_cached)
+          .def_readonly("total_priorless", &CollectResults::total_priorless)
+          .def_readonly("total_puct", &CollectResults::total_puct);
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())
