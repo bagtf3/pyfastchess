@@ -955,7 +955,6 @@ std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) 
     // EP: cheap accessor (Square or NO_SQ). convert to index and flip if needed.
     Square ep_sq = rb.enpassantSq();
     if (ep_sq != Square::NO_SQ) {
-        // adjust this line if Square requires
         int ep_idx = ep_sq.index();
         if (!stm_is_white) ep_idx ^= 56;
         out[ep_idx] = EP_POSSIBLE;
