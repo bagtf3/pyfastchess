@@ -169,8 +169,7 @@ bool Board::gives_double_attack(const std::string& uci, bool include_king) const
     };
 
     // Destination safety: the moved piece at its new square must not be
-    // (a) hanging (attacked and not defended), nor
-    // (b) attacked by *lower*.
+    // hanging, nor attacked by lower value
     const int to_sq = mv.to().index();
     const int mover_pt = piece_type_idx(to_sq);
     if (mover_pt >= 0 && mover_pt <= 5) {
@@ -248,13 +247,12 @@ std::string Board::side_to_move() const {
 }
 
 std::string Board::enpassant_sq() const {
-    const chess::Square sq = board_.enpassantSq();   // cheap accessor (returns Square::NO_SQ if none)
+    const chess::Square sq = board_.enpassantSq();
     if (sq == chess::Square::NO_SQ) return std::string("-");
     return static_cast<std::string>(sq);
 }
 
 std::string Board::castling_rights() const {
-    // Library already provides correctly formatted string
     return board_.getCastleString();
 }
 
@@ -278,7 +276,7 @@ bool Board::gives_check(const std::string& uci) const {
     chess::Move mv = chess::uci::uciToMove(board_, uci);
     if (mv == chess::Move::NO_MOVE) return false;
     chess::CheckType ct = board_.givesCheck(mv);
-    return ct != chess::CheckType::NO_CHECK;  // <-- was ...::NONE
+    return ct != chess::CheckType::NO_CHECK;
 }
 
 bool backend::Board::gives_checkmate(const std::string& uci) const {
@@ -804,9 +802,6 @@ terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
 }
 
 namespace {
-// --- fast/bitboard-based frame builder (drop-in alongside make_frame_14) ---
-// Place in the same anonymous namespace as make_frame_14 so symbols remain local.
-
 static inline int frame_cell_from_sq(int sq) {
     // Convert internal square index (0 == a1, 63 == h8) into the
     // (r*8 + c) cell index used by make_frame_14 (r==0 corresponds to top row from FEN)
@@ -973,7 +968,6 @@ std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) 
     };
 
     // Iterate piece types and colors using bitboards. This avoids scanning empty squares.
-    // NOTE: adapt casting from Bitboard -> uint64_t if your Bitboard type uses .bits() or .raw()
     const std::array<PieceType,6> piece_types = {
         PieceType::PAWN, PieceType::KNIGHT, PieceType::BISHOP,
         PieceType::ROOK, PieceType::QUEEN, PieceType::KING
@@ -983,7 +977,6 @@ std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) 
         // loop white then black to compute tokens (we need color relative to stm)
         for (Color col : { Color::WHITE, Color::BLACK }) {
             // get bitboard for this piece type and color
-            // if Bitboard is not directly convertible, replace the cast with `.bits()` or `.raw()`
             uint64_t bb = rb.pieces(pt, col).getBits();
 
             while (bb) {
