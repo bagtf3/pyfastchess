@@ -85,6 +85,8 @@ struct MCTSNode {
     std::unordered_map<std::string, float> P;
     // children: move -> child node
     std::unordered_map<std::string, std::unique_ptr<MCTSNode>> children;
+    // sorted priors
+    std::vector<std::pair<std::string,float>> move_priors; 
 
     // --- State ---
     backend::Board board;   // exact position at this node

@@ -51,11 +51,16 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         return ch;
     }
 
-    if (P.empty()) return nullptr;
-    // PUCT branch: increment PUCT counter (one per node where PUCT is evaluated)
-    if (cc) cc->count_puct += static_cast<uint64_t>(P.size());
+    // assume move_priors is present and used as authoritative source
+    if (move_priors.empty()) return nullptr;
 
     const float parentN = static_cast<float>(std::max(1, this->visit_count()));
+    const int cap = 4 + static_cast<int>(parentN);
+    const size_t cap_sz = std::min(move_priors.size(), static_cast<size_t>(cap));
+
+    // PUCT branch: increment PUCT counter (count only examined priors)
+    if (cc) cc->count_puct += static_cast<uint64_t>(cap_sz);
+
     const float u_scale = c_puct * std::sqrt(parentN);
     const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
     const float parent_q = pov_sign * this->Q;
@@ -64,9 +69,11 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
     MCTSNode* best_child = nullptr;
     float best_score = -INFINITY;
 
-    for (const auto& kv : P) {
+    // iterate the sorted vector of priors (top-first)
+    for (size_t i = 0; i < cap_sz; ++i) {
+        const auto &kv = move_priors[i];
         const std::string& mv = kv.first;
-        const float prior   = kv.second;
+        const float prior = kv.second;
 
         auto it = children.find(mv);
         const MCTSNode* ch = (it != children.end() ? it->second.get() : nullptr);
@@ -264,32 +271,35 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // Protect node modifications with tree mutex
     std::lock_guard<std::mutex> g(tree_mutex_);
 
-    // Overwrite priors with NN priors
+    // copy the incoming priors so we can sort them deterministically
+    std::vector<std::pair<std::string,float>> sorted = move_priors;
+
+    // sort descending by prior (largest first)
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto &a, const auto &b){ return a.second > b.second; });
+
+    // attach sorted priors to the node (owning copy)
+    node->move_priors = sorted;
+
+    // map P for compatibility, rebuild it from sorted
     node->P.clear();
-    node->P.reserve(move_priors.size());
-    for (const auto& mp : move_priors)
+    node->P.reserve(node->move_priors.size());
+    for (const auto &mp : node->move_priors)
         node->P.emplace(mp.first, mp.second);
 
-    // nodes children priors are now set
     node->children_have_priors = true;
-
-    // Cache canonical leaf value for introspection
     node->value = value_white_pov;
 
-    // N was incremented at selection-time during descent.
-    // Now apply the real-value contribution (W) and recompute Q along path.
-    // back_up_along_path assumes it will not modify N.
     back_up_along_path_nolock(node, value_white_pov);
 
     if (cache) {
         CacheEntry e;
-        e.priors = move_priors;
+        // store the sorted vector into the cache (copy)
+        e.priors = node->move_priors;
         e.value  = value_white_pov;
 
-        // prefer node->zobrist if set; fall back to board.hash()
         uint64_t key = (node->zobrist != 0) ? node->zobrist : node->board.hash();
         priors_cache().insert(key, std::move(e));
     }
@@ -348,10 +358,17 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     node->P.reserve(n);
     node->children.reserve(n);
 
+    // build uniform move_priors vector
+    std::vector<std::pair<std::string,float>> mp;
+    mp.reserve(n);
     for (const auto &mv : legal) {
         node->P.emplace(mv, u);
         node->children.emplace(mv, nullptr); // placeholder child
+        mp.emplace_back(mv, u);
     }
+
+    // attach uniform sorted priors (uniform order as produced)
+    node->move_priors = std::move(mp);
     node->is_expanded = true;
 }
 
@@ -367,13 +384,22 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
     if (!node) return;
     std::lock_guard<std::mutex> g(tree_mutex_);
 
+    // sorted copy of incoming priors (largest first)
+    std::vector<std::pair<std::string,float>> sorted = priors;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto &a, const auto &b){ return a.second > b.second; });
+
+    // attach the sorted priors to the node (owning copy)
+    node->move_priors = std::move(sorted);
+
+    // keep the map-based P/children for backward compat / lazy-create
     node->P.clear();
     node->children.clear();
 
-    node->P.reserve(priors.size());
-    node->children.reserve(priors.size());
+    node->P.reserve(node->move_priors.size());
+    node->children.reserve(node->move_priors.size());
 
-    for (const auto &pp : priors) {
+    for (const auto &pp : node->move_priors) {
         const std::string &mv = pp.first;
         float p = pp.second;
         node->P.emplace(mv, p);
@@ -382,7 +408,6 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
 
     node->is_expanded = true;
     node->children_have_priors = true;
-    
 }
 
 void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
