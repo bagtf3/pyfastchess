@@ -350,7 +350,7 @@ PYBIND11_MODULE(_core, m) {
                     out[py::str(ce.uci)] = ce.prior;
                }
                return out;
-          })
+          });
 
      // --- MCTSTree ---
      py::class_<MCTSTree>(m, "MCTSTree")
