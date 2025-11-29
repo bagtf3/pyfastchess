@@ -44,7 +44,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
             if (!childb.push_uci(mv)) return nullptr;
             auto up = std::make_unique<MCTSNode>(childb, this, mv);
             up->zobrist = childb.hash();
-            up->Q = this->Q;
+            up->Q = this->Q;               // init child Q to parent snapshot (white-POV)
             ch = up.get();
             ce.child = std::move(up);
         }
@@ -62,9 +62,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
 
     const float u_scale = c_puct * std::sqrt(parentN);
 
-    // Interpret Qs as stored (Q is white-POV in nodes). To be safe, compute
-    // parent's Q for fallback when child Q is absent.
-    const float parent_q = this->Q;
+    // POV flipping: stored Q values are white-POV. Convert to STM-POV (parent's STM).
+    const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
+    const float parent_q = pov_sign * this->Q;
 
     size_t best_idx = SIZE_MAX;
     MCTSNode* best_child = nullptr;
@@ -75,7 +75,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         const float prior = ce.prior;
         const MCTSNode* ch = ce.child.get();
         const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
-        const float q = ch ? ch->Q : parent_q;
+        const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         const float score = q + u;
         if (score > best_score) {
@@ -94,7 +94,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         if (!childb.push_uci(best_mv)) return nullptr;
         auto up = std::make_unique<MCTSNode>(childb, this, best_mv);
         up->zobrist = childb.hash();
-        up->Q = this->Q;
+        up->Q = this->Q;                // init child Q to parent snapshot (white-POV)
         best_child = up.get();
         ordered_children[best_idx].child = std::move(up);
     }
