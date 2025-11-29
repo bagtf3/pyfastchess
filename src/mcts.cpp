@@ -269,32 +269,31 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // Lock tree to perform structural updates and cache writes atomically.
     std::lock_guard<std::mutex> g(tree_mutex_);
 
-    // Sort incoming priors descending (deterministic canonical ordering).
-    std::vector<std::pair<std::string,float>> sorted = move_priors;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto &a, const auto &b){ return a.second > b.second; });
+    // build fast lookup (uci -> prior) from sorted priors
+    std::unordered_map<std::string,float> priormap;
+    priormap.reserve(move_priors.size());
+    for (const auto &p : move_priors) priormap.emplace(p.first, p.second);
 
-    // Populate ordered_children from sorted priors; children (subtrees) remain null
-    node->ordered_children.clear();
-    node->ordered_children.reserve(sorted.size());
-    for (const auto &p : sorted) {
-        MCTSNode::ChildEntry ce;
-        ce.uci = p.first;
-        ce.prior = p.second;
-        ce.child.reset(nullptr); // lazy create later if selected
-        node->ordered_children.emplace_back(std::move(ce));
+    // update priors in-place on existing ordered_children (all moves are present)
+    for (auto &ce : node->ordered_children) {
+        ce.prior = priormap.at(ce.uci);
     }
+
+    // stable-sort in-place by prior descending (preserves any existing child ownership)
+    std::stable_sort(node->ordered_children.begin(), node->ordered_children.end(),
+                     [](const MCTSNode::ChildEntry &a, const MCTSNode::ChildEntry &b){
+                         return a.prior > b.prior;
+                     });
 
     node->children_have_priors = true;
     node->value = value_white_pov;
 
-    // Backpropagate value up the path (no external locking required because we hold tree_mutex_)
+    // Backpropagate value up the path (we hold tree_mutex_)
     back_up_along_path_nolock(node, value_white_pov);
 
-    // Optionally populate the priors cache: build a transient priors vector
+    // Optionally populate the priors cache from the canonical ordered_children order
     if (cache) {
         CacheEntry e;
         e.value = value_white_pov;
@@ -370,7 +369,6 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     node->children_have_priors = false;
 }
 
-// existing function becomes thin: lock + delegate
 void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     if (!node) return;
     std::lock_guard<std::mutex> g(tree_mutex_);
@@ -383,20 +381,38 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
 
     std::lock_guard<std::mutex> g(tree_mutex_);
 
-    // Sort incoming priors descending and install as ordered_children
-    std::vector<std::pair<std::string,float>> sorted = priors;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto &a, const auto &b){ return a.second > b.second; });
+    // Build a fast lookup from incoming priors (no sorting here).
+    std::unordered_map<std::string,float> priormap;
+    priormap.reserve(priors.size());
+    for (const auto &pp : priors) priormap.emplace(pp.first, pp.second);
 
-    node->ordered_children.clear();
-    node->ordered_children.reserve(sorted.size());
-    for (const auto &pp : sorted) {
-        MCTSNode::ChildEntry ce;
-        ce.uci = pp.first;
-        ce.child.reset(nullptr);
-        ce.prior = pp.second;
-        node->ordered_children.emplace_back(std::move(ce));
+    // Update priors on any existing entries (do NOT touch their child unique_ptrs).
+    for (auto &ce : node->ordered_children) {
+        auto it = priormap.find(ce.uci);
+        ce.prior = (it != priormap.end()) ? it->second : 0.0f;
     }
+
+    std::unordered_set<std::string> existing;
+    existing.reserve(node->ordered_children.size());
+    for (const auto &ce : node->ordered_children) existing.insert(ce.uci);
+
+    for (const auto &pp : priors) {
+        if (existing.find(pp.first) == existing.end()) {
+            MCTSNode::ChildEntry ce;
+            ce.uci = pp.first;
+            ce.child.reset(nullptr);   // new entries have no subtree yet (lazy-create)
+            ce.prior = pp.second;
+            node->ordered_children.emplace_back(std::move(ce));
+            existing.insert(pp.first);
+        }
+    }
+
+    // Single canonical sort: primary = prior desc, secondary = uci asc for determinism.
+    std::sort(node->ordered_children.begin(), node->ordered_children.end(),
+              [](const MCTSNode::ChildEntry &a, const MCTSNode::ChildEntry &b){
+                  if (a.prior != b.prior) return a.prior > b.prior;
+                  return a.uci < b.uci;
+              });
 
     node->is_expanded = true;
     node->children_have_priors = true;
