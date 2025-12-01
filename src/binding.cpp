@@ -325,7 +325,6 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("N", [](const MCTSNode &n) { return n.visit_count(); })
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
-          .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
@@ -339,9 +338,19 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("legal_moves", [](const MCTSNode& n){ return n.legal_moves; })
 
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
-               auto it = n.P.find(uci);
-               return (it == n.P.end()) ? 0.0f : it->second;
-          }, py::arg("move_uci"));
+               for (const auto &ce : n.ordered_children) {
+                    if (ce.uci == uci) return ce.prior;
+               }
+               return 0.0f;
+          }, py::arg("move_uci"))
+
+          .def("priors", [](const MCTSNode& n){
+               py::dict out;
+               for (const auto &ce : n.ordered_children) {
+                    out[py::str(ce.uci)] = ce.prior;
+               }
+               return out;
+          });
 
      // --- MCTSTree ---
      py::class_<MCTSTree>(m, "MCTSTree")
@@ -349,7 +358,7 @@ PYBIND11_MODULE(_core, m) {
                const MCTSNode* r = t.root();
                int    N   = r ? r->visit_count() : 0;
                float  Q   = r ? r->Q : 0.0f;
-               size_t kids= r ? r->children.size() : 0;
+               size_t kids= r ? r->ordered_children.size() : 0;
                std::string stm = r ? r->board.side_to_move() : "?";
 
                std::ostringstream oss;

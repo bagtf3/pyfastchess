@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <tuple>
@@ -81,10 +82,24 @@ struct MCTSNode {
     int   vprime_visits   = 0;      // was qprime_visits
 
     // --- Priors / children ---
-    // P: move -> prior (root stores priors for its children)
-    std::unordered_map<std::string, float> P;
-    // children: move -> child node
-    std::unordered_map<std::string, std::unique_ptr<MCTSNode>> children;
+    // Canonical child entry: owner of optional child subtree, prior, and UCI string.
+    // This is the single source-of-truth for both ordering and the prior values.
+    struct ChildEntry {
+        std::string uci;                            // move in UCI form (parent->child)
+        std::unique_ptr<MCTSNode> child;            // nullable; lazy-instantiated child
+        float prior = 0.0f;                         // prior for this move
+
+        ChildEntry() = default;
+        ChildEntry(const std::string& u, float p = 0.0f)
+            : uci(u), child(nullptr), prior(p) {}
+    };
+
+    // Authoritative, ordered list of children.
+    // - Entries may have child == nullptr (lazy creation).
+    // - Order is significant: when priors are present, entries should be sorted by prior
+    //   (descending). When priors are absent, expand_with_uniform_priors populates this
+    //   in the deterministic order returned by board.legal_moves().
+    std::vector<ChildEntry> ordered_children;
 
     // --- State ---
     backend::Board board;   // exact position at this node
