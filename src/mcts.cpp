@@ -4,10 +4,13 @@
 #include <atomic>
 #include <mutex>
 #include <iostream>
+#include <random>
+#include <iomanip>
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
 #include "singleton_registry.hpp"
+
 
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -19,48 +22,81 @@ MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_f
     zobrist = 0ULL;  // lazy: compute at first selection
 }
 
-MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct) {
-    if (P.empty()) return nullptr;
+MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
+    // Fast-path: no priors available — pick round-robin from legal_moves.
+    if (!children_have_priors) {
+        const size_t n = legal_moves.size();
+        if (n == 0) return nullptr;
 
-    const float parentN   = static_cast<float>(std::max(1, N));
-    const float u_scale   = c_puct * std::sqrt(parentN);
-    const float pov_sign  = (board.side_to_move() == "w") ? 1.0f : -1.0f;
+        thread_local uint64_t rr_counter = 0;
+        const size_t idx = static_cast<size_t>((rr_counter++) % n);
 
-    const std::string* best_mv = nullptr;
+        // Directly take the idx-th ChildEntry
+        ChildEntry &ce = ordered_children[idx];
+        const std::string &mv = ce.uci; // should equal legal_moves[idx]
+
+        if (cc) ++cc->count_priorless;
+
+        MCTSNode* ch = ce.child.get();
+        if (!ch) {
+            // lazy-instantiation (no extra locks; mirrors old behavior)
+            backend::Board childb = board;
+            if (!childb.push_uci(mv)) return nullptr;
+            auto up = std::make_unique<MCTSNode>(childb, this, mv);
+            up->zobrist = childb.hash();
+            up->Q = this->Q;               // init child Q to parent snapshot (white-POV)
+            ch = up.get();
+            ce.child = std::move(up);
+        }
+        return ch;
+    }
+
+    // Priors are present: use PUCT over top candidates.
+    if (ordered_children.empty()) return nullptr;
+
+    const float parentN = static_cast<float>(std::max(1, this->visit_count()));
+    const int cap = 4 + static_cast<int>(parentN);
+    const size_t cap_sz = std::min(ordered_children.size(), static_cast<size_t>(cap));
+
+    if (cc) cc->count_puct += static_cast<uint64_t>(cap_sz);
+
+    const float u_scale = c_puct * std::sqrt(parentN);
+
+    // POV flipping: stored Q values are white-POV. Convert to STM-POV (parent's STM).
+    const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
+    const float parent_q = pov_sign * this->Q;
+
+    size_t best_idx = SIZE_MAX;
     MCTSNode* best_child = nullptr;
-    float best_score = -1e30f;
+    float best_score = -INFINITY;
 
-    // Iterate priors (defines candidate moves); use existing child stats if present
-    for (const auto& kv : P) {
-        const std::string& mv = kv.first;
-        const float prior     = kv.second;
-
-        auto it = children.find(mv);
-        const MCTSNode* ch = (it != children.end() ? it->second.get() : nullptr);
-
-        const float n = ch ? static_cast<float>(ch->N) : 0.0f;
-        const float q = ch ? (pov_sign * ch->Q) : 0.0f;     // flip once for side-to-move
-
-        const float u = (prior > 0.0f) ? (u_scale * prior / (1.0f + n)) : 0.0f;
+    for (size_t i = 0; i < cap_sz; ++i) {
+        const ChildEntry &ce = ordered_children[i];
+        const float prior = ce.prior;
+        const MCTSNode* ch = ce.child.get();
+        const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+        const float q = ch ? (pov_sign * ch->Q) : parent_q;
+        const float u = u_scale * prior / (1.0f + n);
         const float score = q + u;
-
         if (score > best_score) {
             best_score = score;
-            best_mv    = &mv;
+            best_idx = i;
             best_child = const_cast<MCTSNode*>(ch);
         }
     }
 
-    if (!best_mv) return nullptr;  // defensive
+    if (best_idx == SIZE_MAX) return nullptr;
 
-    // lazily instantiate if not built yet
+    // Lazy-create child if absent (mirror previous non-locked semantics)
     if (!best_child) {
+        const std::string &best_mv = ordered_children[best_idx].uci;
         backend::Board childb = board;
-        if (!childb.push_uci(*best_mv)) return nullptr;
-        auto up = std::make_unique<MCTSNode>(childb, this, *best_mv);
+        if (!childb.push_uci(best_mv)) return nullptr;
+        auto up = std::make_unique<MCTSNode>(childb, this, best_mv);
         up->zobrist = childb.hash();
+        up->Q = this->Q;                // init child Q to parent snapshot (white-POV)
         best_child = up.get();
-        children[*best_mv] = std::move(up);
+        ordered_children[best_idx].child = std::move(up);
     }
 
     return best_child;
@@ -93,41 +129,53 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
     prior_engine_raw_ = get_prior_engine_raw();
 
     // prebuild QOptions once
-    qopts_shallow_.max_qply = 5;
+    qopts_shallow_.max_qply = 3;
     qopts_shallow_.max_qcaptures = 24;
-    qopts_shallow_.time_limit_ms = 3;
+    qopts_shallow_.time_limit_ms = 2;
 }
 
 // Internal variant of collect_one_leaf that reports reason
-std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
-    last_path_.clear();
-    if (last_path_.capacity() < 32) last_path_.reserve(32);
+CollectCounts MCTSTree::collect_one_leaf_tagged() {
+    CollectCounts cc;              // per-descent counters (starts zero)
 
+    last_path_.clear();
+    if (last_path_.capacity() < 64) last_path_.reserve(64);
+
+    // push root and mark a visit atomically
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
+    node->add_visit();
 
-    // descend while expanded and has children
-    while (node->is_expanded && !node->children.empty()) {
-        MCTSNode* child = node->select_child_lazy_ptr(c_puct_);
+    // descend while expanded and has children (now uses ordered_children)
+    while (node->is_expanded && !node->ordered_children.empty()) {
+        // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
+        MCTSNode* child = node->select_child_lazy_ptr(c_puct_, &cc);
         if (!child) break;
         node = child;
         last_path_.push_back(node);
+        // increment visit for this node immediately (selection-time)
+        node->add_visit();
     }
+
+    // set leaf pointer for the caller
+    cc.leaf = node;
 
     // Known terminal
     if (node->is_terminal) {
+        cc.tag = CollectTag::TERMINAL;
         const float v = node->value;
-        back_up_along_path(node, v, /*add_visit=*/true);
-        return { node, MCTSTree::CollectTag::TERMINAL };
+        back_up_along_path(node, v);
+        return cc;
     }
 
-    // Fresh terminal? catches repetition draws
+    // Fresh terminal? catches repetition draws and similar
     if (auto tv = backend::terminal_value_white_pov(node->board)) {
         node->is_terminal = true;
         node->value = *tv;
         node->is_expanded = true;
-        back_up_along_path(node, node->value, /*add_visit=*/true);
-        return { node, MCTSTree::CollectTag::TERMINAL };
+        cc.tag = CollectTag::TERMINAL;
+        back_up_along_path(node, node->value);
+        return cc;
     }
 
     // Try priors cache fast-path
@@ -136,91 +184,81 @@ std::pair<MCTSNode*, MCTSTree::CollectTag> MCTSTree::collect_one_leaf_tagged() {
         if (key == 0) {
             key = node->board.hash();
             node->zobrist = key;
-            std::cout << "[MCTS][DBG] initialized empty zobrist -> " << key << "\n";
         }
 
         if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
-            // capture v' provisional state BEFORE apply_result may clear it
-            const bool had_vprime = node->has_vprime && (node->vprime_visits > 0);
-
-            // ensure node is expanded with these priors (placeholders; lazy children)
+            // expand with cached priors (placeholders; lazy children)
+            // expand_with_priors should set children_have_priors = true
             expand_with_priors(node, pe->priors);
 
-            // If there were no provisional v' backups, count this visit now.
-            if (!had_vprime) {
-                back_up_along_path(node, pe->value, /*add_visit=*/true);
-            } else {
-                std::cout << "[MCTS][DBG] cache fastpath: had v' -> apply_result\n";
-                apply_result(node, pe->priors, pe->value, /*cache=*/false);
-            }
+            // N was already incremented during descent; just backprop the cached value.
+            back_up_along_path(node, pe->value);
 
-            return { node, MCTSTree::CollectTag::CACHED };
+            cc.tag = CollectTag::CACHED;
+            return cc;
         }
     }
 
-    // Fresh non-terminal leaf: expand with uniform priors and start v'
+    // Fresh non-terminal leaf: expand with uniform priors and return as pending.
     expand_with_uniform_priors(node);
 
-    // shallow qsearch using non-owning raw pointer
-    constexpr int ALPHA = -MCTSTree::VALUE_MATE_CP;
-    constexpr int BETA  =  MCTSTree::VALUE_MATE_CP;
-    int cp = node->board.qsearch(ALPHA, BETA, evaluator_raw_, qopts_shallow_).first;
-
-    float vprime = static_cast<float>(cp) / vprime_scale_;
-    if (vprime < -1.0f) vprime = -1.0f;
-    else if (vprime > 1.0f) vprime = 1.0f;
-
-    node->v_prime = vprime;
-    node->has_vprime = true;
-    node->vprime_visits = 1;
-    back_up_along_path(node, node->v_prime, /*add_visit=*/true);
-
-    // This was a freshly-expanded, non-cached, non-terminal leaf.
-    return { node, MCTSTree::CollectTag::NEW_LEAF };
+    cc.tag = CollectTag::NEW_LEAF;
+    return cc;
 }
 
 // Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
 MCTSNode* MCTSTree::collect_one_leaf() {
-    return collect_one_leaf_tagged().first;
+    CollectCounts cc = collect_one_leaf_tagged();
+    return cc.leaf;
 }
 
 // collect_many_leaves: collect up to `n_new` new leaves (non-terminal,
 // non-cached) and stop early if we've applied `n_fastpath` fast-path results
 // (cached OR terminal). This method fills pending_nodes_
-std::tuple<size_t, size_t, size_t>
-MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
-    count_new_ = count_terminal_ = count_cached_ = 0;
-
+CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t new_count = 0;
     size_t cached_count = 0;
     size_t terminal_count = 0;
+    uint64_t total_priorless = 0;
+    uint64_t total_puct = 0;
+
     size_t attempts = 0;
     const size_t try_break = 10000;
 
     while ((new_count < n_new) &&
            (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
            (attempts < try_break)) {
-        auto pr = collect_one_leaf_tagged();
-        MCTSNode* node = pr.first;
-        MCTSTree::CollectTag tag = pr.second;
+
+        CollectCounts cc = collect_one_leaf_tagged();
         ++attempts;
+
+        // accumulate per-descent counters
+        total_priorless += cc.count_priorless;
+        total_puct += cc.count_puct;
+
+        MCTSNode* node = cc.leaf;
+        CollectTag tag = cc.tag;
+
         if (!node) break;
 
-        if (tag == MCTSTree::CollectTag::NEW_LEAF) {
+        if (tag == CollectTag::NEW_LEAF) {
             uint64_t z = this->queue_pending(node);
             ++new_count;
-        } else if (tag == MCTSTree::CollectTag::CACHED) {
+        } else if (tag == CollectTag::CACHED) {
             ++cached_count;
-        } else if (tag == MCTSTree::CollectTag::TERMINAL) {
+        } else if (tag == CollectTag::TERMINAL) {
             ++terminal_count;
         }
     }
 
-    count_new_      = new_count;
-    count_cached_   = cached_count;
-    count_terminal_ = terminal_count;
-
-    return { count_new_, count_terminal_, count_cached_ };
+    // build the return struct
+    CollectResults res;
+    res.count_new = new_count;
+    res.count_cached = cached_count;
+    res.count_terminal = terminal_count;
+    res.total_priorless = total_priorless;
+    res.total_puct = total_puct;
+    return res;
 }
 
 void MCTSTree::apply_result(
@@ -231,81 +269,85 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // Protect node modifications with tree mutex
     std::lock_guard<std::mutex> g(tree_mutex_);
 
-    // Overwrite priors with NN priors (unchanged behaviour)
-    node->P.clear();
-    node->P.reserve(move_priors.size());
-    for (const auto& mp : move_priors)
-        node->P.emplace(mp.first, mp.second);
+    // build fast lookup (uci -> prior) from sorted priors
+    std::unordered_map<std::string,float> priormap;
+    priormap.reserve(move_priors.size());
+    for (const auto &p : move_priors) priormap.emplace(p.first, p.second);
 
-    // If we had provisional backups with v′, replace them with V.
-    if (node->has_vprime && node->vprime_visits > 0) {
-       const int   k      = node->vprime_visits;         // exact count of v′ backups
-       const float vprime = node->v_prime;               // placeholder value used
-       const float delta  = (value_white_pov - vprime) * static_cast<float>(k);
-
-        // // Apply the correction along the path to root; do NOT change N.
-        std::vector<MCTSNode*> path;
-        for (MCTSNode* p = node; p; p = p->parent) path.push_back(p);
-        if (!path.empty() && path.back() == root_.get()) {
-            for (auto it = path.rbegin(); it != path.rend(); ++it) {
-                MCTSNode* n = *it;
-                n->W += delta;
-                n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
-            }
-        }
-
-        // Clear v′ bookkeeping on the leaf where V arrived
-        node->has_vprime    = false;
-        node->vprime_visits = 0;
-        node->value         = value_white_pov;   // cache latest true value
-    } else {
-        // No v′ to replace: just cache the fresh value for introspection.
-        node->value = value_white_pov;
+    // update priors in-place on existing ordered_children (all moves are present)
+    for (auto &ce : node->ordered_children) {
+        ce.prior = priormap.at(ce.uci);
     }
 
+    // stable-sort in-place by prior descending (preserves any existing child ownership)
+    std::stable_sort(node->ordered_children.begin(), node->ordered_children.end(),
+                     [](const MCTSNode::ChildEntry &a, const MCTSNode::ChildEntry &b){
+                         return a.prior > b.prior;
+                     });
+
+    node->children_have_priors = true;
+    node->value = value_white_pov;
+
+    // Backpropagate value up the path (we hold tree_mutex_)
+    back_up_along_path_nolock(node, value_white_pov);
+
+    // Optionally populate the priors cache from the canonical ordered_children order
     if (cache) {
         CacheEntry e;
-        e.priors = move_priors;
-        e.value  = value_white_pov;
-        // insert into the priors cache. now threadsafe via mutex
-        priors_cache().insert(node->board.hash(), std::move(e));
+        e.value = value_white_pov;
+        e.priors.reserve(node->ordered_children.size());
+        for (const auto &ce : node->ordered_children) e.priors.emplace_back(ce.uci, ce.prior);
+
+        uint64_t key = (node->zobrist != 0) ? node->zobrist : node->board.hash();
+        priors_cache().insert(key, std::move(e));
     }
 }
 
-void MCTSTree::back_up_along_path(MCTSNode* leaf, float v, bool add_visit) {
+// Public wrapper: acquires the lock and delegates to the nolock variant.
+void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
     if (!leaf) return;
+
+    // Build path (no lock needed for traversal)
     std::vector<MCTSNode*> path;
     for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
     if (path.empty()) return;
 
-    // Validate root relationship under lock
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        if (path.back() != root_.get()) return;
-    }
-
-    // Mutate along path under lock
+    // Acquire lock and validate root ownership, then delegate.
     std::lock_guard<std::mutex> g(tree_mutex_);
+    if (path.back() != root_.get()) return;
+
+    back_up_along_path_nolock(leaf, v);
+}
+
+// Nolock variant: caller must hold tree_mutex_. Applies W and recomputes Q.
+// This mirrors the naming/semantics used by your expand_*_nolock helpers.
+void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
+    if (!leaf) return;
+
+    // Rebuild path under the assumption the caller holds the lock.
+    std::vector<MCTSNode*> path;
+    for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
+    if (path.empty()) return;
+    if (path.back() != root_.get()) return;
+
+    // Apply updates from root->...->leaf (iterate reversed).
     for (auto it = path.rbegin(); it != path.rend(); ++it) {
         MCTSNode* n = *it;
-        if (add_visit) n->N += 1;
         n->W += v;
-        n->Q  = (n->N > 0) ? (n->W / n->N) : 0.0f;
+        const int nvis = n->visit_count(); // atomic load (relaxed)
+        n->Q = (nvis > 0) ? (n->W / static_cast<float>(nvis)) : 0.0f;
     }
 }
 
-void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
+void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     if (!node) return;
-    std::lock_guard<std::mutex> g(tree_mutex_);
 
-    node->P.clear();
-    node->children.clear();
+    node->ordered_children.clear();
 
     const auto legal = node->board.legal_moves();
-    node->legal_moves = legal;   // caching here. will need them later
+    node->legal_moves = legal;
     const size_t n = legal.size();
     if (n == 0) {
         node->is_expanded = false;
@@ -313,36 +355,123 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     }
 
     const float u = 1.0f / static_cast<float>(n);
-    node->P.reserve(n);
-    node->children.reserve(n);
+    node->ordered_children.reserve(n);
 
-    for (const auto& mv : legal) {
-        node->P.emplace(mv, u);
-        // Lazy child creation: mark slot but don't build board yet
-        node->children.emplace(mv, nullptr);
+    for (const auto &mv : legal) {
+        MCTSNode::ChildEntry ce;
+        ce.uci = mv;
+        ce.child.reset(nullptr);
+        ce.prior = u;
+        node->ordered_children.emplace_back(std::move(ce));
     }
+
     node->is_expanded = true;
+    node->children_have_priors = false;
+}
+
+void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
+    if (!node) return;
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    expand_with_uniform_priors_nolock(node);
 }
 
 void MCTSTree::expand_with_priors(MCTSNode* node,
     const std::vector<std::pair<std::string,float>>& priors) {
     if (!node) return;
+
     std::lock_guard<std::mutex> g(tree_mutex_);
 
-    node->P.clear();
-    node->children.clear();
+    // Build a fast lookup from incoming priors (no sorting here).
+    std::unordered_map<std::string,float> priormap;
+    priormap.reserve(priors.size());
+    for (const auto &pp : priors) priormap.emplace(pp.first, pp.second);
 
-    node->P.reserve(priors.size());
-    node->children.reserve(priors.size());
-
-    for (const auto &pp : priors) {
-        const std::string &mv = pp.first;
-        float p = pp.second;
-        node->P.emplace(mv, p);
-        node->children.emplace(mv, nullptr); // placeholder, lazy creation later
+    // Update priors on any existing entries (do NOT touch their child unique_ptrs).
+    for (auto &ce : node->ordered_children) {
+        auto it = priormap.find(ce.uci);
+        ce.prior = (it != priormap.end()) ? it->second : 0.0f;
     }
 
+    std::unordered_set<std::string> existing;
+    existing.reserve(node->ordered_children.size());
+    for (const auto &ce : node->ordered_children) existing.insert(ce.uci);
+
+    for (const auto &pp : priors) {
+        if (existing.find(pp.first) == existing.end()) {
+            MCTSNode::ChildEntry ce;
+            ce.uci = pp.first;
+            ce.child.reset(nullptr);   // new entries have no subtree yet (lazy-create)
+            ce.prior = pp.second;
+            node->ordered_children.emplace_back(std::move(ce));
+            existing.insert(pp.first);
+        }
+    }
+
+    // Single canonical sort: primary = prior desc, secondary = uci asc for determinism.
+    std::sort(node->ordered_children.begin(), node->ordered_children.end(),
+              [](const MCTSNode::ChildEntry &a, const MCTSNode::ChildEntry &b){
+                  if (a.prior != b.prior) return a.prior > b.prior;
+                  return a.uci < b.uci;
+              });
+
     node->is_expanded = true;
+    node->children_have_priors = true;
+}
+
+void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
+    if (eps <= 0.0f || alpha <= 0.0f) return;
+
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    MCTSNode* r = root_.get();
+    if (!r) return;
+
+    if (!r->is_expanded) {
+        // ensure the root has children to mix with noise
+        expand_with_uniform_priors_nolock(r);
+    }
+
+    const size_t n = r->ordered_children.size();
+    if (n == 0) return;
+
+    // copy existing priors
+    std::vector<float> pri(n);
+    for (size_t i = 0; i < n; ++i) pri[i] = r->ordered_children[i].prior;
+
+    // sample Dirichlet via independent Gamma(alpha,1) draws
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::gamma_distribution<float> gdist(alpha, 1.0f);
+
+    std::vector<float> dir(n);
+    double dir_sum = 0.0;
+    for (size_t i = 0; i < n; ++i) { dir[i] = gdist(gen); dir_sum += dir[i]; }
+    if (dir_sum <= 0.0) {
+        const float u = 1.0f / static_cast<float>(n);
+        for (size_t i = 0; i < n; ++i) dir[i] = u;
+    } else {
+        const float inv = static_cast<float>(1.0 / dir_sum);
+        for (size_t i = 0; i < n; ++i) dir[i] *= inv;
+    }
+
+    // mix noise into priors and renormalize
+    double s = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        float p0 = pri[i];
+        float pnew = (1.0f - eps) * p0 + eps * dir[i];
+        if (pnew < 0.0f) pnew = 0.0f;
+        pri[i] = pnew;
+        s += static_cast<double>(pri[i]);
+    }
+
+    if (s > 0.0) {
+        const float invs = static_cast<float>(1.0 / s);
+        for (size_t i = 0; i < n; ++i) {
+            r->ordered_children[i].prior = pri[i] * invs;
+        }
+    } else {
+        const float u = 1.0f / static_cast<float>(n);
+        for (size_t i = 0; i < n; ++i) r->ordered_children[i].prior = u;
+    }
 }
 
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
@@ -356,19 +485,16 @@ uint64_t MCTSTree::queue_pending(MCTSNode* n) {
 void MCTSTree::clear_pending() {
     std::lock_guard<std::mutex> g(tree_mutex_);
     pending_nodes_.clear();
-    count_new_ = 0;
-    count_terminal_ = 0;
-    count_cached_ = 0;
 }
 
 void MCTSTree::resolve_pending() {
     // Quick check
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
-        if (pending_nodes_.empty()) {return;}
+        if (pending_nodes_.empty()) return;
     }
 
-    // Phase 1: move pending nodes into a local vector under lock (drain)
+    // Drain pending nodes into a local vector under lock
     std::vector<MCTSNode*> to_process;
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
@@ -376,49 +502,76 @@ void MCTSTree::resolve_pending() {
         pending_nodes_.clear();
     }
 
-    // Phase 2: process each node without holding tree_mutex_ 
-    // safe because node pointers are stable while tree exists)
+    // Process without holding tree_mutex_
     for (MCTSNode* node : to_process) {
         if (!node) continue;
 
         const uint64_t z = node->zobrist;
-        const RawEntry* re = raw_policy_cache().lookup(z); // Raw cache is already thread-safe
+
+        // Lookup the raw network entry by zobrist (non-blocking)
+        const RawEntry* re = raw_policy_cache().lookup(z);
         if (!re) {
-            // Not available yet — requeue the node (under lock) for future attempts
-            std::lock_guard<std::mutex> g(tree_mutex_);
-            pending_nodes_.push_back(node);
+            {
+                // Not ready yet — requeue under lock for later processing
+                std::lock_guard<std::mutex> g(tree_mutex_);
+                pending_nodes_.push_back(node);
+            }
+            // Diagnostic: show we missed a cache hit and requeued the node.
+            std::cout << "[resolve_pending] CACHE MISS: zobrist=0x"
+                    << std::hex << z << std::dec
+                    << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
+                    << " - requeued\n" << std::flush;
+            continue;
+        }   
+
+        // If the model hasn't produced a real value yet, requeue and wait.
+        if (!re->has_value) {
+            {
+                std::lock_guard<std::mutex> g(tree_mutex_);
+                pending_nodes_.push_back(node);
+            }
+            // Diagnostic: raw entry present but missing value; show and requeue.
+            std::cout << "[resolve_pending] NO VALUE YET: zobrist=0x"
+                    << std::hex << z << std::dec
+                    << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
+                    << " - requeued\n" << std::flush;
             continue;
         }
 
-        // Have raw outputs; need prior engine to turn them into priors.
-        PriorEngine* pe = get_prior_engine_raw();
+        // Compute value_white_pov from model value (model gives STM-POV)
+        const bool stm_white = (node->board.side_to_move() == "w");
+        const float value_white_pov = stm_white ? re->value : -re->value;
 
-        // Build FloatView wrappers expected by PriorEngine::build
-        FloatView ff{ re->p_from.empty() ? nullptr : re->p_from.data(), re->p_from.size() };
-        FloatView ft{ re->p_to.empty()   ? nullptr : re->p_to.data(),   re->p_to.size()   };
-        FloatView fp{ re->p_piece.empty()? nullptr : re->p_piece.data(), re->p_piece.size()};
-        FloatView fr{ re->p_promo.empty()? nullptr: re->p_promo.data(),  re->p_promo.size()};
-
-        // Use the nodes cached legal moves (expand_with_uniform_priors already stored them).
-        // If for some reason legal_moves is empty, fall back to asking the board.
-        std::vector<std::string> legal;
+        // Grab the LegalMaskandMap attached to the node. Must be present.
+        std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
         {
-            // small read under tree_mutex_ to safely access node->legal_moves
             std::lock_guard<std::mutex> g(tree_mutex_);
-            if (!node->legal_moves.empty()) legal = node->legal_moves;
+            lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
         }
-        if (legal.empty()) legal = node->board.legal_moves();
+        if (!lm_sp) {
+            std::stringstream ss;
+            ss << "resolve_pending: missing LegalMaskandMap on node (zobrist=" << z
+               << "). Ensure pending_encoded_stm_pov attached it.";
+            throw std::runtime_error(ss.str());
+        }
 
-        // Build priors (this is potentially slow but does not hold tree_mutex_)
-        auto built_priors = pe->build(node->board, legal, ff, ft, fp, fr);
+        // Pluck priors directly from the model's raw policy vector (STM-POV).
+        const auto &policy_vec = re->p_policy; // model-provided vector (STM-POV)
+        const auto &pairs = lm_sp->lookup();
 
-        // Determine value: prefer the network value if present in raw entry, otherwise fall back
-        // to node->v_prime if available, else 0.0f.
-        float value_white_pov = re->has_value ? re->value: (node->has_vprime ? node->v_prime : 0.0f);
-        //TEMPORARILY IGNORING NN VALUE !!!!!!!
-        //float value_white_pov = node->v_prime;
+        std::vector<std::pair<std::string, float>> built_priors;
+        built_priors.reserve(pairs.size());
 
-        // Apply result (apply_result will take tree lock internally)
+        for (const auto &p : pairs) {
+            const std::string &uci = p.first;
+            const uint16_t idx = p.second; // expected index into policy_vec
+
+            // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
+            const float prob = policy_vec[idx];
+            built_priors.emplace_back(uci, prob);
+        }
+
+        // Apply result: this will overwrite priors and backpropagate the value.
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
     }
 }
@@ -428,30 +581,33 @@ std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
     const MCTSNode* r = root_.get();
     std::vector<std::pair<std::string, int>> rows;
     if (!r) return rows;
-    rows.reserve(r->children.size());
-    for (const auto& kv : r->children) {
-        const std::string& mv = kv.first;
-        const MCTSNode* ch = kv.second.get();
-        int N = ch ? ch->N : 0;
-        rows.emplace_back(mv, N);
+    rows.reserve(r->ordered_children.size());
+    for (const auto& ce : r->ordered_children) {
+        const std::string& mv = ce.uci;
+        const MCTSNode* ch = ce.child.get();
+        int nvis = ch ? ch->visit_count() : 0;
+        rows.emplace_back(mv, nvis);
     }
-    std::sort(rows.begin(), rows.end(), [](auto& a, auto& b){ return a.second > b.second; });
+    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b){ return a.second > b.second; });
     return rows;
 }
 
 float MCTSTree::visit_weighted_Q() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
-    if (!r || r->children.empty()) return 0.0f;
+    if (!r || r->ordered_children.empty()) return 0.0f;
 
     double sum_w = 0.0;
     double sum_wq = 0.0;
-    for (const auto& kv : r->children) {
-        const MCTSNode* ch = kv.second.get();
+    for (const auto& ce : r->ordered_children) {
+        const MCTSNode* ch = ce.child.get();
         if (!ch) continue;
-        if (ch->N > 0) {
-            sum_w  += static_cast<double>(ch->N);
-            sum_wq += static_cast<double>(ch->Q) * static_cast<double>(ch->N);
+
+        // load visits from the atomic counter
+        const int nvis = ch->visit_count();
+        if (nvis > 0) {
+            sum_w  += static_cast<double>(nvis);
+            sum_wq += static_cast<double>(ch->Q) * static_cast<double>(nvis);
         }
     }
 
@@ -461,19 +617,19 @@ float MCTSTree::visit_weighted_Q() const {
 std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
-    if (!r || r->children.empty()) return {"", nullptr};
+    if (!r || r->ordered_children.empty()) return {"", nullptr};
 
     const std::string* best_mv = nullptr;
     const MCTSNode*    best_ch = nullptr;
     int best_N = -1;
 
-    // iterate children safely, skipping nullptr placeholders
-    for (const auto& kv : r->children) {
-        const MCTSNode* ch = kv.second.get();
-        int N = ch ? ch->N : 0;
+    // iterate ordered_children, skipping nullptr placeholders
+    for (const auto& ce : r->ordered_children) {
+        const MCTSNode* ch = ce.child.get();
+        int N = ch ? ch->visit_count() : 0;
         if (N > best_N) {
             best_N = N;
-            best_mv = &kv.first;
+            best_mv = &ce.uci;
             best_ch = ch;
         }
     }
@@ -486,25 +642,27 @@ bool MCTSTree::advance_root(const std::string& mv) {
     std::lock_guard<std::mutex> g(tree_mutex_);
     last_path_.clear();
 
-    // Take ownership of the current root so we can safely move out of it
     auto old_root = std::move(root_);
-
     if (!old_root) return false;
 
-    // Case 1: reuse existing child subtree if it exists and is non-null
-    auto it = old_root->children.find(mv);
-    if (it != old_root->children.end() && it->second) {
-        auto new_root = std::move(it->second);
-        new_root->parent = nullptr;
-        root_ = std::move(new_root);
-        ++epoch_;
-        return true;
+    // Try to find an ordered_children entry with matching UCI that already
+    // contains an instantiated subtree. If found, move that subtree to be new root.
+    for (auto it = old_root->ordered_children.begin(); it != old_root->ordered_children.end(); ++it) {
+        if (it->uci == mv && it->child) {
+            auto new_root = std::move(it->child); // move ownership out
+            new_root->parent = nullptr;
+            // Erase the entry from the old root's child list to avoid stale pointers
+            old_root->ordered_children.erase(it);
+            root_ = std::move(new_root);
+            ++epoch_;
+            return true;
+        }
     }
 
-    // Case 2: no usable child — create a fresh root after pushing the move
+    // No existing subtree — create a fresh root by pushing the move
     backend::Board nb = old_root->board;
     if (!nb.push_uci(mv)) {
-        // invalid move for this position — restore old root to avoid leaving tree empty
+        // invalid move for this position — restore old root
         root_ = std::move(old_root);
         return false;
     }
@@ -520,20 +678,17 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
     const MCTSNode* r = root_.get();
     if (!r) return out;
 
-    out.reserve(r->children.size());
-    for (const auto& kv : r->children) {
-        const std::string& mv = kv.first;
-        const MCTSNode* ch = kv.second.get();
-
-        float prior = 0.0f;
-        if (auto it = r->P.find(mv); it != r->P.end()) prior = it->second;
+    out.reserve(r->ordered_children.size());
+    for (const auto& ce : r->ordered_children) {
+        const std::string& mv = ce.uci;
+        const MCTSNode* ch = ce.child.get();
 
         ChildDetail cd;
         cd.uci = mv;
-        cd.N = ch ? ch->N : 0;
+        cd.N = ch ? ch->visit_count() : 0;
         cd.Q = ch ? ch->Q : 0.0f;
         cd.vprime_visits = ch ? ch->vprime_visits : 0;
-        cd.prior = prior;
+        cd.prior = ce.prior;
         cd.is_terminal = ch ? ch->is_terminal : false;
         cd.value = ch ? ch->value : 0.0f;
         out.push_back(std::move(cd));
@@ -556,17 +711,17 @@ std::pair<float,int> MCTSTree::depth_stats() const {
     st.emplace_back(r, 0);
     while (!st.empty()) {
         auto [n, d] = st.back(); st.pop_back();
-        if (!n) continue; // defensive: skip null placeholders
+        if (!n) continue; // skip null placeholders if any
 
-        if (n != r && n->N > 0) {
-            total_v += n->N;
-            sum_vd  += static_cast<float>(d) * n->N;
+        if (n != r && n->visit_count() > 0) {
+            total_v += n->visit_count();
+            sum_vd  += static_cast<float>(d) * n->visit_count();
             if (d > dmax) dmax = d;
         }
 
-        // push only non-null children
-        for (const auto& kv : n->children) {
-            const MCTSNode* ch = kv.second.get();
+        // push only non-null children (use ordered_children)
+        for (const auto& ce : n->ordered_children) {
+            const MCTSNode* ch = ce.child.get();
             if (ch) st.emplace_back(ch, d + 1);
         }
     }
@@ -581,32 +736,32 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
     const MCTSNode* node = root_.get();
     if (!node || max_len <= 0) return pv;
 
-    pv.reserve((size_t)max_len);
+    pv.reserve(static_cast<size_t>(max_len));
 
     for (int depth = 0; depth < max_len; ++depth) {
-        if (node->children.empty()) break;
+        if (node->ordered_children.empty()) break;
 
         // pick child with max visits
         const std::string* best_mv = nullptr;
         const MCTSNode*    best_ch = nullptr;
         int best_N = -1;
+        float best_prior = 0.0f;
 
-        for (const auto& kv : node->children) {
-            const std::string& mv = kv.first;
-            const MCTSNode* ch   = kv.second.get();
+        for (const auto& ce : node->ordered_children) {
+            const std::string& mv = ce.uci;
+            const MCTSNode* ch   = ce.child.get();
             if (!ch) continue; // skip placeholder children
-            const int N = ch->N;
+            const int N = ch->visit_count();
             if (N > best_N) {
                 best_N  = N;
                 best_mv = &mv;
                 best_ch = ch;
+                best_prior = ce.prior;
             }
         }
         if (!best_mv || best_N <= 0 || !best_ch) break; // stop if no visited child
 
-        float prior = 0.0f;
-        if (auto it = node->P.find(*best_mv); it != node->P.end()) prior = it->second;
-        pv.push_back(PVItem{*best_mv, best_N, prior, best_ch->Q});
+        pv.push_back(PVItem{*best_mv, best_N, best_prior, best_ch->Q});
 
         node = best_ch; // descend
     }

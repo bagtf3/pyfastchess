@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm> 
 #include <cstring>
+#include <array>
 #include "chess.hpp" 
 #include "backend.hpp"
 #include "evaluator.hpp"
@@ -168,8 +169,7 @@ bool Board::gives_double_attack(const std::string& uci, bool include_king) const
     };
 
     // Destination safety: the moved piece at its new square must not be
-    // (a) hanging (attacked and not defended), nor
-    // (b) attacked by *lower*.
+    // hanging, nor attacked by lower value
     const int to_sq = mv.to().index();
     const int mover_pt = piece_type_idx(to_sq);
     if (mover_pt >= 0 && mover_pt <= 5) {
@@ -247,21 +247,12 @@ std::string Board::side_to_move() const {
 }
 
 std::string Board::enpassant_sq() const {
-    // Safest: parse FEN field #4 (0-based idx 3)
-    // FEN: pieces side castle ep halfmove fullmove
-    std::string f = board_.getFen(true);
-    std::istringstream iss(f);
-    std::string parts[6];
-    for (int i = 0; i < 6 && (iss >> parts[i]); ++i) {}
-
-    if (!parts[3].empty()) {
-        return parts[3]; // already "-" or "e3"
-    }
-    return "-";
+    const chess::Square sq = board_.enpassantSq();
+    if (sq == chess::Square::NO_SQ) return std::string("-");
+    return static_cast<std::string>(sq);
 }
 
 std::string Board::castling_rights() const {
-    // Library already provides correctly formatted string
     return board_.getCastleString();
 }
 
@@ -285,7 +276,7 @@ bool Board::gives_check(const std::string& uci) const {
     chess::Move mv = chess::uci::uciToMove(board_, uci);
     if (mv == chess::Move::NO_MOVE) return false;
     chess::CheckType ct = board_.givesCheck(mv);
-    return ct != chess::CheckType::NO_CHECK;  // <-- was ...::NONE
+    return ct != chess::CheckType::NO_CHECK;
 }
 
 bool backend::Board::gives_checkmate(const std::string& uci) const {
@@ -472,6 +463,135 @@ Board::moves_to_labels(const std::vector<std::string>& ucis) const {
     }
     return {froms, tos, pcs, pros};
 }
+
+std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& ucis) const {
+    std::vector<uint16_t> out;
+    out.reserve(ucis.size());
+
+    // STM-POV: true if white to move, false if black (we flip squares later)
+    const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
+
+    for (const auto &u : ucis) {
+        if (u.size() < 4) {
+            throw std::invalid_argument("moves_to_indices: invalid UCI (too short): " + u);
+        }
+
+        // move_to_labels should return robust from/to indices on the raw board coords
+        auto [from_idx_raw, to_idx_raw, piece_type, promo_char_dummy] = move_to_labels(u);
+
+        // Build chess::Square from raw indices
+        chess::Square sf(static_cast<chess::Square::underlying>(from_idx_raw));
+        chess::Square st(static_cast<chess::Square::underlying>(to_idx_raw));
+
+        // STM-POV flip first so indices are computed in STM coordinates
+        if (!stm_white) {
+            sf.flip();
+            st.flip();
+        }
+
+        const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
+
+        // canonical file/rank of destination (after STM flip)
+        const int st_index = st.index(); // 0..63
+        const int st_file  = st_index % 8;
+        const int st_rank  = st_index / 8; // 0..7
+
+        // detect underpromotion (n/b/r) from UCI (fifth char)
+        int underpromo_type = -1; // 0=N,1=B,2=R, -1 = not underpromo (includes queen)
+        if (u.size() > 4) {
+            char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(u[4])));
+            if (ch == 'n') underpromo_type = 0;
+            else if (ch == 'b') underpromo_type = 1;
+            else if (ch == 'r') underpromo_type = 2;
+            // 'q' and other -> not an underpromo (map to normal dest)
+        }
+
+        uint32_t flat = 0;
+        if (underpromo_type >= 0) {
+            // unique 0..191 = from_file + 8*to_file + 64*underpromo_type
+            const int from_file = from_slot % 8;
+            const int to_file   = st_file;
+            const uint32_t unique = static_cast<uint32_t>(from_file + 8 * to_file + 64 * underpromo_type);
+            flat = 4096u + unique; // maps into 4096..4287
+        } else {
+            // standard mapping (includes queen promotions)
+            const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63
+            flat = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
+        }
+
+        out.push_back(static_cast<uint16_t>(flat));
+    }
+
+    return out;
+}
+
+
+LegalMaskandMap Board::legal_move_mask() const {
+    // size = TOTAL_MOVE_SPACE (64 * MOVE_TO_WIDTH == 4288)
+    constexpr size_t N = TOTAL_MOVE_SPACE;
+    LegalMaskandMap out;
+    out.mask.assign(N, 0);
+
+    chess::Movelist ml;
+    chess::movegen::legalmoves(ml, board_);
+
+    const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
+
+    out.uci_idx_pairs.reserve(ml.size());
+
+    for (const auto &mv : ml) {
+        chess::Square sf = mv.from();
+        chess::Square st = mv.to();
+
+        // remap castling to canonical king destination
+        if (mv.typeOf() == chess::Move::CASTLING) {
+            const bool king_side = (mv.to() > mv.from());
+            st = chess::Square::castling_king_square(king_side, board_.sideToMove());
+        }
+
+        // compute STM-POV flip first
+        if (!stm_white) {
+            sf.flip();
+            st.flip();
+        }
+
+        const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
+
+        // convert move to UCI string (engine's POV)
+        std::string uci = chess::uci::moveToUci(mv);
+
+        // get base file/rank of st (after flip)
+        const int st_index = st.index(); // 0..63
+        const int st_file  = st_index % 8;
+        const int st_rank  = st_index / 8; // 0..7
+
+        // detect underpromotion char (n/b/r)
+        int underpromo_type = -1; // -1 -> not underpromo
+        if (uci.size() > 4) {
+            char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
+            if (ch == 'n') underpromo_type = 0;
+            else if (ch == 'b') underpromo_type = 1;
+            else if (ch == 'r') underpromo_type = 2;
+        }
+
+        uint32_t idx = 0;
+        if (underpromo_type >= 0) {
+            const int from_file = from_slot % 8;
+            const int to_file   = st_file;
+            const uint32_t unique = static_cast<uint32_t>(from_file + 8 * to_file + 64 * underpromo_type); // 0..191
+            idx = 4096u + unique; // 4096..4287
+        } else {
+            const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63 (queen promos included)
+            idx = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
+        }
+
+        out.mask[idx] = 1;
+        out.uci_idx_pairs.emplace_back(std::move(uci), static_cast<uint16_t>(idx));
+    }
+
+    return out;
+}
+
 
 int Board::piece_at(int square) const {
     chess::Square s(static_cast<chess::Square::underlying>(square));
@@ -682,9 +802,6 @@ terminal_value_cp_white_pov(const Board& b, int mate_cp) noexcept {
 }
 
 namespace {
-// --- fast/bitboard-based frame builder (drop-in alongside make_frame_14) ---
-// Place in the same anonymous namespace as make_frame_14 so symbols remain local.
-
 static inline int frame_cell_from_sq(int sq) {
     // Convert internal square index (0 == a1, 63 == h8) into the
     // (r*8 + c) cell index used by make_frame_14 (r==0 corresponds to top row from FEN)
@@ -765,6 +882,28 @@ static void make_frame_14_bitboards(const backend::Board& b, uint8_t out[8*8*14]
     }
 }
 
+static constexpr int BASE = 9;
+static constexpr int KING_NO_CASTLE = 6;
+static constexpr int KING_KS_ONLY = 7;
+static constexpr int KING_QS_ONLY = 8;
+static constexpr int KING_BOTH = 9;
+static constexpr int EP_POSSIBLE = 19;
+
+// board_to_64_tokens: bitboard-based implementation
+static inline int get_king_type_for_color(const backend::Board &b, chess::Color color) {
+    // use the raw chess board to access typed castling rights
+    const chess::Board &rb = b.raw_board();
+    const auto cr = rb.castlingRights(); // typed CastlingRights object
+
+    const bool ks = cr.has(color, chess::Board::CastlingRights::Side::KING_SIDE);
+    const bool qs = cr.has(color, chess::Board::CastlingRights::Side::QUEEN_SIDE);
+
+    if (ks && qs) return KING_BOTH;
+    if (ks)       return KING_KS_ONLY;
+    if (qs)       return KING_QS_ONLY;
+    return KING_NO_CASTLE;
+}
+
 } // anonymous
 
 // stacked planes builder using bitboards
@@ -789,6 +928,78 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
         }
         if (!tmp.unmake()) break;
     }
+    return out;
+}
+
+// board_to_64_tokens: bitboard-based implementation
+std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) {
+    std::array<int16_t,64> out;
+    out.fill(0);
+
+    using Color = chess::Color;
+    using PieceType = chess::PieceType;
+    using Square = chess::Square;
+
+    const chess::Board &rb = board.raw_board();
+
+    // STM color and quick flag
+    const Color stm = rb.sideToMove();
+    const bool stm_is_white = (stm == Color::WHITE);
+
+    // compute king-types in STM-as-white semantics
+    int wht_king = stm_is_white ? get_king_type_for_color(board, Color::WHITE)
+                                : get_king_type_for_color(board, Color::BLACK);
+    int blk_king = stm_is_white ? get_king_type_for_color(board, Color::BLACK)
+                                : get_king_type_for_color(board, Color::WHITE);
+
+    // EP: cheap accessor (Square or NO_SQ). convert to index and flip if needed.
+    Square ep_sq = rb.enpassantSq();
+    if (ep_sq != Square::NO_SQ) {
+        int ep_idx = ep_sq.index();
+        if (!stm_is_white) ep_idx ^= 56;
+        out[ep_idx] = EP_POSSIBLE;
+    }
+
+    // helper lambda to write a token at a square index (STM flipped if needed)
+    auto write_token_at_sq = [&](int sq, int16_t token) {
+        const int idx = stm_is_white ? sq : (sq ^ 56);
+        out[idx] = token;
+    };
+
+    // Iterate piece types and colors using bitboards. This avoids scanning empty squares.
+    const std::array<PieceType,6> piece_types = {
+        PieceType::PAWN, PieceType::KNIGHT, PieceType::BISHOP,
+        PieceType::ROOK, PieceType::QUEEN, PieceType::KING
+    };
+
+    for (PieceType pt : piece_types) {
+        // loop white then black to compute tokens (we need color relative to stm)
+        for (Color col : { Color::WHITE, Color::BLACK }) {
+            // get bitboard for this piece type and color
+            uint64_t bb = rb.pieces(pt, col).getBits();
+
+            while (bb) {
+                int sq = ctzll_u64(bb);      // 0..63 index of least-significant bit
+                bb &= bb - 1ULL;             // pop lsb
+
+                // token base depends on whether this piece is same color as STM
+                const bool same_as_stm = (col == stm);
+                const int base = same_as_stm ? 0 : BASE;
+
+                if (pt != chess::PieceType::KING) {
+                    // NOTE: chess::PieceType is 0-based in C++; Python uses 1..6.
+                    const int piece_val = static_cast<int>(pt) + 1; // map 0..5 -> 1..6
+                    const int16_t token = static_cast<int16_t>(base + piece_val);
+                    write_token_at_sq(sq, token);
+                } else {
+                    int king_val = same_as_stm ? wht_king : blk_king;
+                    const int16_t token = static_cast<int16_t>(base + king_val);
+                    write_token_at_sq(sq, token);
+                }
+            }
+        }
+    }
+
     return out;
 }
 

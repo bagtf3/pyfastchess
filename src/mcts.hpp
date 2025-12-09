@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <tuple>
@@ -14,6 +15,27 @@
 #include "backend.hpp"
 #include "evaluator.hpp"
 #include "singleton_registry.hpp"
+
+// forward decl so CollectCounts can hold a MCTSNode*
+struct MCTSNode;
+
+// Telemetry/return types used by collect_one_leaf_tagged / collect_many_leaves
+enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
+
+struct CollectCounts {
+    CollectTag tag = CollectTag::NEW_LEAF;
+    MCTSNode* leaf = nullptr;       // the leaf node reached
+    uint32_t count_priorless = 0;   // times uniform selection was taken during this descent
+    uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
+};
+
+struct CollectResults {
+    size_t count_new = 0;
+    size_t count_terminal = 0;
+    size_t count_cached = 0;
+    uint64_t total_priorless = 0;
+    uint64_t total_puct = 0;
+};
 
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
@@ -49,7 +71,7 @@ struct MCTSNode {
     std::string uci;
 
     // --- Stats ---
-    int   N     = 0;      // visits
+    std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
     float W     = 0.0f;   // total value (white-POV)
     float Q     = 0.0f;   // mean value
 
@@ -60,10 +82,24 @@ struct MCTSNode {
     int   vprime_visits   = 0;      // was qprime_visits
 
     // --- Priors / children ---
-    // P: move -> prior (root stores priors for its children)
-    std::unordered_map<std::string, float> P;
-    // children: move -> child node
-    std::unordered_map<std::string, std::unique_ptr<MCTSNode>> children;
+    // Canonical child entry: owner of optional child subtree, prior, and UCI string.
+    // This is the single source-of-truth for both ordering and the prior values.
+    struct ChildEntry {
+        std::string uci;                            // move in UCI form (parent->child)
+        std::unique_ptr<MCTSNode> child;            // nullable; lazy-instantiated child
+        float prior = 0.0f;                         // prior for this move
+
+        ChildEntry() = default;
+        ChildEntry(const std::string& u, float p = 0.0f)
+            : uci(u), child(nullptr), prior(p) {}
+    };
+
+    // Authoritative, ordered list of children.
+    // - Entries may have child == nullptr (lazy creation).
+    // - Order is significant: when priors are present, entries should be sorted by prior
+    //   (descending). When priors are absent, expand_with_uniform_priors populates this
+    //   in the deterministic order returned by board.legal_moves().
+    std::vector<ChildEntry> ordered_children;
 
     // --- State ---
     backend::Board board;   // exact position at this node
@@ -71,7 +107,12 @@ struct MCTSNode {
     std::vector<std::string> legal_moves;  // filled on expand; reused later
 
     bool is_expanded = false;
+    bool children_have_priors = false;
     float value = 0.0f;     // cached leaf value when expanded (optional)
+
+    // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
+    // heap object and store it here so the node can later access it without copies.
+    std::shared_ptr<const backend::LegalMaskandMap> legal_mask_map;
 
     // Disallow copying (because we hold unique_ptr children)
     MCTSNode(const MCTSNode&) = delete;
@@ -84,7 +125,17 @@ struct MCTSNode {
     MCTSNode(const backend::Board& b, MCTSNode* parent_=nullptr, std::string uci_from_parent="");
     
     // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
-    MCTSNode* select_child_lazy_ptr(float c_puct);
+    MCTSNode* select_child_lazy_ptr(float c_puct, CollectCounts* cc = nullptr);
+
+    // safe, convenient accessors for the atomic visit counter
+    int visit_count() const noexcept {
+        return N.load(std::memory_order_relaxed);
+    }
+
+    // increment visits (hot path): uses relaxed ordering
+    void add_visit(int delta = 1) noexcept {
+        N.fetch_add(delta, std::memory_order_relaxed);
+    }
 
 };
 
@@ -100,7 +151,7 @@ public:
     MCTSNode* collect_one_leaf();
 
     // collects many leaves, stores in a pending queue, returns counts
-    std::tuple<size_t, size_t, size_t> collect_many_leaves(size_t n_new, size_t n_fastpath);
+    CollectResults collect_many_leaves(size_t n_new, size_t n_fastpath);
 
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
     // Also pops virtual losses along the stored path and calls backup().
@@ -126,6 +177,9 @@ public:
     // Accessors
     MCTSNode* root() { return root_.get(); }
     const MCTSNode* root() const { return root_.get(); }
+    
+    // Add Dirichlet noise to root priors (thread-safe)
+    void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
 
     bool advance_root(const std::string& move_uci);
     int  epoch() const { return epoch_; }
@@ -133,9 +187,9 @@ public:
     std::vector<ChildDetail> root_child_details() const;
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
-    
+
     std::vector<PVItem> principal_variation(int max_len = 24) const;
-    // Optional runtime updater (you can keep it but if you never swap evaluators it's unused)
+    // Optional runtime updater
     void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
     std::shared_ptr<evaluator::Evaluator> get_evaluator() const;
 
@@ -145,21 +199,24 @@ public:
 
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
-
+    
 private:
-    enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
-
     std::unique_ptr<MCTSNode> root_;
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
     
-    void back_up_along_path(MCTSNode* leaf, float v, bool add_visit);
+    // Backprop of value along path (adds v to W and recomputes Q).
+    // Visit increments happen during selection-time; backprop DOES NOT modify N.
+    void back_up_along_path(MCTSNode* leaf, float v);           // locks internally
+    void back_up_along_path_nolock(MCTSNode* leaf, float v);    // assumes caller holds tree_mutex_
+
+    void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
     void expand_with_priors(
         MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
 
-    std::pair<MCTSNode*, CollectTag> collect_one_leaf_tagged();
+    CollectCounts collect_one_leaf_tagged();
 
     // Ownership to keep evaluator alive for lifetime of tree:
     std::shared_ptr<evaluator::Evaluator> evaluator_;
@@ -169,11 +226,6 @@ private:
 
     // Tunable scale for cp -> [-1,1] mapping
     float vprime_scale_ = 1500.0f;
-
-    size_t count_new_ = 0;       // number of new, freshly-expanded nodes in last collection
-    size_t count_terminal_ = 0;  // number of terminal hits in last collection
-    size_t count_cached_ = 0;    // number of cached hits in last collection
-
     mutable std::mutex tree_mutex_; 
 };
 

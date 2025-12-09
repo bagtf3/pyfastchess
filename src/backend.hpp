@@ -33,6 +33,35 @@ class Board;
 // but built directly from chess::Bitboard u64s for speed.
 std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_frames = 5);
 
+// Return token ids, STM made white. Indexing is 0..63 (a1..h8), int16_t.
+std::array<int16_t, 64> board_to_64_tokens(const Board& b);
+
+static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
+static constexpr size_t NUM_UNDERPROMOS = 3;         // N, B, R underpromos
+static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67
+static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 4288
+
+struct LegalMaskandMap {
+    // mask where idx = from*MOVE_TO_WIDTH + to_slot (STM-POV)
+    // to_slot = file + rank_index*8, where rank_index in [0..7] = real board ranks,
+    // and rank_index in [8..10] encodes underpromotions: 8=N, 9=B, 10=R.
+    std::vector<uint8_t> mask;
+
+    // compact per-move list: pair<uci_string, stm_pov_idx>
+    std::vector<std::pair<std::string, uint16_t>> uci_idx_pairs;
+
+    // optional non-owning pointer to an external read-only lookup that maps
+    // exactly the same (uci, idx) pairs. If non-null, lookup() will return this.
+    // This pointer is intentionally a raw pointer to avoid copies; it must outlive
+    // the LegalMaskandMap user when set.
+    const std::vector<std::pair<std::string, uint16_t>>* uci_idx_lookup = nullptr;
+
+    // helper accessor: returns external lookup if set, otherwise the owned vector
+    const std::vector<std::pair<std::string, uint16_t>>& lookup() const {
+        return uci_idx_lookup ? *uci_idx_lookup : uci_idx_pairs;
+    }
+};
+
 class Board {
 public:
     Board();
@@ -86,6 +115,11 @@ public:
     // Returns four vectors: from, to, piece, promo (collapsed promo scheme)
     std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>>
     moves_to_labels(const std::vector<std::string>& ucis) const;
+
+    // Returns a vector of (from*64 + to) indices in STM-POV order for the supplied UCIs.
+    std::vector<uint16_t> moves_to_indices(const std::vector<std::string>& ucis) const;
+
+    LegalMaskandMap legal_move_mask() const;
 
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
     int piece_at(int square) const;

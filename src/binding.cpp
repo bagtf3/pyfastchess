@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <sstream>
 #include <cstring> 
+#include <memory>
 #include "backend.hpp"
 #include "mcts.hpp"
 #include "evaluator.hpp"
@@ -22,6 +23,19 @@ static py::array_t<uint8_t> stacked_planes_bitboards(const backend::Board& b, in
     // ensure three args: dest, src, bytes
     std::memcpy(arr.mutable_data(), v.data(), static_cast<size_t>(v.size() * sizeof(uint8_t)));
     return arr;
+}
+
+// wrapper: board_to_64_tokens -> returns np.int16 array (64,)
+static py::array_t<int16_t> board_to_64_tokens_py(const backend::Board& b) {
+    auto arr = backend::board_to_64_tokens(b); // std::array<int16_t,64>
+    py::array_t<int16_t> out({ static_cast<py::ssize_t>(64) });
+    std::memcpy(out.mutable_data(), arr.data(), 64 * sizeof(int16_t));
+    return out;
+}
+
+// wrapper returning np.uint8 array of shape (4288,)
+std::vector<uint8_t> legal_move_mask_py(const backend::Board &b) {
+    return b.legal_move_mask().mask;
 }
 
 static py::tuple board_qsearch_wrapper(backend::Board &b,
@@ -161,12 +175,24 @@ PYBIND11_MODULE(_core, m) {
                "Return (8,8,14*num_frames) uint8 array stacking current + previous positions.\n"
                "Earlier frames are zero if not enough history is available.")
 
+          .def("encode_64_tokens", &board_to_64_tokens_py,
+               "Return a (64,) int16 NumPy array of token ids (STM-made-white canonical).\n"
+               "This is the 1D token encoding alternative to stacked_planes and takes no arguments.")
+
+          .def("legal_move_mask", &legal_move_mask_py,
+               "Return a flattened uint8 mask (length = 64 * MOVE_TO_WIDTH = 4288). "
+               "Index = from*MOVE_TO_WIDTH + to_slot, STM-POV.")
+
           .def("move_to_labels", &backend::Board::move_to_labels, py::arg("uci"),
                "Return (from_idx, to_idx, piece_idx, promo_idx) using collapsed promo scheme.")
-
+          
           .def("moves_to_labels", &backend::Board::moves_to_labels, py::arg("ucis"),
                "Batch: given a list of UCI moves, return (from[], to[], piece[], promo[]) "
                "with collapsed promo (0=no/queen, 1=N, 2=B, 3=R).")
+          
+          .def("moves_to_indices", &backend::Board::moves_to_indices, py::arg("ucis"),
+               "Given list of UCI moves, return list of int indices (from*64 + to) "
+               "in STM-POV order (matching legal_move_mask()).")
 
           .def("piece_at", &backend::Board::piece_at, py::arg("square_index"))
           .def("piece_type_at", &backend::Board::piece_type_at)
@@ -284,21 +310,21 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("P", &PVItem::P)
           .def_readonly("Q", &PVItem::Q);
      
-     // --- MCTSNode (opaque; you mostly use it through MCTSTree) ---
      py::class_<MCTSNode>(m, "MCTSNode")
-          .def("__repr__", [](const MCTSNode& n){
+          .def("__repr__", [](const MCTSNode& n) {
                std::ostringstream oss;
-               oss << "<MCTSNode uci=" << (n.uci.empty() ? "\"<root>\"" : n.uci)
-                    << " N=" << n.N
+               oss << "<MCTSNode uci="
+                    << (n.uci.empty() ? "\"<root>\"" : n.uci)
+                    << " N=" << n.visit_count()
                     << " Q=" << n.Q
                     << " expanded=" << (n.is_expanded ? "1" : "0")
                     << ">";
                return oss.str();
-               })
-          .def_property_readonly("N",    [](const MCTSNode& n){ return n.N; })
+          })
+          // return int visits (not the atomic object)
+          .def_property_readonly("N", [](const MCTSNode &n) { return n.visit_count(); })
           .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
-          .def_property_readonly("P", [](const MCTSNode& n){ return n.P; })
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
@@ -312,17 +338,27 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("legal_moves", [](const MCTSNode& n){ return n.legal_moves; })
 
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
-               auto it = n.P.find(uci);
-               return (it == n.P.end()) ? 0.0f : it->second;
-          }, py::arg("move_uci"));
+               for (const auto &ce : n.ordered_children) {
+                    if (ce.uci == uci) return ce.prior;
+               }
+               return 0.0f;
+          }, py::arg("move_uci"))
+
+          .def("priors", [](const MCTSNode& n){
+               py::dict out;
+               for (const auto &ce : n.ordered_children) {
+                    out[py::str(ce.uci)] = ce.prior;
+               }
+               return out;
+          });
 
      // --- MCTSTree ---
      py::class_<MCTSTree>(m, "MCTSTree")
           .def("__repr__", [](const MCTSTree& t){
                const MCTSNode* r = t.root();
-               int    N   = r ? r->N : 0;
+               int    N   = r ? r->visit_count() : 0;
                float  Q   = r ? r->Q : 0.0f;
-               size_t kids= r ? r->children.size() : 0;
+               size_t kids= r ? r->ordered_children.size() : 0;
                std::string stm = r ? r->board.side_to_move() : "?";
 
                std::ostringstream oss;
@@ -358,10 +394,35 @@ PYBIND11_MODULE(_core, m) {
                     out.append(py::make_tuple(z, planes));
                }
                return out;
-          },
-          py::arg("nplanes") =5,
-          "Encode pending leaves: (zobrist, planes).")
-               
+               }, py::arg("nplanes") =5,"Encode pending leaves: (zobrist, planes).")
+
+          .def("pending_encoded_64_tokens", [](MCTSTree& t) {
+               py::list out;
+               for (MCTSNode* n : t.pending_nodes_) {
+                    if (!n) continue;
+
+                    uint64_t z = n->zobrist;
+
+                    // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
+                    py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
+
+                    // produce LegalMaskandMap and attach it to node (move -> heap)
+                    backend::LegalMaskandMap lm = n->board.legal_move_mask();
+                    auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
+                    n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+
+                    // convert mask -> numpy array (copy)
+                    const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)
+                    py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
+                    std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
+
+                    // append (zobrist, tokens64, mask)
+                    out.append(py::make_tuple(z, tokens, mask));
+               }
+               return out;
+               }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
+               "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
+
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
@@ -374,6 +435,9 @@ PYBIND11_MODULE(_core, m) {
                t.resolve_pending();
           }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
 
+          .def("add_root_dirichlet_noise", &MCTSTree::add_root_dirichlet_noise,
+               py::arg("eps") = 0.25f, py::arg("alpha") = 0.1f)
+          
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
           .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
 
@@ -393,11 +457,12 @@ PYBIND11_MODULE(_core, m) {
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
           .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
-          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"))
+          .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
+               py::call_guard<py::gil_scoped_acquire>())
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers
-          // already-scored per-legal version (yours today)
+          // already-scored per-legal version
           m.def("priors_from_heads",
                py::overload_cast<
                     const std::vector<std::string>&,
@@ -424,6 +489,13 @@ PYBIND11_MODULE(_core, m) {
                py::arg("p_piece"),
                py::arg("p_promo"),
                py::arg("mix") = 0.5f);
+     
+     py::class_<CollectResults>(m, "CollectResults")
+          .def_readonly("count_new", &CollectResults::count_new)
+          .def_readonly("count_terminal", &CollectResults::count_terminal)
+          .def_readonly("count_cached", &CollectResults::count_cached)
+          .def_readonly("total_priorless", &CollectResults::total_priorless)
+          .def_readonly("total_puct", &CollectResults::total_puct);
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())
@@ -504,43 +576,37 @@ PYBIND11_MODULE(_core, m) {
           .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
-               std::vector<std::tuple<uint64_t, float, std::vector<float>, std::vector<float>, std::vector<float>, std::vector<float>>> vec;
+               std::vector<std::tuple<uint64_t, float, std::vector<float>>> vec;
                // Try to reserve if length is available
                try {
                     py::ssize_t n = py::len(batch);
                     if (n > 0) vec.reserve(static_cast<size_t>(n));
-               } catch (...) {
-                    /* ignore if not sized */
-               }
+               } catch (...) {}
+
+               auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
+                    py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
+                    if (!arr) throw std::runtime_error(
+                              "raw_cache_bulk_insert: expected array convertible to float32");
+                    py::buffer_info info = arr.request();
+                    float* data = static_cast<float*>(info.ptr);
+                    size_t n = static_cast<size_t>(info.size);
+                    return std::vector<float>(data, data + n);
+               };
 
                for (py::handle item_handle : batch) {
                     py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
-                    if (t.size() != 6) throw std::runtime_error("raw_cache_bulk_insert: each item must be (key, value, p_from, p_to, p_piece, p_promo)");
-
+                    if (t.size() != 3) throw std::runtime_error(
+                              "raw_cache_bulk_insert: each item must be (key, value, policy_vector)");
                     uint64_t key = t[0].cast<uint64_t>();
                     float net_value = t[1].cast<float>();
-
-                    auto to_vec = [&](py::handle arr_h) -> std::vector<float> {
-                         py::array_t<float> arr = py::array_t<float>::ensure(arr_h);
-                         if (!arr) throw std::runtime_error("raw_cache_bulk_insert: expected array convertible to float32");
-                         py::buffer_info info = arr.request();
-                         float* data = static_cast<float*>(info.ptr);
-                         size_t n = static_cast<size_t>(info.size);
-                         return std::vector<float>(data, data + n);
-                    };
-
-                    std::vector<float> pf = to_vec(t[2]);
-                    std::vector<float> pt = to_vec(t[3]);
-                    std::vector<float> pp = to_vec(t[4]);
-                    std::vector<float> pr = to_vec(t[5]);
-
-                    vec.emplace_back(key, net_value, std::move(pf), std::move(pt), std::move(pp), std::move(pr));
+                    std::vector<float> policy = to_vec(t[2]);
+                    if (policy.size() != 4288) throw std::runtime_error(
+                              "raw_cache_bulk_insert: policy_vector must have length 4288");
+                    vec.emplace_back(key, net_value, std::move(policy));
                }
 
-               // Move the batch into the RawPolicyCache
                raw_policy_cache().bulk_insert(std::move(vec));
-               }, "Bulk-insert multiple raw policy factorized heads into the RawPolicyCache. "
-               "Each batch item must be (key:int, value:float, p_from:np.array, p_to:np.array, p_piece:np.array, p_promo:np.array).");
+               });
           
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_stats", []() {

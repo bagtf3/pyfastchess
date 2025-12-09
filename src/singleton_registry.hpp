@@ -22,23 +22,22 @@
 
 // ---------------- Raw entry + stats ----------------
 struct RawEntry {
-    std::vector<float> p_from;
-    std::vector<float> p_to;
-    std::vector<float> p_piece;
-    std::vector<float> p_promo;
+    // single full policy vector (4288) for new model
+    std::vector<float> p_policy;
+    bool has_policy = false;
 
     // network scalar value and flag indicating if present
     float value = 0.0f;
     bool has_value = false;
 
     RawEntry() = default;
-    RawEntry(float v,
-             std::vector<float>&& a, std::vector<float>&& b,
-             std::vector<float>&& c, std::vector<float>&& d)
-      : p_from(std::move(a)), p_to(std::move(b)),
-        p_piece(std::move(c)), p_promo(std::move(d)),
+
+    // ctor for full policy vector
+    RawEntry(float v, std::vector<float>&& policy_vec)
+      : p_policy(std::move(policy_vec)), has_policy(true),
         value(v), has_value(true) {}
 };
+
 
 // Stats view
 struct RawStats {
@@ -60,14 +59,7 @@ class RawPolicyCache {
 public:
     explicit RawPolicyCache(size_t capacity = 16384);
 
-    // NOTE: batch now holds tuples:
-    //   (uint64_t key, float value, p_from_vec, p_to_vec, p_piece_vec, p_promo_vec)
-    void bulk_insert(std::vector<std::tuple<uint64_t,
-                                            float,
-                                            std::vector<float>,
-                                            std::vector<float>,
-                                            std::vector<float>,
-                                            std::vector<float>>>&& batch);
+    void bulk_insert(std::vector<std::tuple<uint64_t, float, std::vector<float>>>&& batch);
 
     const RawEntry* lookup(uint64_t key) const;
     void erase(uint64_t key);
