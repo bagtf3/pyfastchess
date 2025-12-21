@@ -42,6 +42,7 @@ struct ChildDetail {
     std::string uci;
     int   N;
     float Q;
+    float Q_ema;
     int   vprime_visits;
     float prior;
     float U;
@@ -74,6 +75,7 @@ struct MCTSNode {
     std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
     float W     = 0.0f;   // total value (white-POV)
     float Q     = 0.0f;   // mean value
+    float Q_ema = 0.0f;   // exponential moving average of values (white-POV)
 
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
@@ -142,9 +144,11 @@ struct MCTSNode {
 class MCTSTree {
 public:
     // Require an evaluator at construction time (fail-fast in ctor if null / unconfigured).
-    explicit MCTSTree(const backend::Board& root_board,
-                      float c_puct,
-                      std::shared_ptr<evaluator::Evaluator> evaluator);
+    // ctor now takes ema_span (int). evaluator is optional (default nullptr).
+    MCTSTree(const backend::Board& root_board,
+             float c_puct,
+             int ema_span,
+             std::shared_ptr<evaluator::Evaluator> evaluator = nullptr);
 
     // Walk with PUCT+virtual loss to a leaf
     // and return the leaf. Stores the chosen path internally for apply_result().
@@ -205,6 +209,9 @@ private:
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
+    int ema_span_ = 0;
+    float ema_alpha_ = 0.0f;
+
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.

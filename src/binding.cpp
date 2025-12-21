@@ -299,6 +299,7 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("uci",            &ChildDetail::uci)
           .def_readonly("N",              &ChildDetail::N)
           .def_readonly("Q",              &ChildDetail::Q)
+          .def_readonly("Q_ema",          &ChildDetail::Q_ema)
           .def_readonly("vprime_visits",  &ChildDetail::vprime_visits)
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
@@ -370,13 +371,19 @@ PYBIND11_MODULE(_core, m) {
                     << ">";
                return oss.str();
           })
-          .def(py::init([](const backend::Board& board, float c_puct,
-               std::shared_ptr<evaluator::Evaluator> ev) {
-               if (!ev) throw std::runtime_error("Evaluator must not be null");
-               if (!ev->is_configured()) throw std::runtime_error("Evaluator is not configured");
-               return new MCTSTree(board, c_puct, ev);
+          .def(py::init([](const backend::Board& board,
+                         float c_puct,
+                         int ema_span,
+                         std::shared_ptr<evaluator::Evaluator> ev) {
+               // evaluator is optional now
+               if (ev && !ev->is_configured())
+               throw std::runtime_error("Evaluator is not configured");
+               return new MCTSTree(board, c_puct, ema_span, ev);
           }),
-               py::arg("board"), py::arg("c_puct") = 1.5f, py::arg("evaluator"))
+               py::arg("board"),
+               py::arg("c_puct") = 1.5f,
+               py::arg("ema_span") = 200,
+               py::arg("evaluator") = nullptr)
                
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'

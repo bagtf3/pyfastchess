@@ -107,17 +107,20 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
 // mcts.cpp (constructor)
 MCTSTree::MCTSTree(const backend::Board& root_board,
                    float c_puct,
+                   int ema_span,
                    std::shared_ptr<evaluator::Evaluator> evaluator)
   : root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
     c_puct_(c_puct),
     evaluator_(std::move(evaluator)),
-    evaluator_raw_(nullptr)
+    evaluator_raw_(nullptr),
+    ema_span_(ema_span),
+    ema_alpha_(ema_span > 0 ? (2.0f / (static_cast<float>(ema_span) + 1.0f)) : 0.0f)
 {
-    if (!evaluator_) {
-        throw std::runtime_error("MCTSTree ctor: evaluator must not be null");
-    }
-    if (!evaluator_->is_configured()) {
-        throw std::runtime_error("MCTSTree ctor: evaluator not configured");
+    if (evaluator_) {
+        if (!evaluator_->is_configured()) {
+            throw std::runtime_error("MCTSTree ctor: evaluator not configured");
+        }
+        evaluator_raw_ = evaluator_.get();
     }
 
     root_->zobrist = root_->board.hash();
@@ -337,7 +340,22 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
         MCTSNode* n = *it;
         n->W += v;
         const int nvis = n->visit_count(); // atomic load (relaxed)
+
+        // recompute mean Q (existing behavior)
         n->Q = (nvis > 0) ? (n->W / static_cast<float>(nvis)) : 0.0f;
+
+        // update Q_ema:
+        // - until we reach ema_span_ visits, set Q_ema to the mean
+        // - afterwards, use EMA with alpha = ema_alpha_
+        if (ema_span_ <= 0) {
+            // disabled: just mirror Q
+            n->Q_ema = n->Q;
+        } else if (nvis <= ema_span_) {
+            n->Q_ema = n->Q;
+        } else {
+            // apply EMA using the new sample v (white-POV)
+            n->Q_ema = ema_alpha_ * v + (1.0f - ema_alpha_) * n->Q_ema;
+        }
     }
 }
 
@@ -687,11 +705,14 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
         cd.uci = mv;
         cd.N = ch ? ch->visit_count() : 0;
         cd.Q = ch ? ch->Q : 0.0f;
+        cd.Q_ema = ch ? ch->Q_ema : 0.0f;
         cd.vprime_visits = ch ? ch->vprime_visits : 0;
         cd.prior = ce.prior;
+        cd.U = 0.0f;
         cd.is_terminal = ch ? ch->is_terminal : false;
         cd.value = ch ? ch->value : 0.0f;
         out.push_back(std::move(cd));
+
     }
     std::sort(out.begin(), out.end(),
               [](const ChildDetail& a, const ChildDetail& b){ return a.N > b.N; });
