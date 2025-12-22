@@ -75,7 +75,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         const float prior = ce.prior;
         const MCTSNode* ch = ce.child.get();
         const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
-        const float q = ch ? (pov_sign * ch->Q) : parent_q;
+        const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         const float score = q + u;
         if (score > best_score) {
