@@ -56,49 +56,97 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 
     if (ordered_children.empty()) return nullptr;
 
-    const float parentN = static_cast<float>(std::max(1, this->visit_count()));
-    const int cap = 4 + static_cast<int>(parentN);
+    // parent visit budget and caps (use ints for exact arithmetic)
+    const int parent_vis = std::max(1, this->visit_count());
+    const int cap = 4 + parent_vis;
     const size_t cap_sz = std::min(ordered_children.size(), static_cast<size_t>(cap));
 
+    const float parentN = static_cast<float>(parent_vis);
     const float u_scale = c_puct * std::sqrt(parentN);
     const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
     const float parent_q = pov_sign * this->Q;
 
-    // Check pruning preconditions before any expensive work.
-    const bool do_prune = (pruning_factor > 0.0f) && (this->parent == nullptr);
+    // do_prune must be mutable so we can disable it if needed
+    bool do_prune = (pruning_factor > 0.0f) && (this->parent == nullptr);
 
-    // remaining budget = sim_budget - parentN
-    const float remaining_budget = do_prune? std::max(10.0f, sim_budget - parentN): 0.0f;
+    // remaining budget with a small floor (intentional)
+    const float remaining_budget = do_prune ? std::max(10.0f, sim_budget - parentN) : 0.0f;
 
-    // Compute max_child_visits only if we'll consider pruning.
+    // prune threshold: low-budget relax behavior; denom clamps factor==0
+    const float denom = (pruning_factor > 0.0f) ? pruning_factor : 1.0f;
+    const float prune_threshold = (remaining_budget < 100.0f) ? remaining_budget : (remaining_budget / denom);
+
+    // Compute max_child_visits and most-visited child if pruning is enabled.
     float max_child_visits = 0.0f;
+    int most_visited_idx = -1;
+    int most_visited_count = -1;
+
     if (do_prune) {
         for (size_t i = 0; i < cap_sz; ++i) {
             const MCTSNode* ch = ordered_children[i].child.get();
-            const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+            const int v = ch ? static_cast<int>(ch->visit_count()) : 0;
+            const float n = static_cast<float>(v);
             if (n > max_child_visits) max_child_visits = n;
+            if (v > most_visited_count) {
+                most_visited_count = v;
+                most_visited_idx = static_cast<int>(i);
+            }
+        }
+        
+        if (max_child_visits == 0.0f) {
+            // no child has any visits yet. ordered_children is sorted
+            // by prior (high->low), so the first entry is the highest prior and
+            // is what PUCT will pick. Instantiate it if needed and return.
+            if (cap_sz == 0) return nullptr; // defensive
+
+            const ChildEntry &top_ce = ordered_children[0];
+
+            MCTSNode* top_ch = top_ce.child.get();
+            if (!top_ch) {
+                // lazily create the child node (same style as other creation sites)
+                backend::Board childb = board;
+                if (!childb.push_uci(top_ce.uci)) return nullptr;
+                auto up = std::make_unique<MCTSNode>(childb, this, top_ce.uci);
+                up->zobrist = childb.hash();
+                up->Q = this->Q;
+                top_ch = up.get();
+                ordered_children[0].child = std::move(up);
+            }
+            return top_ch;
         }
     }
 
-    const float denom = (pruning_factor > 0.0f) ? pruning_factor : 1.0f;
-    const float prune_threshold =
-        (remaining_budget < 100.0f) ? remaining_budget : (remaining_budget / denom);
+    const float needed = do_prune ? (max_child_visits - prune_threshold) : 0.0f;
 
     size_t best_idx = SIZE_MAX;
     MCTSNode* best_child = nullptr;
     float best_score = -INFINITY;
-
     size_t pruned_count = 0;
+
+    // running sum of visits we've inspected so far (for early-exit)
+    int sum_seen = 0;
 
     // Primary sweep: evaluate candidates, skipping those pruned.
     for (size_t i = 0; i < cap_sz; ++i) {
         const ChildEntry &ce = ordered_children[i];
         const MCTSNode* ch = ce.child.get();
-        const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+        const int n_int = ch ? static_cast<int>(ch->visit_count()) : 0;
+        const float n = static_cast<float>(n_int);
 
         if (do_prune) {
+            // pruning test (same as before)
             if ((max_child_visits - n) > prune_threshold) {
                 ++pruned_count;
+                sum_seen += n_int;
+
+                // remaining visits that could be allocated to unseen children
+                const int remaining_total = parent_vis - sum_seen;
+                // if even piling all remaining visits can't reach 'needed', stop
+                if (static_cast<float>(remaining_total) < needed) {
+                    // account for unseen children as pruned and exit
+                    pruned_count += static_cast<size_t>(cap_sz - i - 1);
+                    break;
+                }
                 continue;
             }
         }
@@ -115,6 +163,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
             best_idx = i;
             best_child = const_cast<MCTSNode*>(ch);
         }
+
+        sum_seen += n_int;
     }
 
     // safety fallback: if pruning removed all candidates, do unpruned sweep.
@@ -130,21 +180,33 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
                 pruned_count, cap_sz,
                 pruning_factor, remaining_budget, max_child_visits);
         }
-        best_idx = SIZE_MAX;
-        best_child = nullptr;
-        best_score = -INFINITY;
-        for (size_t i = 0; i < cap_sz; ++i) {
-            const ChildEntry &ce = ordered_children[i];
-            const float prior = ce.prior;
-            const MCTSNode* ch = ce.child.get();
-            const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
-            const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
-            const float u = u_scale * prior / (1.0f + n);
-            const float score = q + u;
-            if (score > best_score) {
-                best_score = score;
-                best_idx = i;
-                best_child = const_cast<MCTSNode*>(ch);
+
+        // Prefer the most-visited instantiated child if it exists
+        if (most_visited_idx >= 0 && most_visited_count > 0) {
+            best_idx = static_cast<size_t>(most_visited_idx);
+            best_child = ordered_children[best_idx].child.get()
+                             ? const_cast<MCTSNode*>(
+                                   ordered_children[best_idx].child.get())
+                             : nullptr;
+        } else {
+            // full unpruned sweep (fallback)
+            best_idx = SIZE_MAX;
+            best_child = nullptr;
+            best_score = -INFINITY;
+            for (size_t i = 0; i < cap_sz; ++i) {
+                if (cc) ++cc->count_puct;
+                const ChildEntry &ce = ordered_children[i];
+                const float prior = ce.prior;
+                const MCTSNode* ch = ce.child.get();
+                const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+                const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
+                const float u = u_scale * prior / (1.0f + n);
+                const float score = q + u;
+                if (score > best_score) {
+                    best_score = score;
+                    best_idx = i;
+                    best_child = const_cast<MCTSNode*>(ch);
+                }
             }
         }
     }
