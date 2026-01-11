@@ -64,11 +64,11 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
     const float parent_q = pov_sign * this->Q;
 
-    // remaining budget = sim_budget - parentN
-    const float remaining_budget = sim_budget - parentN;
-
     // Check pruning preconditions before any expensive work.
     const bool do_prune = (pruning_factor > 0.0f) && (this->parent == nullptr);
+
+    // remaining budget = sim_budget - parentN
+    const float remaining_budget = do_prune? std::max(10.0f, sim_budget - parentN): 0.0f;
 
     // Compute max_child_visits only if we'll consider pruning.
     float max_child_visits = 0.0f;
@@ -80,7 +80,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         }
     }
 
-    const float prune_threshold = do_prune? (pruning_factor * remaining_budget) : 0.0f;
+    const float denom = (pruning_factor > 0.0f) ? pruning_factor : 1.0f;
+    const float prune_threshold =
+        (remaining_budget < 100.0f) ? remaining_budget : (remaining_budget / denom);
 
     size_t best_idx = SIZE_MAX;
     MCTSNode* best_child = nullptr;
@@ -117,11 +119,21 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 
     // safety fallback: if pruning removed all candidates, do unpruned sweep.
     if (do_prune && pruned_count >= cap_sz) {
+        // debug print (rate-limited to avoid console spam)
+        static thread_local int fallback_print_count = 0;
+        if (fallback_print_count < 20) {
+            ++fallback_print_count;
+            std::fprintf(stderr,
+                "[MCTS] prune-fallback used: node_zobrist=0x%016llx pruned=%zu cap=%zu "
+                "pruning_factor=%.3f remaining_budget=%.1f max_child_visits=%.1f\n",
+                static_cast<unsigned long long>(this->zobrist),
+                pruned_count, cap_sz,
+                pruning_factor, remaining_budget, max_child_visits);
+        }
         best_idx = SIZE_MAX;
         best_child = nullptr;
         best_score = -INFINITY;
         for (size_t i = 0; i < cap_sz; ++i) {
-            if (cc) ++cc->count_puct;
             const ChildEntry &ce = ordered_children[i];
             const float prior = ce.prior;
             const MCTSNode* ch = ce.child.get();
