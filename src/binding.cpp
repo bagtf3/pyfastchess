@@ -300,7 +300,6 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("N",              &ChildDetail::N)
           .def_readonly("Q",              &ChildDetail::Q)
           .def_readonly("Q_ema",          &ChildDetail::Q_ema)
-          .def_readonly("vprime_visits",  &ChildDetail::vprime_visits)
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
           .def_readonly("value",          &ChildDetail::value);
@@ -329,9 +328,6 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
-          .def_property_readonly("has_vprime",    [](const MCTSNode& n){ return n.has_vprime; })
-          .def_property_readonly("v_prime",       [](const MCTSNode& n){ return n.v_prime; })
-          .def_property_readonly("vprime_visits", [](const MCTSNode& n){ return n.vprime_visits; })
           .def_property_readonly("value",         [](const MCTSNode& n){ return n.value; })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
@@ -374,16 +370,17 @@ PYBIND11_MODULE(_core, m) {
           .def(py::init([](const backend::Board& board,
                          float c_puct,
                          int ema_span,
-                         std::shared_ptr<evaluator::Evaluator> ev) {
-               // evaluator is optional now
-               if (ev && !ev->is_configured())
-               throw std::runtime_error("Evaluator is not configured");
-               return new MCTSTree(board, c_puct, ema_span, ev);
+                         float sim_budget,
+                         float pruning_factor
+                    ) {
+               return new MCTSTree(board, c_puct, ema_span, sim_budget, pruning_factor);
           }),
                py::arg("board"),
                py::arg("c_puct") = 1.5f,
                py::arg("ema_span") = 200,
-               py::arg("evaluator") = nullptr)
+               py::arg("sim_budget") = 800.0f,
+               py::arg("pruning_factor") = 1.2f,
+               "Create MCTSTree in C++")
                
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'

@@ -13,7 +13,6 @@
 #include <cstdint>
 #include <mutex> 
 #include "backend.hpp"
-#include "evaluator.hpp"
 #include "singleton_registry.hpp"
 
 // forward decl so CollectCounts can hold a MCTSNode*
@@ -43,7 +42,6 @@ struct ChildDetail {
     int   N;
     float Q;
     float Q_ema;
-    int   vprime_visits;
     float prior;
     float U;
     bool  is_terminal = false;
@@ -79,9 +77,6 @@ struct MCTSNode {
 
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
-    bool  has_vprime      = false;  // was has_qprime
-    float v_prime         = 0.0f;   // was qprime (white POV)
-    int   vprime_visits   = 0;      // was qprime_visits
 
     // --- Priors / children ---
     // Canonical child entry: owner of optional child subtree, prior, and UCI string.
@@ -127,7 +122,11 @@ struct MCTSNode {
     MCTSNode(const backend::Board& b, MCTSNode* parent_=nullptr, std::string uci_from_parent="");
     
     // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
-    MCTSNode* select_child_lazy_ptr(float c_puct, CollectCounts* cc = nullptr);
+    MCTSNode* select_child_lazy_ptr(
+        float c_puct,
+        CollectCounts* cc,
+        float sim_budget,
+        float pruning_factor);
 
     // safe, convenient accessors for the atomic visit counter
     int visit_count() const noexcept {
@@ -143,12 +142,16 @@ struct MCTSNode {
 
 class MCTSTree {
 public:
-    // Require an evaluator at construction time (fail-fast in ctor if null / unconfigured).
-    // ctor now takes ema_span (int). evaluator is optional (default nullptr).
+    // Construct a tree rooted at `root_board`.
+    // ema_span controls the EMA window used for Q_ema smoothing.
+    // sim_budget is the planned total simulation budget for this tree.
+    // pruning_factor <= 0 disables pruning; otherwise used as described
+    // by the pruning policy in selection code.
     MCTSTree(const backend::Board& root_board,
              float c_puct,
              int ema_span,
-             std::shared_ptr<evaluator::Evaluator> evaluator = nullptr);
+             float sim_budget = 800.0f,
+             float pruning_factor = 1.2f);
 
     // Walk with PUCT+virtual loss to a leaf
     // and return the leaf. Stores the chosen path internally for apply_result().
@@ -193,13 +196,6 @@ public:
     std::pair<float,int> depth_stats() const;
 
     std::vector<PVItem> principal_variation(int max_len = 24) const;
-    // Optional runtime updater
-    void set_evaluator(std::shared_ptr<evaluator::Evaluator> ev);
-    std::shared_ptr<evaluator::Evaluator> get_evaluator() const;
-
-    // Prebuilt shallow QOptions used by collect_one_leaf (initialized in ctor)
-    backend::QOptions qopts_shallow_;
-    static constexpr int VALUE_MATE_CP = 32000; // compile-time constant
 
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
@@ -212,6 +208,9 @@ private:
     int ema_span_ = 0;
     float ema_alpha_ = 0.0f;
 
+    // Simulation budget and pruning config (tree-level)
+    float sim_budget_ = 800.0f;
+    float pruning_factor_ = 1.2f;
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
@@ -225,14 +224,6 @@ private:
 
     CollectCounts collect_one_leaf_tagged();
 
-    // Ownership to keep evaluator alive for lifetime of tree:
-    std::shared_ptr<evaluator::Evaluator> evaluator_;
-
-    // Fast raw pointer for hot path (non-owning). Set in ctor for zero-cost hot calls.
-    evaluator::Evaluator* evaluator_raw_ = nullptr;
-
-    // Tunable scale for cp -> [-1,1] mapping
-    float vprime_scale_ = 1500.0f;
     mutable std::mutex tree_mutex_; 
 };
 

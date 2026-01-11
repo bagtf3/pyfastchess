@@ -22,8 +22,13 @@ MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_f
     zobrist = 0ULL;  // lazy: compute at first selection
 }
 
-MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
-    // Fast-path: no priors available — pick round-robin from legal_moves.
+MCTSNode* MCTSNode::select_child_lazy_ptr(
+    float c_puct,
+    CollectCounts* cc,
+    float sim_budget,
+    float pruning_factor)
+{
+    // Fast-path: no priors available — round-robin on legal_moves.
     if (!children_have_priors) {
         const size_t n = legal_moves.size();
         if (n == 0) return nullptr;
@@ -31,50 +36,75 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         thread_local uint64_t rr_counter = 0;
         const size_t idx = static_cast<size_t>((rr_counter++) % n);
 
-        // Directly take the idx-th ChildEntry
         ChildEntry &ce = ordered_children[idx];
-        const std::string &mv = ce.uci; // should equal legal_moves[idx]
+        const std::string &mv = ce.uci;
 
         if (cc) ++cc->count_priorless;
 
         MCTSNode* ch = ce.child.get();
         if (!ch) {
-            // lazy-instantiation (no extra locks; mirrors old behavior)
             backend::Board childb = board;
             if (!childb.push_uci(mv)) return nullptr;
             auto up = std::make_unique<MCTSNode>(childb, this, mv);
             up->zobrist = childb.hash();
-            up->Q = this->Q;               // init child Q to parent snapshot (white-POV)
+            up->Q = this->Q;
             ch = up.get();
             ce.child = std::move(up);
         }
         return ch;
     }
 
-    // Priors are present: use PUCT over top candidates.
     if (ordered_children.empty()) return nullptr;
 
     const float parentN = static_cast<float>(std::max(1, this->visit_count()));
     const int cap = 4 + static_cast<int>(parentN);
     const size_t cap_sz = std::min(ordered_children.size(), static_cast<size_t>(cap));
 
-    if (cc) cc->count_puct += static_cast<uint64_t>(cap_sz);
-
     const float u_scale = c_puct * std::sqrt(parentN);
-
-    // POV flipping: stored Q values are white-POV. Convert to STM-POV (parent's STM).
     const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
     const float parent_q = pov_sign * this->Q;
+
+    // remaining budget = sim_budget - parentN
+    const float remaining_budget = sim_budget - parentN;
+
+    // Check pruning preconditions before any expensive work.
+    const bool do_prune = (pruning_factor > 0.0f) && (this->parent == nullptr);
+
+    // Compute max_child_visits only if we'll consider pruning.
+    float max_child_visits = 0.0f;
+    if (do_prune) {
+        for (size_t i = 0; i < cap_sz; ++i) {
+            const MCTSNode* ch = ordered_children[i].child.get();
+            const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+            if (n > max_child_visits) max_child_visits = n;
+        }
+    }
+
+    const float prune_threshold = do_prune? (pruning_factor * remaining_budget) : 0.0f;
 
     size_t best_idx = SIZE_MAX;
     MCTSNode* best_child = nullptr;
     float best_score = -INFINITY;
 
+    size_t pruned_count = 0;
+
+    // Primary sweep: evaluate candidates, skipping those pruned.
     for (size_t i = 0; i < cap_sz; ++i) {
         const ChildEntry &ce = ordered_children[i];
-        const float prior = ce.prior;
         const MCTSNode* ch = ce.child.get();
         const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+
+        if (do_prune) {
+            if ((max_child_visits - n) > prune_threshold) {
+                ++pruned_count;
+                continue;
+            }
+        }
+
+        // add to the count
+        if (cc) ++cc->count_puct;
+
+        const float prior = ce.prior;
         const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         const float score = q + u;
@@ -85,16 +115,37 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
         }
     }
 
+    // safety fallback: if pruning removed all candidates, do unpruned sweep.
+    if (do_prune && pruned_count >= cap_sz) {
+        best_idx = SIZE_MAX;
+        best_child = nullptr;
+        best_score = -INFINITY;
+        for (size_t i = 0; i < cap_sz; ++i) {
+            if (cc) ++cc->count_puct;
+            const ChildEntry &ce = ordered_children[i];
+            const float prior = ce.prior;
+            const MCTSNode* ch = ce.child.get();
+            const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
+            const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
+            const float u = u_scale * prior / (1.0f + n);
+            const float score = q + u;
+            if (score > best_score) {
+                best_score = score;
+                best_idx = i;
+                best_child = const_cast<MCTSNode*>(ch);
+            }
+        }
+    }
+
     if (best_idx == SIZE_MAX) return nullptr;
 
-    // Lazy-create child if absent (mirror previous non-locked semantics)
     if (!best_child) {
         const std::string &best_mv = ordered_children[best_idx].uci;
         backend::Board childb = board;
         if (!childb.push_uci(best_mv)) return nullptr;
         auto up = std::make_unique<MCTSNode>(childb, this, best_mv);
         up->zobrist = childb.hash();
-        up->Q = this->Q;                // init child Q to parent snapshot (white-POV)
+        up->Q = this->Q;
         best_child = up.get();
         ordered_children[best_idx].child = std::move(up);
     }
@@ -108,33 +159,23 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(float c_puct, CollectCounts* cc) {
 MCTSTree::MCTSTree(const backend::Board& root_board,
                    float c_puct,
                    int ema_span,
-                   std::shared_ptr<evaluator::Evaluator> evaluator)
-  : root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
+                   float sim_budget,
+                   float pruning_factor)
+
+: root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
     c_puct_(c_puct),
-    evaluator_(std::move(evaluator)),
-    evaluator_raw_(nullptr),
     ema_span_(ema_span),
-    ema_alpha_(ema_span > 0 ? (2.0f / (static_cast<float>(ema_span) + 1.0f)) : 0.0f)
+    ema_alpha_(ema_span > 0
+               ? (2.0f / (static_cast<float>(ema_span) + 1.0f))
+               : 0.0f),
+    sim_budget_(sim_budget),
+    pruning_factor_(pruning_factor)
 {
-    if (evaluator_) {
-        if (!evaluator_->is_configured()) {
-            throw std::runtime_error("MCTSTree ctor: evaluator not configured");
-        }
-        evaluator_raw_ = evaluator_.get();
-    }
+    // set root zobrist from the provided board
+    root_->zobrist = root_board.hash();
 
-    root_->zobrist = root_->board.hash();
-
-    // stash raw pointer for fastest access in hot-path
-    evaluator_raw_ = evaluator_.get();
-
-    // stash prior engine raw pointer. must configure first!
+    // stash prior engine raw pointer (must be configured elsewhere)
     prior_engine_raw_ = get_prior_engine_raw();
-
-    // prebuild QOptions once
-    qopts_shallow_.max_qply = 3;
-    qopts_shallow_.max_qcaptures = 24;
-    qopts_shallow_.time_limit_ms = 2;
 }
 
 // Internal variant of collect_one_leaf that reports reason
@@ -152,7 +193,10 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // descend while expanded and has children (now uses ordered_children)
     while (node->is_expanded && !node->ordered_children.empty()) {
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
-        MCTSNode* child = node->select_child_lazy_ptr(c_puct_, &cc);
+        MCTSNode* child = node->select_child_lazy_ptr(
+            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_)
+        ;
+
         if (!child) break;
         node = child;
         last_path_.push_back(node);
@@ -706,7 +750,6 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
         cd.N = ch ? ch->visit_count() : 0;
         cd.Q = ch ? ch->Q : 0.0f;
         cd.Q_ema = ch ? ch->Q_ema : 0.0f;
-        cd.vprime_visits = ch ? ch->vprime_visits : 0;
         cd.prior = ce.prior;
         cd.U = 0.0f;
         cd.is_terminal = ch ? ch->is_terminal : false;
@@ -787,22 +830,6 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
         node = best_ch; // descend
     }
     return pv;
-}
-
-void MCTSTree::set_evaluator(std::shared_ptr<evaluator::Evaluator> ev) {
-    if (!ev) {
-        throw std::runtime_error("MCTSTree::set_evaluator: ev must not be null");
-    }
-    if (!ev->is_configured()) {
-        throw std::runtime_error("MCTSTree::set_evaluator: evaluator is not configured");
-    }
-    // Atomic store to evaluator_ (lock-free for shared_ptr)
-    std::atomic_store(&evaluator_, ev);
-}
-
-// Atomic load accessor
-std::shared_ptr<evaluator::Evaluator> MCTSTree::get_evaluator() const {
-    return std::atomic_load(&evaluator_);
 }
 
 
