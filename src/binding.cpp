@@ -67,7 +67,7 @@ static py::tuple board_qsearch_wrapper(backend::Board &b,
 }
 
 PYBIND11_MODULE(_core, m) {
-    m.doc() = "pyfastchess core bindings (MVP + query helpers)";
+    m.doc() = "pyfastchess core bindings";
 
     py::class_<backend::Board>(m, "Board")
           .def(py::init<>(), "Create a board at the standard start position.")
@@ -101,6 +101,7 @@ PYBIND11_MODULE(_core, m) {
 
           .def("is_pawn_move", &backend::Board::is_pawn_move, py::arg("uci"),
                "True if the move is made by a pawn.")
+          
           .def("would_be_repetition", &backend::Board::would_be_repetition,
                py::arg("uci"), py::arg("count") = 3,
                "True if making this move would create a position repeated ≥ count times.")
@@ -299,7 +300,6 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("uci",            &ChildDetail::uci)
           .def_readonly("N",              &ChildDetail::N)
           .def_readonly("Q",              &ChildDetail::Q)
-          .def_readonly("Q_ema",          &ChildDetail::Q_ema)
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
           .def_readonly("value",          &ChildDetail::value);
@@ -369,19 +369,22 @@ PYBIND11_MODULE(_core, m) {
           })
           .def(py::init([](const backend::Board& board,
                          float c_puct,
-                         int ema_span,
                          float sim_budget,
                          float pruning_factor
                     ) {
-               return new MCTSTree(board, c_puct, ema_span, sim_budget, pruning_factor);
+               return new MCTSTree(board, c_puct, sim_budget, pruning_factor);
           }),
                py::arg("board"),
                py::arg("c_puct") = 1.5f,
-               py::arg("ema_span") = 200,
                py::arg("sim_budget") = 800.0f,
                py::arg("pruning_factor") = 1.2f,
                "Create MCTSTree in C++")
-               
+          
+          .def("set_cpuct", &MCTSTree::set_cpuct, py::arg("c_puct"))
+          .def("cpuct", &MCTSTree::cpuct)
+          .def("set_sim_budget", &MCTSTree::set_sim_budget, py::arg("sim_budget"))
+          .def("sim_budget", &MCTSTree::sim_budget)
+
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           

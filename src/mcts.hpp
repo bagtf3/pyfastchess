@@ -41,7 +41,6 @@ struct ChildDetail {
     std::string uci;
     int   N;
     float Q;
-    float Q_ema;
     float prior;
     float U;
     bool  is_terminal = false;
@@ -73,7 +72,6 @@ struct MCTSNode {
     std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
     float W     = 0.0f;   // total value (white-POV)
     float Q     = 0.0f;   // mean value
-    float Q_ema = 0.0f;   // exponential moving average of values (white-POV)
 
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
@@ -143,13 +141,11 @@ struct MCTSNode {
 class MCTSTree {
 public:
     // Construct a tree rooted at `root_board`.
-    // ema_span controls the EMA window used for Q_ema smoothing.
     // sim_budget is the planned total simulation budget for this tree.
     // pruning_factor <= 0 disables pruning; otherwise used as described
     // by the pruning policy in selection code.
     MCTSTree(const backend::Board& root_board,
              float c_puct,
-             int ema_span,
              float sim_budget = 800.0f,
              float pruning_factor = 1.2f);
 
@@ -197,6 +193,13 @@ public:
 
     std::vector<PVItem> principal_variation(int max_len = 24) const;
 
+    // runtime tunables: allow Python to change search parameters on the fly
+    void set_cpuct(float v);
+    float cpuct() const;
+
+    void set_sim_budget(float v);
+    float sim_budget() const;
+
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
     
@@ -205,8 +208,6 @@ private:
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
     int epoch_ = 0;
-    int ema_span_ = 0;
-    float ema_alpha_ = 0.0f;
 
     // Simulation budget and pruning config (tree-level)
     float sim_budget_ = 800.0f;

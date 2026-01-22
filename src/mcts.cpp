@@ -155,7 +155,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         if (cc) ++cc->count_puct;
 
         const float prior = ce.prior;
-        const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
+        const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         const float score = q + u;
         if (score > best_score) {
@@ -199,7 +199,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
                 const float prior = ce.prior;
                 const MCTSNode* ch = ce.child.get();
                 const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
-                const float q = ch ? (pov_sign * ch->Q_ema) : parent_q;
+                const float q = ch ? (pov_sign * ch->Q) : parent_q;
                 const float u = u_scale * prior / (1.0f + n);
                 const float score = q + u;
                 if (score > best_score) {
@@ -232,16 +232,11 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 // mcts.cpp (constructor)
 MCTSTree::MCTSTree(const backend::Board& root_board,
                    float c_puct,
-                   int ema_span,
                    float sim_budget,
                    float pruning_factor)
 
 : root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
     c_puct_(c_puct),
-    ema_span_(ema_span),
-    ema_alpha_(ema_span > 0
-               ? (2.0f / (static_cast<float>(ema_span) + 1.0f))
-               : 0.0f),
     sim_budget_(sim_budget),
     pruning_factor_(pruning_factor)
 {
@@ -268,8 +263,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     while (node->is_expanded && !node->ordered_children.empty()) {
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
         MCTSNode* child = node->select_child_lazy_ptr(
-            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_)
-        ;
+            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_);
 
         if (!child) break;
         node = child;
@@ -461,19 +455,6 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
 
         // recompute mean Q (existing behavior)
         n->Q = (nvis > 0) ? (n->W / static_cast<float>(nvis)) : 0.0f;
-
-        // update Q_ema:
-        // - until we reach ema_span_ visits, set Q_ema to the mean
-        // - afterwards, use EMA with alpha = ema_alpha_
-        if (ema_span_ <= 0) {
-            // disabled: just mirror Q
-            n->Q_ema = n->Q;
-        } else if (nvis <= ema_span_) {
-            n->Q_ema = n->Q;
-        } else {
-            // apply EMA using the new sample v (white-POV)
-            n->Q_ema = ema_alpha_ * v + (1.0f - ema_alpha_) * n->Q_ema;
-        }
     }
 }
 
@@ -823,7 +804,6 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
         cd.uci = mv;
         cd.N = ch ? ch->visit_count() : 0;
         cd.Q = ch ? ch->Q : 0.0f;
-        cd.Q_ema = ch ? ch->Q_ema : 0.0f;
         cd.prior = ce.prior;
         cd.U = 0.0f;
         cd.is_terminal = ch ? ch->is_terminal : false;
@@ -906,6 +886,26 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
     return pv;
 }
 
+// --- runtime tunables ---
+void MCTSTree::set_cpuct(float v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    c_puct_ = v;
+}
+
+float MCTSTree::cpuct() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return c_puct_;
+}
+
+void MCTSTree::set_sim_budget(float v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    sim_budget_ = v;
+}
+
+float MCTSTree::sim_budget() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return sim_budget_;
+}
 
 // ------------------------- Helpers -------------------------
 std::vector<std::pair<std::string, float>>
