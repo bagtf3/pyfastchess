@@ -6,6 +6,7 @@
 #include <iostream>
 #include <random>
 #include <iomanip>
+#include <cstdio>
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
@@ -28,6 +29,29 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     float sim_budget,
     float pruning_factor)
 {
+    if (ordered_children.empty()) return nullptr;
+
+    // forced visit if we found a mate. no PUCT
+    char forced_uci[16];
+    if (take_must_visit_uci(forced_uci)) {
+        for (size_t i = 0; i < ordered_children.size(); ++i) {
+            ChildEntry& ce = ordered_children[i];
+            if (ce.uci != forced_uci) continue;
+
+            MCTSNode* ch = ce.child.get();
+            if (!ch) {
+                backend::Board childb = board;
+                if (!childb.push_uci(ce.uci)) return nullptr;
+                auto up = std::make_unique<MCTSNode>(childb, this, ce.uci);
+                up->zobrist = childb.hash();
+                up->Q = clampf(this->Q, -0.5f, 0.5f);
+                ch = up.get();
+                ce.child = std::move(up);
+            }
+            return ch;
+        }
+    }
+
     // Fast-path: no priors available — round-robin on legal_moves.
     if (!children_have_priors) {
         const size_t n = legal_moves.size();
@@ -47,15 +71,12 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
             if (!childb.push_uci(mv)) return nullptr;
             auto up = std::make_unique<MCTSNode>(childb, this, mv);
             up->zobrist = childb.hash();
-            up->Q = this->Q;
+            up->Q = clampf(this->Q, -0.5, 0.5);
             ch = up.get();
             ce.child = std::move(up);
         }
         return ch;
     }
-
-    if (ordered_children.empty()) return nullptr;
-
     // parent visit budget and caps (use ints for exact arithmetic)
     const int parent_vis = std::max(1, this->visit_count());
     const int cap = 4 + parent_vis;
@@ -67,7 +88,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     const float parent_q = pov_sign * this->Q;
 
     // do_prune must be mutable so we can disable it if needed
-    bool do_prune = (pruning_factor > 0.0f) && (this->parent == nullptr);
+    bool do_prune = (pruning_factor > 0.0f);
 
     // remaining budget with a small floor (intentional)
     const float remaining_budget = do_prune ? std::max(10.0f, sim_budget - parentN) : 0.0f;
@@ -108,7 +129,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
                 if (!childb.push_uci(top_ce.uci)) return nullptr;
                 auto up = std::make_unique<MCTSNode>(childb, this, top_ce.uci);
                 up->zobrist = childb.hash();
-                up->Q = this->Q;
+                up->Q = clampf(this->Q, -0.5f, 0.5f);
                 top_ch = up.get();
                 ordered_children[0].child = std::move(up);
             }
@@ -219,7 +240,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         if (!childb.push_uci(best_mv)) return nullptr;
         auto up = std::make_unique<MCTSNode>(childb, this, best_mv);
         up->zobrist = childb.hash();
-        up->Q = this->Q;
+        up->Q = clampf(this->Q, -0.5, 0.5);
         best_child = up.get();
         ordered_children[best_idx].child = std::move(up);
     }
@@ -275,10 +296,28 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // set leaf pointer for the caller
     cc.leaf = node;
 
+    // helper to set terminals if we find one
+    auto mark_must_visit_from_terminal = [&](float v_white_pov) {
+        if (v_white_pov == 0.0f) return;
+        if (last_path_.size() < 2) return;
+
+        for (size_t i = 0; i + 1 < last_path_.size(); ++i) {
+            MCTSNode* parent = last_path_[i];
+            MCTSNode* child = last_path_[i + 1];
+
+            const bool stm_white = (parent->board.side_to_move() == "w");
+            const bool stm_wins = stm_white ? (v_white_pov > 0.0f)
+                                            : (v_white_pov < 0.0f);
+
+            if (stm_wins) parent->set_must_visit_uci(child->uci);
+        }
+    };
+
     // Known terminal
     if (node->is_terminal) {
         cc.tag = CollectTag::TERMINAL;
         const float v = node->value;
+        mark_must_visit_from_terminal(v);
         back_up_along_path(node, v);
         return cc;
     }
@@ -289,6 +328,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         node->value = *tv;
         node->is_expanded = true;
         cc.tag = CollectTag::TERMINAL;
+        mark_must_visit_from_terminal(node->value);
         back_up_along_path(node, node->value);
         return cc;
     }
@@ -424,15 +464,7 @@ void MCTSTree::apply_result(
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
     if (!leaf) return;
 
-    // Build path (no lock needed for traversal)
-    std::vector<MCTSNode*> path;
-    for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
-    if (path.empty()) return;
-
-    // Acquire lock and validate root ownership, then delegate.
     std::lock_guard<std::mutex> g(tree_mutex_);
-    if (path.back() != root_.get()) return;
-
     back_up_along_path_nolock(leaf, v);
 }
 
@@ -441,22 +473,24 @@ void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
 void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
     if (!leaf) return;
 
-    // Rebuild path under the assumption the caller holds the lock.
-    std::vector<MCTSNode*> path;
-    for (MCTSNode* p = leaf; p; p = p->parent) path.push_back(p);
-    if (path.empty()) return;
-    if (path.back() != root_.get()) return;
+    MCTSNode* last = nullptr;
 
-    // Apply updates from root->...->leaf (iterate reversed).
-    for (auto it = path.rbegin(); it != path.rend(); ++it) {
-        MCTSNode* n = *it;
+    for (MCTSNode* n = leaf; n; n = n->parent) {
+        last = n;
         n->W += v;
-        const int nvis = n->visit_count(); // atomic load (relaxed)
-
-        // recompute mean Q (existing behavior)
+        const int nvis = n->visit_count();
         n->Q = (nvis > 0) ? (n->W / static_cast<float>(nvis)) : 0.0f;
     }
+
+    if (last != root_.get()) {
+        std::fprintf(stderr,
+            "[MCTS] backprop chain did not end at root: leaf_uci=%s last_uci=%s\n",
+            leaf->uci.c_str(),
+            last ? last->uci.c_str() : "<null>"
+        );
+    }
 }
+
 
 void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     if (!node) return;

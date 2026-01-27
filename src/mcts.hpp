@@ -1,6 +1,7 @@
 #pragma once
 #include <memory>
 #include <string>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -76,13 +77,42 @@ struct MCTSNode {
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
 
+    std::atomic<uint8_t> must_visit_state{0};  // 0 empty, 2 writing, 1 ready
+    char must_visit_uci[16] = {0};
+
+    void set_must_visit_uci(const std::string& mv) noexcept {
+        uint8_t expected = 0;
+        if (!must_visit_state.compare_exchange_strong(
+                expected, 2, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+            return;
+        }
+
+        const size_t n = std::min(mv.size(), sizeof(must_visit_uci) - 1);
+        if (n > 0) {
+            std::memcpy(must_visit_uci, mv.data(), n);
+        }
+        must_visit_uci[n] = '\0';
+
+        must_visit_state.store(1, std::memory_order_release);
+    }
+
+    bool take_must_visit_uci(char out_uci[16]) noexcept {
+        const uint8_t state = must_visit_state.exchange(0, std::memory_order_acq_rel);
+        if (state != 1) return false;
+
+        std::memcpy(out_uci, must_visit_uci, 16);
+        out_uci[15] = '\0';
+        return true;
+    }
+
     // --- Priors / children ---
     // Canonical child entry: owner of optional child subtree, prior, and UCI string.
     // This is the single source-of-truth for both ordering and the prior values.
     struct ChildEntry {
-        std::string uci;                            // move in UCI form (parent->child)
-        std::unique_ptr<MCTSNode> child;            // nullable; lazy-instantiated child
-        float prior = 0.0f;                         // prior for this move
+        std::string uci;                    // move in UCI form (parent->child)
+        std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
+        float prior = 0.0f;                 // prior for this move
 
         ChildEntry() = default;
         ChildEntry(const std::string& u, float p = 0.0f)
