@@ -213,8 +213,12 @@ public:
     
     // Add Dirichlet noise to root priors (thread-safe)
     void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
-
     bool advance_root(const std::string& move_uci);
+
+    // DFS rescale visits (N) and total value (W) by a scalar in [0, 1].
+    // max_depth < 0 means no depth limit; depth=0 is the root.
+    void dfs_rescale(float rescale_factor = 1.0f, int max_depth = -1);
+
     int  epoch() const { return epoch_; }
 
     std::vector<ChildDetail> root_child_details() const;

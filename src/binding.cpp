@@ -466,6 +466,13 @@ PYBIND11_MODULE(_core, m) {
           .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
+          .def(
+               "dfs_rescale",
+               &MCTSTree::dfs_rescale,
+               py::arg("rescale_factor") = 1.0f,
+               py::arg("max_depth") = -1,
+               "Depth-first rescale of node visits and W by rescale_factor in [0,1]."
+          )
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers

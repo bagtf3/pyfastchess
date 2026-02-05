@@ -823,6 +823,62 @@ bool MCTSTree::advance_root(const std::string& mv) {
     return true;
 }
 
+void MCTSTree::dfs_rescale(float rescale_factor, int max_depth) {
+    if (rescale_factor < 0.0f || rescale_factor > 1.0f) {
+        throw std::runtime_error("dfs_rescale: rescale_factor must be in [0, 1]");
+    }
+
+    std::lock_guard<std::mutex> g(tree_mutex_);
+
+    MCTSNode* r = root_.get();
+    if (!r) return;
+
+    struct Frame {
+        MCTSNode* n;
+        int depth;
+        bool post;
+    };
+
+    std::vector<Frame> st;
+    st.reserve(1024);
+    st.push_back(Frame{r, 0, false});
+
+    while (!st.empty()) {
+        Frame f = st.back();
+        st.pop_back();
+
+        if (!f.n) continue;
+
+        if (!f.post) {
+            st.push_back(Frame{f.n, f.depth, true});
+
+            const bool depth_blocked = (max_depth >= 0 && f.depth >= max_depth);
+            if (!depth_blocked) {
+                for (auto &ce : f.n->ordered_children) {
+                    MCTSNode* ch = ce.child.get();
+                    if (!ch) continue;
+                    st.push_back(Frame{ch, f.depth + 1, false});
+                }
+            }
+            continue;
+        }
+
+        const int old_v = f.n->visit_count();
+        if (old_v <= 1) continue;
+
+        int new_v = static_cast<int>(std::floor(old_v * rescale_factor));
+        if (new_v <= 0) new_v = 1;
+
+        if (new_v == old_v) continue;
+
+        const float ratio = static_cast<float>(new_v) / static_cast<float>(old_v);
+
+        f.n->W *= ratio;
+        f.n->Q = (new_v > 0) ? (f.n->W / static_cast<float>(new_v)) : 0.0f;
+        f.n->N.store(new_v, std::memory_order_relaxed);
+    }
+}
+
 std::vector<ChildDetail> MCTSTree::root_child_details() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     std::vector<ChildDetail> out;
