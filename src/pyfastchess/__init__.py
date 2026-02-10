@@ -49,7 +49,7 @@ __all__ = [
     "raw_cache_clear",
     "raw_cache_stats",
     "priors_cache_stats",
-    "priors_cache_clear"
+    "priors_cache_clear",
     "Evaluator",
     "EvalWeights",
     "priors_from_heads",

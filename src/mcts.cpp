@@ -79,7 +79,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     }
     // parent visit budget and caps (use ints for exact arithmetic)
     const int parent_vis = std::max(1, this->visit_count());
-    const int cap = 4 + parent_vis;
+    const int cap = 4 + parent_vis / 2;
     const size_t cap_sz = std::min(ordered_children.size(), static_cast<size_t>(cap));
 
     const float parentN = static_cast<float>(parent_vis);
@@ -88,7 +88,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     const float parent_q = pov_sign * this->Q;
 
     // do_prune must be mutable so we can disable it if needed
-    bool do_prune = (pruning_factor > 0.0f);
+    bool do_prune = (pruning_factor > 0.0f) && (cap_sz == ordered_children.size());
 
     // remaining budget with a small floor (intentional)
     const float remaining_budget = do_prune ? std::max(10.0f, sim_budget - parentN) : 0.0f;
@@ -112,28 +112,6 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
                 most_visited_count = v;
                 most_visited_idx = static_cast<int>(i);
             }
-        }
-        
-        if (max_child_visits == 0.0f) {
-            // no child has any visits yet. ordered_children is sorted
-            // by prior (high->low), so the first entry is the highest prior and
-            // is what PUCT will pick. Instantiate it if needed and return.
-            if (cap_sz == 0) return nullptr; // defensive
-
-            const ChildEntry &top_ce = ordered_children[0];
-
-            MCTSNode* top_ch = top_ce.child.get();
-            if (!top_ch) {
-                // lazily create the child node (same style as other creation sites)
-                backend::Board childb = board;
-                if (!childb.push_uci(top_ce.uci)) return nullptr;
-                auto up = std::make_unique<MCTSNode>(childb, this, top_ce.uci);
-                up->zobrist = childb.hash();
-                up->Q = clampf(this->Q, -0.5f, 0.5f);
-                top_ch = up.get();
-                ordered_children[0].child = std::move(up);
-            }
-            return top_ch;
         }
     }
 
