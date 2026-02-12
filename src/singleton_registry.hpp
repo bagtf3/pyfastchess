@@ -57,7 +57,7 @@ struct CacheStats {
 // ---------------- RawPolicyCache class ----------------
 class RawPolicyCache {
 public:
-    explicit RawPolicyCache(size_t capacity = 16384);
+    explicit RawPolicyCache(size_t capacity = 24576);
 
     void bulk_insert(std::vector<std::tuple<uint64_t, float, std::vector<float>>>&& batch);
 
@@ -90,7 +90,7 @@ inline PriorEngine* get_prior_engine_raw() { return g_prior_engine_raw.load(std:
 
 // ---------------- Singletons accessors ----------------
 Cache& priors_cache();      // LRU cache, capacity 600000
-RawPolicyCache& raw_policy_cache(); // deque-eviction raw buffer, capacity 16384
+RawPolicyCache& raw_policy_cache(); // deque-eviction raw buffer, capacity 24576
 
 // Convenience wrappers for stats/clear (useful to expose to python)
 CacheStats priors_cache_stats();

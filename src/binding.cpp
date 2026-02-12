@@ -408,7 +408,8 @@ PYBIND11_MODULE(_core, m) {
 
           .def("pending_encoded_64_tokens", [](MCTSTree& t) {
                py::list out;
-               for (MCTSNode* n : t.pending_nodes_) {
+               std::vector<MCTSNode*> nodes = t.pop_pending_to_inflight();
+               for (MCTSNode* n : nodes) {
                     if (!n) continue;
 
                     uint64_t z = n->zobrist;

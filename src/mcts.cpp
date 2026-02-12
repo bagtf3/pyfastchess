@@ -301,34 +301,62 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         back_up_along_path(node, node->value);
         return cc;
     }
+    
+    uint64_t key = node->zobrist;
+    if (key == 0) {
+        key = node->board.hash();
+        node->zobrist = key;
+    }
 
     // Try priors cache fast-path
-    {
-        uint64_t key = node->zobrist;
-        if (key == 0) {
-            key = node->board.hash();
-            node->zobrist = key;
-        }
+    if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
+        // expand with cached priors (placeholders; lazy children)
+        // expand_with_priors should set children_have_priors = true
+        expand_with_priors(node, pe->priors);
 
-        if (const CacheEntry* pe = priors_cache().lookup_ptr(key)) {
-            // expand with cached priors (placeholders; lazy children)
-            // expand_with_priors should set children_have_priors = true
-            expand_with_priors(node, pe->priors);
+        // N was already incremented during descent; just backprop the cached value.
+        back_up_along_path(node, pe->value);
 
-            // N was already incremented during descent; just backprop the cached value.
-            back_up_along_path(node, pe->value);
+        cc.tag = CollectTag::CACHED;
+        return cc;
+    }
+
+    // Fresh non-terminal leaf: expand with uniform priors and return as pending.
+    expand_with_uniform_priors(node);
+
+    // one last opportunistic check into raw cache
+    // this barely saves time, but still worth it
+    if (const RawEntry* re = raw_policy_cache().lookup(key)) {
+        if (re->has_value && re->has_policy) {
+            // produce LegalMaskandMap and attach it to node (move -> heap)
+            backend::LegalMaskandMap lm = node->board.legal_move_mask();
+            auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
+
+            {
+                std::lock_guard<std::mutex> g(tree_mutex_);
+                node->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+            }
+
+            // Compute value_white_pov from model value (model gives STM-POV)
+            const bool stm_white = (node->board.side_to_move() == "w");
+            const float value_white_pov = stm_white ? re->value : -re->value;
+
+            std::vector<std::pair<std::string, float>> built_priors =
+                build_priors(node, re);
+
+            // Apply result: this will overwrite priors and backpropagate the value.
+            apply_result(node, built_priors, value_white_pov, /*cache=*/true);
 
             cc.tag = CollectTag::CACHED;
             return cc;
         }
     }
 
-    // Fresh non-terminal leaf: expand with uniform priors and return as pending.
-    expand_with_uniform_priors(node);
-
+    // if here, needs full preds, send to GPU
     cc.tag = CollectTag::NEW_LEAF;
     return cc;
 }
+
 
 // Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
 MCTSNode* MCTSTree::collect_one_leaf() {
@@ -667,24 +695,24 @@ void MCTSTree::resolve_pending() {
         const RawEntry* re = raw_policy_cache().lookup(z);
         if (!re || !re->has_value) {
             node->cache_misses += 1;
-
             {
-                // Not ready yet — retry inflight a few times, then punt to pending
                 std::lock_guard<std::mutex> g(tree_mutex_);
+
                 if (node->cache_misses > 4) {
                     std::cout << "[resolve_pending] MISS: zobrist=0x"
                       << std::hex << z << std::dec
                       << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
                       << " misses=" << node->cache_misses
-                      << (node->cache_misses == 0 ? " -> pending" : " -> inflight")
+                      << " -> pending"
                       << "\n" << std::flush;
+
                     node->cache_misses = 0;
                     pending_nodes_.push_back(node);
-                    continue;
                 } else {
                     inflight_nodes_.push_back(node);
                 }
             }
+            continue;
         }
 
         // Cache hit: reset miss counter
@@ -694,32 +722,57 @@ void MCTSTree::resolve_pending() {
         const bool stm_white = (node->board.side_to_move() == "w");
         const float value_white_pov = stm_white ? re->value : -re->value;
 
-        // Grab the LegalMaskandMap attached to the node. Must be present.
-        std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
-        {
-            std::lock_guard<std::mutex> g(tree_mutex_);
-            lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
-        }
-
-        // Pluck priors directly from the model's raw policy vector (STM-POV).
-        const auto& policy_vec = re->p_policy; // model-provided vector (STM-POV)
-        const auto& pairs = lm_sp->lookup();
-
-        std::vector<std::pair<std::string, float>> built_priors;
-        built_priors.reserve(pairs.size());
-
-        for (const auto& p : pairs) {
-            const std::string& uci = p.first;
-            const uint16_t idx = p.second; // expected index into policy_vec
-
-            // Direct pluck — intentionally no silent checks here (crash loudly if wrong)
-            const float prob = policy_vec[idx];
-            built_priors.emplace_back(uci, prob);
-        }
+        std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
 
         // Apply result: this will overwrite priors and backpropagate the value.
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
     }
+}
+
+std::vector<std::pair<std::string, float>>
+MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
+{
+    if (!node) {
+        return {};
+    }
+
+    if (!re->has_policy) {
+        const uint64_t z = node->zobrist;
+        std::stringstream ss;
+        ss << "build_priors: missing policy for zobrist=" << z;
+        throw std::runtime_error(ss.str());
+    }
+
+    // Grab the LegalMaskandMap attached to the node. Must be present.
+    std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
+    {
+        std::lock_guard<std::mutex> g(tree_mutex_);
+        lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
+    }
+    if (!lm_sp) {
+        const uint64_t z = node->zobrist;
+        std::stringstream ss;
+        ss << "build_priors: missing LegalMaskandMap on node (zobrist=" << z
+           << "). Ensure pending_encoded_stm_pov attached it.";
+        throw std::runtime_error(ss.str());
+    }
+
+    // Pluck priors directly from the model's raw policy vector (STM-POV).
+    const auto& policy_vec = re->p_policy; // model-provided vector (STM-POV)
+    const auto& pairs = lm_sp->lookup();
+
+    std::vector<std::pair<std::string, float>> built_priors;
+    built_priors.reserve(pairs.size());
+
+    for (const auto& p : pairs) {
+        const std::string& uci = p.first;
+        const uint16_t idx = p.second; // expected index into policy_vec
+
+        const float prob = policy_vec[idx];
+        built_priors.emplace_back(uci, prob);
+    }
+
+    return built_priors;
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {

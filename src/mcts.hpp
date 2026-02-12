@@ -283,8 +283,10 @@ private:
 
     void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
-    void expand_with_priors(
-        MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
+    void expand_with_priors(MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
+    
+    std::vector<std::pair<std::string, float>>
+    build_priors(MCTSNode* node, const RawEntry* re = nullptr) const;
 
     CollectCounts collect_one_leaf_tagged();
 
