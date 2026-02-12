@@ -413,6 +413,10 @@ PYBIND11_MODULE(_core, m) {
                     if (!n) continue;
 
                     uint64_t z = n->zobrist;
+                    if (z == 0) {
+                        z = n->board.hash();
+                        n->zobrist = z;
+                    }
 
                     // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
                     py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
@@ -420,7 +424,9 @@ PYBIND11_MODULE(_core, m) {
                     // produce LegalMaskandMap and attach it to node (move -> heap)
                     backend::LegalMaskandMap lm = n->board.legal_move_mask();
                     auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
-                    n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+                    t.set_legal_mask_map(
+                         n,
+                    std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp));
 
                     // convert mask -> numpy array (copy)
                     const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)

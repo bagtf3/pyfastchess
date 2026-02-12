@@ -159,6 +159,7 @@ struct MCTSNode {
     bool children_have_priors = false;
     float value = 0.0f;     // cached leaf value when expanded (optional)
     int cache_misses = 0;
+    uint32_t queued_epoch = 0;
 
     // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
     // heap object and store it here so the node can later access it without copies.
@@ -212,7 +213,6 @@ public:
     CollectResults collect_many_leaves(size_t n_new, size_t n_fastpath);
 
     // Expand 'node' using (move, prior) pairs and apply value (white POV).
-    // Also pops virtual losses along the stored path and calls backup().
     void apply_result(
         MCTSNode* node,
         const std::vector<std::pair<std::string, float>>& move_priors,
@@ -222,12 +222,20 @@ public:
     uint64_t queue_pending(MCTSNode* n);
     void clear_pending();
     void resolve_pending();
+
+    void bump_epoch();
+    void push_pending(MCTSNode* node);
     std::vector<MCTSNode*> pop_pending_to_inflight();
 
-    // Read-only accessor for bindings.
-    std::vector<MCTSNode*> pending_nodes_;
-    std::vector<MCTSNode*> inflight_nodes_;
+    struct WorkItem {
+        MCTSNode* node = nullptr;
+        uint32_t epoch = 0;
+    };
 
+    uint32_t tree_epoch_ = 1;
+
+    std::vector<WorkItem> pending_nodes_;
+    std::vector<WorkItem> inflight_nodes_;
     
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;
@@ -265,6 +273,10 @@ public:
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
     
+    void set_legal_mask_map(
+        MCTSNode* node,
+        std::shared_ptr<const backend::LegalMaskandMap> lm_sp);
+
 private:
     std::unique_ptr<MCTSNode> root_;
     float c_puct_;
