@@ -384,6 +384,8 @@ PYBIND11_MODULE(_core, m) {
           .def("cpuct", &MCTSTree::cpuct)
           .def("set_sim_budget", &MCTSTree::set_sim_budget, py::arg("sim_budget"))
           .def("sim_budget", &MCTSTree::sim_budget)
+          .def("set_cooldown_thresh", &MCTSTree::set_cooldown_thresh, py::arg("thresh"))
+          .def("cooldown_thresh", &MCTSTree::cooldown_thresh)
 
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
@@ -394,7 +396,8 @@ PYBIND11_MODULE(_core, m) {
           
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (MCTSNode* n : t.pending_nodes_) {
+               std::vector<MCTSNode*> nodes = t.pop_pending_to_inflight();
+               for (MCTSNode* n : nodes) {
                     if (!n) continue;
                     uint64_t z   = n->zobrist;
                     auto planes  = ::stacked_planes_bitboards(n->board, nplanes);
@@ -438,9 +441,9 @@ PYBIND11_MODULE(_core, m) {
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
 
-          .def("resolve_pending", [](MCTSTree &t) {
+          .def("resolve_inflight", [](MCTSTree &t) {
                t.resolve_pending();
-          }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
+          }, "Resolve pending (inflight) leaves by consuming raw cache (build priors + apply).")
 
           .def("add_root_dirichlet_noise", &MCTSTree::add_root_dirichlet_noise,
                py::arg("eps") = 0.25f, py::arg("alpha") = 0.1f)
@@ -466,13 +469,7 @@ PYBIND11_MODULE(_core, m) {
           .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
-          .def(
-               "dfs_rescale",
-               &MCTSTree::dfs_rescale,
-               py::arg("rescale_factor") = 1.0f,
-               py::arg("max_depth") = -1,
-               "Depth-first rescale of node visits and W by rescale_factor in [0,1]."
-          )
+          
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers

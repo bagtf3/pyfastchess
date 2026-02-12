@@ -156,7 +156,16 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         const float prior = ce.prior;
         const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
-        const float score = q + u;
+        float score = q + u;
+        
+        if (ch) {
+            int pen = ch->performance_penalty.load();
+            if (pen > 0) {
+                score -= static_cast<float>(pen);
+                ch->performance_penalty.fetch_sub(1);
+            }
+        }
+
         if (score > best_score) {
             best_score = score;
             best_idx = i;
@@ -274,28 +283,11 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // set leaf pointer for the caller
     cc.leaf = node;
 
-    // helper to set terminals if we find one
-    auto mark_must_visit_from_terminal = [&](float v_white_pov) {
-        if (v_white_pov == 0.0f) return;
-        if (last_path_.size() < 2) return;
-
-        for (size_t i = 0; i + 1 < last_path_.size(); ++i) {
-            MCTSNode* parent = last_path_[i];
-            MCTSNode* child = last_path_[i + 1];
-
-            const bool stm_white = (parent->board.side_to_move() == "w");
-            const bool stm_wins = stm_white ? (v_white_pov > 0.0f)
-                                            : (v_white_pov < 0.0f);
-
-            if (stm_wins) parent->set_must_visit_uci(child->uci);
-        }
-    };
-
+    // IMPORTANT terminal checks must go first to catch draws (3fold, 50move)
     // Known terminal
     if (node->is_terminal) {
         cc.tag = CollectTag::TERMINAL;
         const float v = node->value;
-        mark_must_visit_from_terminal(v);
         back_up_along_path(node, v);
         return cc;
     }
@@ -306,7 +298,6 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         node->value = *tv;
         node->is_expanded = true;
         cc.tag = CollectTag::TERMINAL;
-        mark_must_visit_from_terminal(node->value);
         back_up_along_path(node, node->value);
         return cc;
     }
@@ -451,13 +442,33 @@ void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
 void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
     if (!leaf) return;
 
+    const float thresh = cooldown_thresh_;
+    const bool is_terminal = leaf->is_terminal;
     MCTSNode* last = nullptr;
 
     for (MCTSNode* n = leaf; n; n = n->parent) {
         last = n;
+
+        if (MCTSNode* p = n->parent) {
+            const float pov = (p->board.side_to_move() == "w") ? 1.0f : -1.0f;
+
+            if (is_terminal) {
+                const bool stm_wins = (pov * v > 0.0f);
+                if (stm_wins) {
+                    p->set_must_visit_uci(n->uci);
+                } else if (v != 0.0f) {
+                    n->performance_penalty.fetch_add(1);
+                }
+            } else {
+                if (thresh > 0.0 && pov * v < pov * n->Q - thresh) {
+                    n->performance_penalty.fetch_add(1);
+                }
+            }
+        }
+
         n->W += v;
-        const int nvis = n->visit_count();
-        n->Q = (nvis > 0) ? (n->W / static_cast<float>(nvis)) : 0.0f;
+        const int nv = n->visit_count();
+        n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
     }
 
     if (last != root_.get()) {
@@ -603,6 +614,20 @@ void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
     }
 }
 
+std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    if (pending_nodes_.empty()) return {};
+
+    std::vector<MCTSNode*> out = std::move(pending_nodes_);
+    pending_nodes_.clear();
+
+    for (MCTSNode* n : out) {
+        if (n) inflight_nodes_.push_back(n);
+    }
+
+    return out;
+}
+
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
     std::lock_guard<std::mutex> g(tree_mutex_);
@@ -614,21 +639,22 @@ uint64_t MCTSTree::queue_pending(MCTSNode* n) {
 void MCTSTree::clear_pending() {
     std::lock_guard<std::mutex> g(tree_mutex_);
     pending_nodes_.clear();
+    inflight_nodes_.clear();
 }
 
 void MCTSTree::resolve_pending() {
     // Quick check
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
-        if (pending_nodes_.empty()) return;
+        if (inflight_nodes_.empty()) return;
     }
 
-    // Drain pending nodes into a local vector under lock
+    // Drain inflight nodes into a local vector under lock
     std::vector<MCTSNode*> to_process;
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
-        to_process = std::move(pending_nodes_);
-        pending_nodes_.clear();
+        to_process = std::move(inflight_nodes_);
+        inflight_nodes_.clear();
     }
 
     // Process without holding tree_mutex_
@@ -639,33 +665,30 @@ void MCTSTree::resolve_pending() {
 
         // Lookup the raw network entry by zobrist (non-blocking)
         const RawEntry* re = raw_policy_cache().lookup(z);
-        if (!re) {
-            {
-                // Not ready yet — requeue under lock for later processing
-                std::lock_guard<std::mutex> g(tree_mutex_);
-                pending_nodes_.push_back(node);
-            }
-            // Diagnostic: show we missed a cache hit and requeued the node.
-            std::cout << "[resolve_pending] CACHE MISS: zobrist=0x"
-                    << std::hex << z << std::dec
-                    << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
-                    << " - requeued\n" << std::flush;
-            continue;
-        }   
+        if (!re || !re->has_value) {
+            node->cache_misses += 1;
 
-        // If the model hasn't produced a real value yet, requeue and wait.
-        if (!re->has_value) {
             {
+                // Not ready yet — retry inflight a few times, then punt to pending
                 std::lock_guard<std::mutex> g(tree_mutex_);
-                pending_nodes_.push_back(node);
+                if (node->cache_misses > 4) {
+                    std::cout << "[resolve_pending] MISS: zobrist=0x"
+                      << std::hex << z << std::dec
+                      << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
+                      << " misses=" << node->cache_misses
+                      << (node->cache_misses == 0 ? " -> pending" : " -> inflight")
+                      << "\n" << std::flush;
+                    node->cache_misses = 0;
+                    pending_nodes_.push_back(node);
+                    continue;
+                } else {
+                    inflight_nodes_.push_back(node);
+                }
             }
-            // Diagnostic: raw entry present but missing value; show and requeue.
-            std::cout << "[resolve_pending] NO VALUE YET: zobrist=0x"
-                    << std::hex << z << std::dec
-                    << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
-                    << " - requeued\n" << std::flush;
-            continue;
         }
+
+        // Cache hit: reset miss counter
+        node->cache_misses = 0;
 
         // Compute value_white_pov from model value (model gives STM-POV)
         const bool stm_white = (node->board.side_to_move() == "w");
@@ -677,25 +700,19 @@ void MCTSTree::resolve_pending() {
             std::lock_guard<std::mutex> g(tree_mutex_);
             lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
         }
-        if (!lm_sp) {
-            std::stringstream ss;
-            ss << "resolve_pending: missing LegalMaskandMap on node (zobrist=" << z
-               << "). Ensure pending_encoded_stm_pov attached it.";
-            throw std::runtime_error(ss.str());
-        }
 
         // Pluck priors directly from the model's raw policy vector (STM-POV).
-        const auto &policy_vec = re->p_policy; // model-provided vector (STM-POV)
-        const auto &pairs = lm_sp->lookup();
+        const auto& policy_vec = re->p_policy; // model-provided vector (STM-POV)
+        const auto& pairs = lm_sp->lookup();
 
         std::vector<std::pair<std::string, float>> built_priors;
         built_priors.reserve(pairs.size());
 
-        for (const auto &p : pairs) {
-            const std::string &uci = p.first;
+        for (const auto& p : pairs) {
+            const std::string& uci = p.first;
             const uint16_t idx = p.second; // expected index into policy_vec
 
-            // Direct pluck — intentionally no silent checks here (will crash loudly if wrong)
+            // Direct pluck — intentionally no silent checks here (crash loudly if wrong)
             const float prob = policy_vec[idx];
             built_priors.emplace_back(uci, prob);
         }
@@ -801,61 +818,6 @@ bool MCTSTree::advance_root(const std::string& mv) {
     return true;
 }
 
-void MCTSTree::dfs_rescale(float rescale_factor, int max_depth) {
-    if (rescale_factor < 0.0f || rescale_factor > 1.0f) {
-        throw std::runtime_error("dfs_rescale: rescale_factor must be in [0, 1]");
-    }
-
-    std::lock_guard<std::mutex> g(tree_mutex_);
-
-    MCTSNode* r = root_.get();
-    if (!r) return;
-
-    struct Frame {
-        MCTSNode* n;
-        int depth;
-        bool post;
-    };
-
-    std::vector<Frame> st;
-    st.reserve(1024);
-    st.push_back(Frame{r, 0, false});
-
-    while (!st.empty()) {
-        Frame f = st.back();
-        st.pop_back();
-
-        if (!f.n) continue;
-
-        if (!f.post) {
-            st.push_back(Frame{f.n, f.depth, true});
-
-            const bool depth_blocked = (max_depth >= 0 && f.depth >= max_depth);
-            if (!depth_blocked) {
-                for (auto &ce : f.n->ordered_children) {
-                    MCTSNode* ch = ce.child.get();
-                    if (!ch) continue;
-                    st.push_back(Frame{ch, f.depth + 1, false});
-                }
-            }
-            continue;
-        }
-
-        const int old_v = f.n->visit_count();
-        if (old_v <= 1) continue;
-
-        int new_v = static_cast<int>(std::floor(old_v * rescale_factor));
-        if (new_v <= 0) new_v = 1;
-
-        if (new_v == old_v) continue;
-
-        const float ratio = static_cast<float>(new_v) / static_cast<float>(old_v);
-
-        f.n->W *= ratio;
-        f.n->Q = (new_v > 0) ? (f.n->W / static_cast<float>(new_v)) : 0.0f;
-        f.n->N.store(new_v, std::memory_order_relaxed);
-    }
-}
 
 std::vector<ChildDetail> MCTSTree::root_child_details() const {
     std::lock_guard<std::mutex> g(tree_mutex_);

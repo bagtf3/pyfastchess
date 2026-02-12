@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex> 
+#include <thread>
 #include "backend.hpp"
 #include "singleton_registry.hpp"
 
@@ -77,6 +78,7 @@ struct MCTSNode {
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
 
+    mutable std::atomic<int> performance_penalty{0};
     std::atomic<uint8_t> must_visit_state{0};  // 0 empty, 2 writing, 1 ready
     char must_visit_uci[16] = {0};
 
@@ -93,17 +95,39 @@ struct MCTSNode {
             std::memcpy(must_visit_uci, mv.data(), n);
         }
         must_visit_uci[n] = '\0';
-
         must_visit_state.store(1, std::memory_order_release);
     }
 
     bool take_must_visit_uci(char out_uci[16]) noexcept {
-        const uint8_t state = must_visit_state.exchange(0, std::memory_order_acq_rel);
-        if (state != 1) return false;
+        for (int spins = 0; spins < 8; ++spins) {
+            uint8_t state = must_visit_state.load(std::memory_order_acquire);
 
-        std::memcpy(out_uci, must_visit_uci, 16);
-        out_uci[15] = '\0';
-        return true;
+            if (state == 0) {
+                return false;
+            }
+            // if we catch a write, try again a few times
+            if (state == 2) {
+                std::this_thread::yield();
+                continue;
+            }
+
+            if (state != 1) {
+                return false;
+            }
+
+            uint8_t expected = 1;
+            if (!must_visit_state.compare_exchange_strong(
+                    expected, 0, std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+                continue;
+            }
+
+            std::memcpy(out_uci, must_visit_uci, 16);
+            out_uci[15] = '\0';
+            return true;
+        }
+
+        return false;
     }
 
     // --- Priors / children ---
@@ -134,6 +158,7 @@ struct MCTSNode {
     bool is_expanded = false;
     bool children_have_priors = false;
     float value = 0.0f;     // cached leaf value when expanded (optional)
+    int cache_misses = 0;
 
     // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
     // heap object and store it here so the node can later access it without copies.
@@ -197,9 +222,12 @@ public:
     uint64_t queue_pending(MCTSNode* n);
     void clear_pending();
     void resolve_pending();
+    std::vector<MCTSNode*> pop_pending_to_inflight();
 
     // Read-only accessor for bindings.
     std::vector<MCTSNode*> pending_nodes_;
+    std::vector<MCTSNode*> inflight_nodes_;
+
     
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;
@@ -214,10 +242,10 @@ public:
     // Add Dirichlet noise to root priors (thread-safe)
     void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
     bool advance_root(const std::string& move_uci);
-
-    // DFS rescale visits (N) and total value (W) by a scalar in [0, 1].
-    // max_depth < 0 means no depth limit; depth=0 is the root.
-    void dfs_rescale(float rescale_factor = 1.0f, int max_depth = -1);
+    
+    // house and update the cooldown threshold.
+    void set_cooldown_thresh(float v) { cooldown_thresh_ = v; }
+    float cooldown_thresh() const { return cooldown_thresh_; }
 
     int  epoch() const { return epoch_; }
 
@@ -246,6 +274,7 @@ private:
     // Simulation budget and pruning config (tree-level)
     float sim_budget_ = 800.0f;
     float pruning_factor_ = 1.2f;
+    float cooldown_thresh_ = 0.15f;
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
