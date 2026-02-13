@@ -295,14 +295,24 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         node->add_visit();
     }
 
+    static thread_local int orphan_rescue_count = 0;
     if (!to_requeue.empty()) {
-        std::lock_guard<std::mutex> g(tree_mutex_);
         for (MCTSNode* qn : to_requeue) {
             if (!qn) continue;
-            if (qn->queued_epoch == cur_epoch) continue;
-
-            qn->queued_epoch = cur_epoch;
-            pending_nodes_.push_back(WorkItem{qn, cur_epoch});
+            if (qn->queued_epoch != cur_epoch) {
+                orphan_rescue_count += 1;
+                if (orphan_rescue_count <= 100 &&
+                    orphan_rescue_count % 10 == 0) {
+                    std::cout << "[orphan_rescue] count="
+                            << orphan_rescue_count
+                            << " z=0x" << std::hex << qn->zobrist
+                            << std::dec
+                            << " cur_epoch=" << cur_epoch
+                            << " prev_epoch=" << qn->queued_epoch
+                            << "\n" << std::flush;
+                }
+            }
+            queue_pending(qn);
         }
     }
 
@@ -667,8 +677,7 @@ void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
     }
 }
 
-std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight()
-{
+std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
     std::vector<WorkItem> local;
     uint32_t cur_epoch = 0;
 
@@ -679,27 +688,39 @@ std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight()
         pending_nodes_.clear();
     }
 
+    std::unordered_set<MCTSNode*> seen;
+    seen.reserve(local.size() * 2 + 16);
+
     std::vector<MCTSNode*> out;
     out.reserve(local.size());
 
     {
         std::lock_guard<std::mutex> g(tree_mutex_);
         for (const WorkItem& wi : local) {
-            if (!wi.node) continue;
+            MCTSNode* n = wi.node;
+            if (!n) continue;
             if (wi.epoch != cur_epoch) continue;
+            if (n->children_have_priors) continue;
+            if (!seen.insert(n).second) continue;
 
             inflight_nodes_.push_back(wi);
-            out.push_back(wi.node);
+            out.push_back(n);
         }
     }
-
     return out;
 }
+
 
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
 
     std::lock_guard<std::mutex> g(tree_mutex_);
+
+    if (n->queued_epoch == tree_epoch_) {
+        return n->zobrist;
+    }
+
+    n->queued_epoch = tree_epoch_;
     pending_nodes_.push_back(WorkItem{n, tree_epoch_});
     return n->zobrist;
 }
@@ -746,14 +767,26 @@ void MCTSTree::resolve_pending() {
         inflight_nodes_.clear();
     }
 
+    // Per-pass dedupe so dupes in inflight dont explode work
+    std::unordered_set<MCTSNode*> seen;
+    seen.reserve(to_process.size() * 2 + 16);
+
+    // Per-pass dedupe for requeue targets.
+    std::unordered_set<MCTSNode*> add_inflight;
+    std::unordered_set<MCTSNode*> add_pending;
+    add_inflight.reserve(to_process.size() * 2 + 16);
+    add_pending.reserve(to_process.size() / 2 + 16);
+
     // Process without holding tree_mutex_
     for (const WorkItem& wi : to_process) {
-        if (wi.epoch != cur_epoch) {
-            continue;
-        }
+        if (wi.epoch != cur_epoch) continue;
 
         MCTSNode* node = wi.node;
         if (!node) continue;
+        if (!seen.insert(node).second) continue;
+        
+        // Already resolved? Don't churn it.
+        if (node->children_have_priors) continue;
 
         const uint64_t z = node->zobrist;
 
@@ -762,26 +795,18 @@ void MCTSTree::resolve_pending() {
         if (!re || !re->has_value) {
             node->cache_misses += 1;
 
-            {
-                std::lock_guard<std::mutex> g(tree_mutex_);
+            if (node->cache_misses > 10) {
+                std::cout << "[resolve_pending] MISS: zobrist=0x"
+                          << std::hex << z << std::dec
+                          << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
+                          << " misses=" << node->cache_misses
+                          << " -> pending"
+                          << "\n" << std::flush;
 
-                if (wi.epoch != tree_epoch_) {
-                    continue;
-                }
-
-                if (node->cache_misses > 4) {
-                    std::cout << "[resolve_pending] MISS: zobrist=0x"
-                      << std::hex << z << std::dec
-                      << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
-                      << " misses=" << node->cache_misses
-                      << " -> pending"
-                      << "\n" << std::flush;
-
-                    node->cache_misses = 0;
-                    pending_nodes_.push_back(WorkItem{node, tree_epoch_});
-                } else {
-                    inflight_nodes_.push_back(WorkItem{node, tree_epoch_});
-                }
+                node->cache_misses = 0;
+                add_pending.insert(node);
+            } else {
+                add_inflight.insert(node);
             }
             continue;
         }
@@ -793,11 +818,27 @@ void MCTSTree::resolve_pending() {
         const bool stm_white = (node->board.side_to_move() == "w");
         const float value_white_pov = stm_white ? re->value : -re->value;
 
-        std::vector<std::pair<std::string, float>> built_priors =
-            build_priors(node, re);
+        std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
 
         // Apply result: overwrite priors and backprop the value.
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
+    }
+
+    // Rebuild inflight/pending under lock (deduped by the sets above).
+    {
+        std::lock_guard<std::mutex> g(tree_mutex_);
+
+        for (MCTSNode* n : add_inflight) {
+            if (!n) continue;
+            if (n->children_have_priors) continue;
+            inflight_nodes_.push_back(WorkItem{n, tree_epoch_});
+        }
+
+        for (MCTSNode* n : add_pending) {
+            if (!n) continue;
+            if (n->children_have_priors) continue;
+            pending_nodes_.push_back(WorkItem{n, tree_epoch_});
+        }
     }
 }
 

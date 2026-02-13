@@ -14,7 +14,7 @@ struct CacheEntry {
 
 class Cache {
 public:
-    explicit Cache(size_t max_size = 600000);
+    explicit Cache(size_t max_size = 750000);
 
     // lookup returns true if present and fills `out`. Moves entry to MRU.
     bool lookup(uint64_t key, CacheEntry& out);
