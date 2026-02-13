@@ -31,138 +31,125 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 {
     if (ordered_children.empty()) return nullptr;
 
+    const size_t n_child = ordered_children.size();
+    constexpr float q_clamp_lo = -0.5f;
+    constexpr float q_clamp_hi =  0.5f;
+
+    auto get_or_create_child = [&](ChildEntry& ce) -> MCTSNode* {
+        MCTSNode* ch = ce.child.get();
+        if (ch) return ch;
+
+        backend::Board childb = board;
+        if (!childb.push_uci(ce.uci)) return nullptr;
+
+        auto up = std::make_unique<MCTSNode>(childb, this, ce.uci);
+        up->zobrist = childb.hash();
+        up->Q = clampf(this->Q, q_clamp_lo, q_clamp_hi);
+
+        ch = up.get();
+        ce.child = std::move(up);
+        return ch;
+    };
+
     // forced visit if we found a mate. no PUCT
     char forced_uci[16];
     if (take_must_visit_uci(forced_uci)) {
-        for (size_t i = 0; i < ordered_children.size(); ++i) {
+        ++cc->count_must_visit;
+        for (size_t i = 0; i < n_child; ++i) {
             ChildEntry& ce = ordered_children[i];
             if (ce.uci != forced_uci) continue;
-
-            MCTSNode* ch = ce.child.get();
-            if (!ch) {
-                backend::Board childb = board;
-                if (!childb.push_uci(ce.uci)) return nullptr;
-                auto up = std::make_unique<MCTSNode>(childb, this, ce.uci);
-                up->zobrist = childb.hash();
-                up->Q = clampf(this->Q, -0.5f, 0.5f);
-                ch = up.get();
-                ce.child = std::move(up);
-            }
-            return ch;
+            return get_or_create_child(ce);
         }
     }
 
-    // Fast-path: no priors available — round-robin on legal_moves.
+    // no priors available — randomish via round-robin on legal_moves, no puct
     if (!children_have_priors) {
-        const size_t n = legal_moves.size();
-        if (n == 0) return nullptr;
-
         thread_local uint64_t rr_counter = 0;
-        const size_t idx = static_cast<size_t>((rr_counter++) % n);
+        const size_t idx = static_cast<size_t>((rr_counter++) % n_child);
 
-        ChildEntry &ce = ordered_children[idx];
-        const std::string &mv = ce.uci;
+        ++cc->count_priorless; 
+        cc->priorless_parentN += this->visit_count();        
 
-        if (cc) ++cc->count_priorless;
-
-        MCTSNode* ch = ce.child.get();
-        if (!ch) {
-            backend::Board childb = board;
-            if (!childb.push_uci(mv)) return nullptr;
-            auto up = std::make_unique<MCTSNode>(childb, this, mv);
-            up->zobrist = childb.hash();
-            up->Q = clampf(this->Q, -0.5, 0.5);
-            ch = up.get();
-            ce.child = std::move(up);
-        }
-        return ch;
+        ChildEntry& ce = ordered_children[idx];
+        return get_or_create_child(ce);
     }
-    // parent visit budget and caps (use ints for exact arithmetic)
+
+    ++cc->count_with_priors;
+
     const int parent_vis = std::max(1, this->visit_count());
     const int cap = 4 + parent_vis / 2;
-    const size_t cap_sz = std::min(ordered_children.size(), static_cast<size_t>(cap));
-
+    const size_t cap_sz = std::min(n_child, static_cast<size_t>(cap));
+    cc->count_skipped += n_child - cap_sz;
+    
     const float parentN = static_cast<float>(parent_vis);
     const float u_scale = c_puct * std::sqrt(parentN);
     const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
     const float parent_q = pov_sign * this->Q;
 
-    // do_prune must be mutable so we can disable it if needed
-    bool do_prune = (pruning_factor > 0.0f) && (cap_sz == ordered_children.size());
+    bool do_prune = (pruning_factor > 0.0f) && (cap_sz == n_child);
 
-    // remaining budget with a small floor (intentional)
-    const float remaining_budget = do_prune ? std::max(10.0f, sim_budget - parentN) : 0.0f;
-
-    // prune threshold: low-budget relax behavior; denom clamps factor==0
+    // remaining sim budget with a small floor for safety
+    const float remaining = do_prune ? std::max(10.0f, sim_budget - parentN) : 0.0f;
     const float denom = (pruning_factor > 0.0f) ? pruning_factor : 1.0f;
-    const float prune_threshold = (remaining_budget < 100.0f) ? remaining_budget : (remaining_budget / denom);
+    const float budget_slack = (remaining < 100.0f) ? remaining : (remaining / denom);
 
-    // Compute max_child_visits and most-visited child if pruning is enabled.
-    float max_child_visits = 0.0f;
-    int most_visited_idx = -1;
-    int most_visited_count = -1;
-
-    if (do_prune) {
-        for (size_t i = 0; i < cap_sz; ++i) {
-            const MCTSNode* ch = ordered_children[i].child.get();
-            const int v = ch ? static_cast<int>(ch->visit_count()) : 0;
-            const float n = static_cast<float>(v);
-            if (n > max_child_visits) max_child_visits = n;
-            if (v > most_visited_count) {
-                most_visited_count = v;
-                most_visited_idx = static_cast<int>(i);
-            }
-        }
-    }
-
-    const float needed = do_prune ? (max_child_visits - prune_threshold) : 0.0f;
-
-    size_t best_idx = SIZE_MAX;
+    // init
     MCTSNode* best_child = nullptr;
+    size_t best_idx = SIZE_MAX;
     float best_score = -INFINITY;
-    size_t pruned_count = 0;
 
-    // running sum of visits we've inspected so far (for early-exit)
-    int sum_seen = 0;
+    int max_visits = -1;
+    int max_visits_idx = -1;
+    float prune_below = -1.0f;
+    
+    bool have_seen_any = false;
+    int unseen_visits = parent_vis - 1;
 
-    // Primary sweep: evaluate candidates, skipping those pruned.
+    // main puct loop. will implement pruning on the fly
     for (size_t i = 0; i < cap_sz; ++i) {
-        const ChildEntry &ce = ordered_children[i];
+        const ChildEntry& ce = ordered_children[i];
         const MCTSNode* ch = ce.child.get();
+
         const int n_int = ch ? static_cast<int>(ch->visit_count()) : 0;
         const float n = static_cast<float>(n_int);
+        unseen_visits -= n_int;
+        
+        if (ch) have_seen_any = true;
 
-        if (do_prune) {
-            // pruning test (same as before)
-            if ((max_child_visits - n) > prune_threshold) {
-                ++pruned_count;
-                sum_seen += n_int;
-
-                // remaining visits that could be allocated to unseen children
-                const int remaining_total = parent_vis - sum_seen;
-                // if even piling all remaining visits can't reach 'needed', stop
-                if (static_cast<float>(remaining_total) < needed) {
-                    // account for unseen children as pruned and exit
-                    pruned_count += static_cast<size_t>(cap_sz - i - 1);
-                    break;
-                }
+        // pruning pass based on visit target and max visits encountered
+        if (do_prune && have_seen_any) {
+            if (n_int > max_visits){
+                 max_visits = n_int;
+                 max_visits_idx = static_cast<int>(i);
+                 prune_below = static_cast<float>(max_visits) - budget_slack;
+            }
+            
+            if (static_cast<float>(unseen_visits) < prune_below) {
+                // account for unseen children as pruned and exit
+                cc->count_pruned += static_cast<size_t>(cap_sz - i - 1);
+                break;
+            
+            }
+            if (n < prune_below) {
+                ++cc->count_pruned;
                 continue;
             }
         }
-
-        // add to the count
-        if (cc) ++cc->count_puct;
+        
+        // if here, we will be doing puct
+        ++cc->count_puct;
 
         const float prior = ce.prior;
         const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         float score = q + u;
-        
+
         if (ch) {
             int pen = ch->performance_penalty.load();
             if (pen > 0) {
                 score -= static_cast<float>(pen);
                 ch->performance_penalty.fetch_sub(1);
+                ++cc->count_penalty;
             }
         }
 
@@ -171,72 +158,28 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
             best_idx = i;
             best_child = const_cast<MCTSNode*>(ch);
         }
-
-        sum_seen += n_int;
     }
 
-    // safety fallback: if pruning removed all candidates, do unpruned sweep.
-    if (do_prune && pruned_count >= cap_sz) {
-        // debug print (rate-limited to avoid console spam)
-        static thread_local int fallback_print_count = 0;
-        if (fallback_print_count < 20) {
-            ++fallback_print_count;
-            std::fprintf(stderr,
-                "[MCTS] prune-fallback used: node_zobrist=0x%016llx pruned=%zu cap=%zu "
-                "pruning_factor=%.3f remaining_budget=%.1f max_child_visits=%.1f\n",
-                static_cast<unsigned long long>(this->zobrist),
-                pruned_count, cap_sz,
-                pruning_factor, remaining_budget, max_child_visits);
-        }
-
-        // Prefer the most-visited instantiated child if it exists
-        if (most_visited_idx >= 0 && most_visited_count > 0) {
-            best_idx = static_cast<size_t>(most_visited_idx);
+    if (best_idx == SIZE_MAX) {
+        if (do_prune && max_visits_idx >= 0) {
+            best_idx = static_cast<size_t>(max_visits_idx);
             best_child = ordered_children[best_idx].child.get()
-                             ? const_cast<MCTSNode*>(
-                                   ordered_children[best_idx].child.get())
-                             : nullptr;
+                ? const_cast<MCTSNode*>(ordered_children[best_idx].child.get())
+                : nullptr;
         } else {
-            // full unpruned sweep (fallback)
-            best_idx = SIZE_MAX;
-            best_child = nullptr;
-            best_score = -INFINITY;
-            for (size_t i = 0; i < cap_sz; ++i) {
-                if (cc) ++cc->count_puct;
-                const ChildEntry &ce = ordered_children[i];
-                const float prior = ce.prior;
-                const MCTSNode* ch = ce.child.get();
-                const float n = ch ? static_cast<float>(ch->visit_count()) : 0.0f;
-                const float q = ch ? (pov_sign * ch->Q) : parent_q;
-                const float u = u_scale * prior / (1.0f + n);
-                const float score = q + u;
-                if (score > best_score) {
-                    best_score = score;
-                    best_idx = i;
-                    best_child = const_cast<MCTSNode*>(ch);
-                }
-            }
+            return nullptr;
         }
     }
-
-    if (best_idx == SIZE_MAX) return nullptr;
 
     if (!best_child) {
-        const std::string &best_mv = ordered_children[best_idx].uci;
-        backend::Board childb = board;
-        if (!childb.push_uci(best_mv)) return nullptr;
-        auto up = std::make_unique<MCTSNode>(childb, this, best_mv);
-        up->zobrist = childb.hash();
-        up->Q = clampf(this->Q, -0.5, 0.5);
-        best_child = up.get();
-        ordered_children[best_idx].child = std::move(up);
+        ChildEntry& ce = ordered_children[best_idx];
+        best_child = get_or_create_child(ce);
     }
 
     return best_child;
 }
 
 // ------------------------- MCTSTree -------------------------
-
 // mcts.cpp (constructor)
 MCTSTree::MCTSTree(const backend::Board& root_board,
                    float c_puct,
@@ -279,7 +222,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // descend while expanded and has children (now uses ordered_children)
     while (node->is_expanded && !node->ordered_children.empty()) {
         // If this node is expanded but still missing real priors, it may be an
-        // orphan from an epoch bump. Requeue once per epoch.
+        // orphan from an epoch bump. Requeue to rescue.
         if (!node->children_have_priors && node->queued_epoch != cur_epoch) {
             to_requeue.push_back(node);
         }
@@ -395,8 +338,17 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t new_count = 0;
     size_t cached_count = 0;
     size_t terminal_count = 0;
+
+    uint64_t total_must_visit = 0;
+    uint64_t total_with_priors = 0;
     uint64_t total_priorless = 0;
+    uint64_t total_priorless_parentN = 0;
+
+    uint64_t total_skipped = 0;
+    uint64_t total_pruned = 0;
+
     uint64_t total_puct = 0;
+    uint64_t total_penalty = 0;
 
     size_t attempts = 0;
     const size_t try_break = 10000;
@@ -405,20 +357,31 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
            (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
            (attempts < try_break)) {
 
+        // one descent; cc carries per-descent telemetry + tag + leaf pointer
         CollectCounts cc = collect_one_leaf_tagged();
         ++attempts;
 
-        // accumulate per-descent counters
+        // roll up per-descent counters into batch totals
+        total_must_visit += cc.count_must_visit;    
+        total_with_priors += cc.count_with_priors;
         total_priorless += cc.count_priorless;
-        total_puct += cc.count_puct;
+        total_priorless_parentN += cc.priorless_parentN;
 
+        total_skipped += cc.count_skipped;
+        total_pruned += cc.count_pruned;
+
+        total_puct += cc.count_puct;
+        total_penalty += cc.count_penalty;
+
+        // leaf can be null if we hit an unexpected stop condition
         MCTSNode* node = cc.leaf;
         CollectTag tag = cc.tag;
 
         if (!node) break;
 
+        // NEW_LEAF: queued for NN eval; CACHED/TERMINAL count toward fastpath
         if (tag == CollectTag::NEW_LEAF) {
-            uint64_t z = this->queue_pending(node);
+            this->queue_pending(node);
             ++new_count;
         } else if (tag == CollectTag::CACHED) {
             ++cached_count;
@@ -427,15 +390,26 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         }
     }
 
-    // build the return struct
+    // pack totals into a POD result for pybind return
     CollectResults res;
     res.count_new = new_count;
     res.count_cached = cached_count;
     res.count_terminal = terminal_count;
+
+    res.total_must_visit = total_must_visit;
+    res.total_with_priors = total_with_priors;
     res.total_priorless = total_priorless;
+    res.total_priorless_parentN = total_priorless_parentN;
+
+    res.total_skipped = total_skipped;
+    res.total_pruned = total_pruned;
+
     res.total_puct = total_puct;
+    res.total_penalty = total_penalty;
+
     return res;
 }
+
 
 void MCTSTree::apply_result(
     MCTSNode* node,

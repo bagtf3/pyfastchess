@@ -514,8 +514,19 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("count_new", &CollectResults::count_new)
           .def_readonly("count_terminal", &CollectResults::count_terminal)
           .def_readonly("count_cached", &CollectResults::count_cached)
+
+          .def_readonly("total_must_visit", &CollectResults::total_must_visit)
+          .def_readonly("total_with_priors", &CollectResults::total_with_priors)
           .def_readonly("total_priorless", &CollectResults::total_priorless)
-          .def_readonly("total_puct", &CollectResults::total_puct);
+          .def_readonly("total_priorless_parentN",
+                         &CollectResults::total_priorless_parentN)
+
+          .def_readonly("total_skipped", &CollectResults::total_skipped)
+          .def_readonly("total_pruned", &CollectResults::total_pruned)
+
+          .def_readonly("total_puct", &CollectResults::total_puct)
+          .def_readonly("total_penalty", &CollectResults::total_penalty);
+
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())
