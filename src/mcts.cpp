@@ -725,7 +725,6 @@ uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     return n->zobrist;
 }
 
-
 void MCTSTree::clear_pending() {
     std::lock_guard<std::mutex> g(tree_mutex_);
     pending_nodes_.clear();
