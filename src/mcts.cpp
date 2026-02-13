@@ -291,26 +291,15 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         if (!child) break;
         node = child;
         last_path_.push_back(node);
-        // increment visit for this node immediately (selection-time)
+        // increment visit for this node immediately (psuedo virtual loss)
         node->add_visit();
     }
 
-    static thread_local int orphan_rescue_count = 0;
     if (!to_requeue.empty()) {
         for (MCTSNode* qn : to_requeue) {
             if (!qn) continue;
             if (qn->queued_epoch != cur_epoch) {
-                orphan_rescue_count += 1;
-                if (orphan_rescue_count <= 100 &&
-                    orphan_rescue_count % 10 == 0) {
-                    std::cout << "[orphan_rescue] count="
-                            << orphan_rescue_count
-                            << " z=0x" << std::hex << qn->zobrist
-                            << std::dec
-                            << " cur_epoch=" << cur_epoch
-                            << " prev_epoch=" << qn->queued_epoch
-                            << "\n" << std::flush;
-                }
+                orphan_nodes_.fetch_add(1, std::memory_order_relaxed);
             }
             queue_pending(qn);
         }
@@ -710,6 +699,13 @@ std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
     return out;
 }
 
+uint64_t MCTSTree::orphan_nodes() const {
+    return orphan_nodes_.load(std::memory_order_relaxed);
+}
+
+void MCTSTree::clear_orphan_count() {
+    orphan_nodes_.store(0, std::memory_order_relaxed);
+}
 
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
@@ -735,7 +731,6 @@ void MCTSTree::bump_epoch()
 {
     std::lock_guard<std::mutex> g(tree_mutex_);
     tree_epoch_ += 1;
-
     pending_nodes_.clear();
     inflight_nodes_.clear();
 }
@@ -784,7 +779,7 @@ void MCTSTree::resolve_pending() {
         if (!node) continue;
         if (!seen.insert(node).second) continue;
         
-        // Already resolved? Don't churn it.
+        // already resolved? dont double count
         if (node->children_have_priors) continue;
 
         const uint64_t z = node->zobrist;

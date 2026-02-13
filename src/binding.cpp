@@ -477,6 +477,8 @@ PYBIND11_MODULE(_core, m) {
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
           
+          .def_property_readonly("orphan_nodes", &MCTSTree::orphan_nodes)
+          .def("clear_orphan_count", &MCTSTree::clear_orphan_count)
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers

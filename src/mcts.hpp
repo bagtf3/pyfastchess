@@ -232,10 +232,13 @@ public:
         uint32_t epoch = 0;
     };
 
+    uint32_t epoch() const { return tree_epoch_; }
     uint32_t tree_epoch_ = 1;
-
     std::vector<WorkItem> pending_nodes_;
     std::vector<WorkItem> inflight_nodes_;
+    
+    uint64_t orphan_nodes() const;
+    void clear_orphan_count();
     
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;
@@ -254,8 +257,6 @@ public:
     // house and update the cooldown threshold.
     void set_cooldown_thresh(float v) { cooldown_thresh_ = v; }
     float cooldown_thresh() const { return cooldown_thresh_; }
-
-    int  epoch() const { return epoch_; }
 
     std::vector<ChildDetail> root_child_details() const;
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -281,7 +282,7 @@ private:
     std::unique_ptr<MCTSNode> root_;
     float c_puct_;
     std::vector<MCTSNode*> last_path_;
-    int epoch_ = 0;
+    std::atomic<uint64_t> orphan_nodes_{0};
 
     // Simulation budget and pruning config (tree-level)
     float sim_budget_ = 800.0f;
