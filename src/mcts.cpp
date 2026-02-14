@@ -203,28 +203,23 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     CollectCounts cc;              // per-descent counters (starts zero)
 
     last_path_.clear();
-    if (last_path_.capacity() < 96) last_path_.reserve(96);
+    if (last_path_.capacity() < 64) last_path_.reserve(64);
 
     // push root and mark a visit atomically
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
     node->add_visit();
 
-    std::vector<MCTSNode*> to_requeue;
-    to_requeue.reserve(16);
-
-    uint32_t cur_epoch = 0;
-    {
-        //std::lock_guard<std::mutex> g(tree_mutex_);
-        cur_epoch = tree_epoch_;
-    }
+    uint32_t cur_epoch = tree_epoch_;
 
     // descend while expanded and has children (now uses ordered_children)
     while (node->is_expanded && !node->ordered_children.empty()) {
         // If this node is expanded but still missing real priors, it may be an
         // orphan from an epoch bump. Requeue to rescue.
         if (!node->children_have_priors && node->queued_epoch != cur_epoch) {
-            to_requeue.push_back(node);
+            if (!node->is_pending && !node->is_inflight){
+                queue_pending(node);
+            }
         }
 
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
@@ -236,13 +231,6 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         last_path_.push_back(node);
         // increment visit for this node immediately (psuedo virtual loss)
         node->add_visit();
-    }
-
-    if (!to_requeue.empty()) {
-        for (MCTSNode* qn : to_requeue) {
-            if (!qn) continue;
-            queue_pending(qn);
-        }
     }
 
     // set leaf pointer for the caller
@@ -389,8 +377,6 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    //std::lock_guard<std::mutex> g(tree_mutex_);
-
     // build fast lookup (uci -> prior) from sorted priors
     std::unordered_map<std::string,float> priormap;
     priormap.reserve(move_priors.size());
@@ -429,7 +415,7 @@ void MCTSTree::apply_result(
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
     if (!leaf) return;
 
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    //std::lock_guard<std::mutex> g(tree_mutex_);
     back_up_along_path_nolock(leaf, v);
 }
 
@@ -475,7 +461,6 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
         );
     }
 }
-
 
 void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     if (!node) return;
@@ -643,32 +628,10 @@ uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     // if its already there just pretend we queued it, its fine
     if (n->is_pending) return n->zobrist;
 
-    n->queued_epoch = tree_epoch_;
     n->is_pending = true;
+    n->queued_epoch = tree_epoch_;
     pending_nodes_.push_back(WorkItem{n, tree_epoch_});
     return n->zobrist;
-}
-
-void MCTSTree::clear_pending() {
-    for (const WorkItem& wi : pending_nodes_) {
-        MCTSNode* n = wi.node;
-        if (!n) continue;
-        n->is_pending = false;
-    }
-
-    for (const WorkItem& wi : inflight_nodes_) {
-        MCTSNode* n = wi.node;
-        if (!n) continue;
-        n->is_inflight = false;
-    }
-
-    pending_nodes_.clear();
-    inflight_nodes_.clear();
-}
-
-void MCTSTree::bump_epoch() {
-    tree_epoch_ += 1;
-    clear_pending();
 }
 
 void MCTSTree::resolve_inflight() {
@@ -773,6 +736,112 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
     return built_priors;
 }
 
+void MCTSTree::set_legal_mask_map(
+    MCTSNode* node,
+    std::shared_ptr<const backend::LegalMaskandMap> lm_sp)
+{
+    
+    node->legal_mask_map = std::move(lm_sp);
+}
+
+void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch) {
+    size_t i = 0;
+    while (i < pending_nodes_.size()) {
+        WorkItem& wi = pending_nodes_[i];
+        MCTSNode* n = wi.node;
+
+        bool keep = false;
+        if (n) {
+            MCTSNode* cur = n;
+            while (cur) {
+                if (cur == new_root) {
+                    keep = true;
+                    break;
+                }
+                cur = cur->parent;
+            }
+        }
+
+        if (!keep) {
+            if (n) n->is_pending = false;
+            pending_nodes_[i] = pending_nodes_.back();
+            pending_nodes_.pop_back();
+            continue;
+        }
+
+        wi.epoch = new_epoch;
+        ++i;
+    }
+
+    i = 0;
+    while (i < inflight_nodes_.size()) {
+        WorkItem& wi = inflight_nodes_[i];
+        MCTSNode* n = wi.node;
+
+        bool keep = false;
+        if (n) {
+            MCTSNode* cur = n;
+            while (cur) {
+                if (cur == new_root) {
+                    keep = true;
+                    break;
+                }
+                cur = cur->parent;
+            }
+        }
+
+        if (!keep) {
+            if (n) n->is_inflight = false;
+            inflight_nodes_[i] = inflight_nodes_.back();
+            inflight_nodes_.pop_back();
+            continue;
+        }
+
+        wi.epoch = new_epoch;
+        ++i;
+    }
+}
+
+bool MCTSTree::advance_root(const std::string& mv) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    last_path_.clear();
+
+    auto old_root = std::move(root_);
+    if (!old_root) return false;
+
+    // Try to reuse an existing instantiated subtree.
+    for (auto it = old_root->ordered_children.begin();
+         it != old_root->ordered_children.end();
+         ++it) {
+        if (it->uci != mv || !it->child) continue;
+
+        auto new_root = std::move(it->child);
+        new_root->parent = nullptr;
+        old_root->ordered_children.erase(it);
+
+        tree_epoch_ += 1;
+        filter_queues_for_new_root(new_root.get(), tree_epoch_);
+
+        root_ = std::move(new_root);
+        return true;
+    }
+
+    // No existing subtree: create a fresh root (old tree will be discarded).
+    backend::Board nb = old_root->board;
+    if (!nb.push_uci(mv)) {
+        root_ = std::move(old_root);
+        return false;
+    }
+
+    tree_epoch_ += 1;
+    pending_nodes_.clear();
+    inflight_nodes_.clear();
+
+    root_ = std::make_unique<MCTSNode>(nb, nullptr, "");
+    root_->zobrist = nb.hash();
+    return true;
+}
+
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
     const MCTSNode* r = root_.get();
     std::vector<std::pair<std::string, int>> rows;
@@ -832,52 +901,8 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     return { *best_mv, best_ch };
 }
 
-void MCTSTree::set_legal_mask_map(
-    MCTSNode* node,
-    std::shared_ptr<const backend::LegalMaskandMap> lm_sp)
-{
-    
-    node->legal_mask_map = std::move(lm_sp);
-}
-
-bool MCTSTree::advance_root(const std::string& mv) {
-    bump_epoch();
-
-    std::lock_guard<std::mutex> g(tree_mutex_);
-    last_path_.clear();
-
-    auto old_root = std::move(root_);
-    if (!old_root) return false;
-
-    // Try to find an ordered_children entry with matching UCI that already
-    // contains an instantiated subtree. If found, move that subtree to be new root.
-    for (auto it = old_root->ordered_children.begin();
-         it != old_root->ordered_children.end();
-         ++it) {
-        if (it->uci == mv && it->child) {
-            auto new_root = std::move(it->child);
-            new_root->parent = nullptr;
-            old_root->ordered_children.erase(it);
-            root_ = std::move(new_root);
-            return true;
-        }
-    }
-
-    // No existing subtree — create a fresh root by pushing the move
-    backend::Board nb = old_root->board;
-    if (!nb.push_uci(mv)) {
-        root_ = std::move(old_root);
-        return false;
-    }
-
-    root_ = std::make_unique<MCTSNode>(nb, nullptr, "");
-    root_->zobrist = nb.hash();
-    return true;
-}
-
 
 std::vector<ChildDetail> MCTSTree::root_child_details() const {
-    std::lock_guard<std::mutex> g(tree_mutex_);
     std::vector<ChildDetail> out;
     const MCTSNode* r = root_.get();
     if (!r) return out;
@@ -904,7 +929,6 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
 }
 
 std::pair<float,int> MCTSTree::depth_stats() const {
-    std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
     if (!r) return {0.0f, 0};
 
@@ -936,7 +960,6 @@ std::pair<float,int> MCTSTree::depth_stats() const {
 }
 
 std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
-    std::lock_guard<std::mutex> g(tree_mutex_);
     std::vector<PVItem> pv;
     const MCTSNode* node = root_.get();
     if (!node || max_len <= 0) return pv;

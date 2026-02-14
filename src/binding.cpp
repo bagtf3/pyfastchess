@@ -456,7 +456,6 @@ PYBIND11_MODULE(_core, m) {
                py::arg("eps") = 0.25f, py::arg("alpha") = 0.1f)
           
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
-          .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
 
           .def("root_child_visits", &MCTSTree::root_child_visits)
           .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)

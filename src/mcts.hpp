@@ -93,6 +93,10 @@ struct MCTSNode {
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
 
+    // state indicators
+    bool is_pending = false;
+    bool is_inflight = false;
+
     mutable std::atomic<int> performance_penalty{0};
     std::atomic<uint8_t> must_visit_state{0};  // 0 empty, 2 writing, 1 ready
     char must_visit_uci[16] = {0};
@@ -235,10 +239,8 @@ public:
     
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
-    void clear_pending();
     void resolve_inflight();
 
-    void bump_epoch();
     std::vector<MCTSNode*> pop_pending_to_inflight();
 
     struct WorkItem {
@@ -248,9 +250,6 @@ public:
 
     uint32_t epoch() const { return tree_epoch_; }
     uint32_t tree_epoch_ = 1;
-
-    bool is_pending = false;
-    bool is_inflight = false;
 
     std::vector<WorkItem> pending_nodes_;
     std::vector<WorkItem> inflight_nodes_;
@@ -288,7 +287,7 @@ public:
 
     // fast hot-path pointer (non-owning)
     PriorEngine* prior_engine_raw_ = nullptr;
-    
+
     void set_legal_mask_map(
         MCTSNode* node,
         std::shared_ptr<const backend::LegalMaskandMap> lm_sp);
@@ -313,6 +312,8 @@ private:
     void expand_with_uniform_priors(MCTSNode* node);
     void expand_with_priors(MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
     
+    void filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch);
+
     std::vector<std::pair<std::string, float>>
     build_priors(MCTSNode* node, const RawEntry* re = nullptr) const;
 
