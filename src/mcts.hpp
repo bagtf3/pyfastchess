@@ -236,10 +236,9 @@ public:
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
     void clear_pending();
-    void resolve_pending();
+    void resolve_inflight();
 
     void bump_epoch();
-    void push_pending(MCTSNode* node);
     std::vector<MCTSNode*> pop_pending_to_inflight();
 
     struct WorkItem {
@@ -249,11 +248,12 @@ public:
 
     uint32_t epoch() const { return tree_epoch_; }
     uint32_t tree_epoch_ = 1;
+
+    bool is_pending = false;
+    bool is_inflight = false;
+
     std::vector<WorkItem> pending_nodes_;
     std::vector<WorkItem> inflight_nodes_;
-    
-    uint64_t orphan_nodes() const;
-    void clear_orphan_count();
     
     // Visit-weighted average Q across root children
     float visit_weighted_Q() const;

@@ -449,7 +449,7 @@ PYBIND11_MODULE(_core, m) {
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
 
           .def("resolve_inflight", [](MCTSTree &t) {
-               t.resolve_pending();
+               t.resolve_inflight();
           }, "Resolve pending (inflight) leaves by consuming raw cache (build priors + apply).")
 
           .def("add_root_dirichlet_noise", &MCTSTree::add_root_dirichlet_noise,
@@ -477,8 +477,6 @@ PYBIND11_MODULE(_core, m) {
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
           
-          .def_property_readonly("orphan_nodes", &MCTSTree::orphan_nodes)
-          .def("clear_orphan_count", &MCTSTree::clear_orphan_count)
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
           // free helpers

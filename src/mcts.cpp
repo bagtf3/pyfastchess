@@ -77,7 +77,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     ++cc->count_with_priors;
 
     const int parent_vis = std::max(1, this->visit_count());
-    const int cap = 4 + parent_vis / 2;
+    const int cap = 6 + parent_vis / 2;
     const size_t cap_sz = std::min(n_child, static_cast<size_t>(cap));
     cc->count_skipped += n_child - cap_sz;
     
@@ -215,7 +215,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
 
     uint32_t cur_epoch = 0;
     {
-        std::lock_guard<std::mutex> g(tree_mutex_);
+        //std::lock_guard<std::mutex> g(tree_mutex_);
         cur_epoch = tree_epoch_;
     }
 
@@ -241,9 +241,6 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     if (!to_requeue.empty()) {
         for (MCTSNode* qn : to_requeue) {
             if (!qn) continue;
-            if (qn->queued_epoch != cur_epoch) {
-                orphan_nodes_.fetch_add(1, std::memory_order_relaxed);
-            }
             queue_pending(qn);
         }
     }
@@ -292,33 +289,6 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // Fresh non-terminal leaf: expand with uniform priors and return as pending.
     expand_with_uniform_priors(node);
 
-    // one last opportunistic check into raw cache
-    // this barely saves time, but still worth it
-    if (const RawEntry* re = raw_policy_cache().lookup(key)) {
-        if (re->has_value && re->has_policy) {
-            // produce LegalMaskandMap and attach it to node (move -> heap)
-            backend::LegalMaskandMap lm = node->board.legal_move_mask();
-            auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
-
-            {
-                std::lock_guard<std::mutex> g(tree_mutex_);
-                node->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
-            }
-
-            // Compute value_white_pov from model value (model gives STM-POV)
-            const bool stm_white = (node->board.side_to_move() == "w");
-            const float value_white_pov = stm_white ? re->value : -re->value;
-
-            std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
-
-            // Apply result: this will overwrite priors and backpropagate the value.
-            apply_result(node, built_priors, value_white_pov, /*cache=*/true);
-
-            cc.tag = CollectTag::CACHED;
-            return cc;
-        }
-    }
-
     // if here, needs full preds, send to GPU
     cc.tag = CollectTag::NEW_LEAF;
     return cc;
@@ -351,7 +321,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     uint64_t total_penalty = 0;
 
     size_t attempts = 0;
-    const size_t try_break = 10000;
+    const size_t try_break = 1000;
 
     while ((new_count < n_new) &&
            (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
@@ -419,7 +389,7 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    //std::lock_guard<std::mutex> g(tree_mutex_);
 
     // build fast lookup (uci -> prior) from sorted priors
     std::unordered_map<std::string,float> priormap;
@@ -537,7 +507,7 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
 
 void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     if (!node) return;
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    //std::lock_guard<std::mutex> g(tree_mutex_);
     expand_with_uniform_priors_nolock(node);
 }
 
@@ -545,7 +515,7 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
     const std::vector<std::pair<std::string,float>>& priors) {
     if (!node) return;
 
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    //std::lock_guard<std::mutex> g(tree_mutex_);
 
     // Build a fast lookup from incoming priors (no sorting here).
     std::unordered_map<std::string,float> priormap;
@@ -641,175 +611,123 @@ void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
 }
 
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
-    std::vector<WorkItem> local;
-    uint32_t cur_epoch = 0;
-
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        cur_epoch = tree_epoch_;
-        local = std::move(pending_nodes_);
-        pending_nodes_.clear();
-    }
-
-    std::unordered_set<MCTSNode*> seen;
-    seen.reserve(local.size() * 2 + 16);
+    uint32_t cur_epoch = tree_epoch_;
 
     std::vector<MCTSNode*> out;
-    out.reserve(local.size());
+    out.reserve(pending_nodes_.size());
 
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        for (const WorkItem& wi : local) {
-            MCTSNode* n = wi.node;
-            if (!n) continue;
-            if (wi.epoch != cur_epoch) continue;
-            if (n->children_have_priors) continue;
-            if (!seen.insert(n).second) continue;
+    for (const WorkItem& wi : pending_nodes_) {
+        MCTSNode* n = wi.node;
+        if (!n) continue;
+        n->is_pending = false;
 
-            inflight_nodes_.push_back(wi);
-            out.push_back(n);
-        }
+        if (wi.epoch != cur_epoch) continue; //stale
+        if (n->children_have_priors) continue; // already resolved
+        if (n->is_inflight) continue; // already moved over
+
+        n->is_inflight = true;
+        inflight_nodes_.push_back(wi);
+        out.push_back(n);
     }
+
+    pending_nodes_.clear();
     return out;
-}
-
-uint64_t MCTSTree::orphan_nodes() const {
-    return orphan_nodes_.load(std::memory_order_relaxed);
-}
-
-void MCTSTree::clear_orphan_count() {
-    orphan_nodes_.store(0, std::memory_order_relaxed);
 }
 
 uint64_t MCTSTree::queue_pending(MCTSNode* n) {
     if (!n) return 0;
+    if (n->children_have_priors) return 0;
 
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    n->is_inflight = false;
 
-    if (n->queued_epoch == tree_epoch_) {
-        return n->zobrist;
-    }
+    // if its already there just pretend we queued it, its fine
+    if (n->is_pending) return n->zobrist;
 
     n->queued_epoch = tree_epoch_;
+    n->is_pending = true;
     pending_nodes_.push_back(WorkItem{n, tree_epoch_});
     return n->zobrist;
 }
 
 void MCTSTree::clear_pending() {
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    for (const WorkItem& wi : pending_nodes_) {
+        MCTSNode* n = wi.node;
+        if (!n) continue;
+        n->is_pending = false;
+    }
+
+    for (const WorkItem& wi : inflight_nodes_) {
+        MCTSNode* n = wi.node;
+        if (!n) continue;
+        n->is_inflight = false;
+    }
+
     pending_nodes_.clear();
     inflight_nodes_.clear();
 }
 
-void MCTSTree::bump_epoch()
-{
-    std::lock_guard<std::mutex> g(tree_mutex_);
+void MCTSTree::bump_epoch() {
     tree_epoch_ += 1;
-    pending_nodes_.clear();
-    inflight_nodes_.clear();
+    clear_pending();
 }
 
+void MCTSTree::resolve_inflight() {
+    if (inflight_nodes_.empty()) return;
 
-void MCTSTree::push_pending(MCTSNode* node)
-{
-    if (!node) return;
+    const uint32_t cur_epoch = tree_epoch_;
 
-    std::lock_guard<std::mutex> g(tree_mutex_);
-    pending_nodes_.push_back(WorkItem{node, tree_epoch_});
-}
-
-void MCTSTree::resolve_pending() {
-    // Quick check
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        if (inflight_nodes_.empty()) return;
-    }
-
-    // Drain inflight work into a local vector under lock
-    std::vector<WorkItem> to_process;
-    uint32_t cur_epoch = 0;
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        cur_epoch = tree_epoch_;
-        to_process = std::move(inflight_nodes_);
-        inflight_nodes_.clear();
-    }
-
-    // Per-pass dedupe so dupes in inflight dont explode work
-    std::unordered_set<MCTSNode*> seen;
-    seen.reserve(to_process.size() * 2 + 16);
-
-    // Per-pass dedupe for requeue targets.
-    std::unordered_set<MCTSNode*> add_inflight;
-    std::unordered_set<MCTSNode*> add_pending;
-    add_inflight.reserve(to_process.size() * 2 + 16);
-    add_pending.reserve(to_process.size() / 2 + 16);
-
-    // Process without holding tree_mutex_
-    for (const WorkItem& wi : to_process) {
-        if (wi.epoch != cur_epoch) continue;
-
-        MCTSNode* node = wi.node;
-        if (!node) continue;
-        if (!seen.insert(node).second) continue;
+    size_t i = 0;
+    while (i < inflight_nodes_.size()) {
+        WorkItem& wi = inflight_nodes_[i];
         
-        // already resolved? dont double count
-        if (node->children_have_priors) continue;
-
-        const uint64_t z = node->zobrist;
-
-        // Lookup the raw network entry by zobrist (non-blocking)
-        const RawEntry* re = raw_policy_cache().lookup(z);
-        if (!re || !re->has_value) {
-            node->cache_misses += 1;
-
-            if (node->cache_misses > 10) {
-                std::cout << "[resolve_pending] MISS: zobrist=0x"
-                          << std::hex << z << std::dec
-                          << " uci=" << (node->uci.empty() ? "<root>" : node->uci)
-                          << " misses=" << node->cache_misses
-                          << " -> pending"
-                          << "\n" << std::flush;
-
-                node->cache_misses = 0;
-                add_pending.insert(node);
-            } else {
-                add_inflight.insert(node);
-            }
+        // stale
+        if (wi.epoch != cur_epoch) {
+            MCTSNode* n = wi.node;
+            if (n) n->is_inflight = false;
+            inflight_nodes_[i] = inflight_nodes_.back();
+            inflight_nodes_.pop_back();
             continue;
         }
 
-        // Cache hit: reset miss counter
+        MCTSNode* node = wi.node;
+        if (!node) {
+            inflight_nodes_[i] = inflight_nodes_.back();
+            inflight_nodes_.pop_back();
+            continue;
+        }
+
+        // Already resolved? Drop it.
+        if (node->children_have_priors) {
+            node->is_inflight = false;
+            inflight_nodes_[i] = inflight_nodes_.back();
+            inflight_nodes_.pop_back();
+            continue;
+        }
+
+        const uint64_t z = node->zobrist;
+
+        const RawEntry* re = raw_policy_cache().lookup(z);
+        if (!re || !re->has_value) {
+            // keep it inflight; move on
+            node->cache_misses += 1;
+            ++i;
+            continue;
+        }
+
         node->cache_misses = 0;
 
-        // Compute value_white_pov from model value (model gives STM-POV)
         const bool stm_white = (node->board.side_to_move() == "w");
         const float value_white_pov = stm_white ? re->value : -re->value;
-
         std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
 
-        // Apply result: overwrite priors and backprop the value.
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
-    }
 
-    // Rebuild inflight/pending under lock (deduped by the sets above).
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
+        node->is_inflight = false;
 
-        for (MCTSNode* n : add_inflight) {
-            if (!n) continue;
-            if (n->children_have_priors) continue;
-            inflight_nodes_.push_back(WorkItem{n, tree_epoch_});
-        }
-
-        for (MCTSNode* n : add_pending) {
-            if (!n) continue;
-            if (n->children_have_priors) continue;
-            pending_nodes_.push_back(WorkItem{n, tree_epoch_});
-        }
+        inflight_nodes_[i] = inflight_nodes_.back();
+        inflight_nodes_.pop_back();
     }
 }
-
 
 std::vector<std::pair<std::string, float>>
 MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
@@ -827,10 +745,8 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
 
     // Grab the LegalMaskandMap attached to the node. Must be present.
     std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
-    {
-        std::lock_guard<std::mutex> g(tree_mutex_);
-        lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
-    }
+    lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
+
     if (!lm_sp) {
         const uint64_t z = node->zobrist;
         std::stringstream ss;
@@ -858,7 +774,6 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
 }
 
 std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
-    std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
     std::vector<std::pair<std::string, int>> rows;
     if (!r) return rows;
@@ -874,7 +789,6 @@ std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
 }
 
 float MCTSTree::visit_weighted_Q() const {
-    std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
     if (!r || r->ordered_children.empty()) return 0.0f;
 
@@ -896,7 +810,6 @@ float MCTSTree::visit_weighted_Q() const {
 }
 
 std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
-    std::lock_guard<std::mutex> g(tree_mutex_);
     const MCTSNode* r = root_.get();
     if (!r || r->ordered_children.empty()) return {"", nullptr};
 
@@ -923,7 +836,7 @@ void MCTSTree::set_legal_mask_map(
     MCTSNode* node,
     std::shared_ptr<const backend::LegalMaskandMap> lm_sp)
 {
-    std::lock_guard<std::mutex> g(tree_mutex_);
+    
     node->legal_mask_map = std::move(lm_sp);
 }
 

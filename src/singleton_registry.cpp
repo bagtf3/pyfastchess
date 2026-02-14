@@ -93,12 +93,12 @@ size_t RawPolicyCache::capacity() const {
 // ---------- Singletons (priors, raw) ----------
 // create static Cache objects with requested capacities
 Cache& priors_cache() {
-    static Cache c(600000);
+    static Cache c(750000);
     return c;
 }
 
 RawPolicyCache& raw_policy_cache() {
-    static RawPolicyCache r(16384);
+    static RawPolicyCache r(48000);
     return r;
 }
 
