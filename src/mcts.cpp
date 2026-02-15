@@ -77,7 +77,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     ++cc->count_with_priors;
 
     const int parent_vis = std::max(1, this->visit_count());
-    const int cap = 6 + parent_vis / 2;
+    const int cap = 4 + parent_vis;
     const size_t cap_sz = std::min(n_child, static_cast<size_t>(cap));
     cc->count_skipped += n_child - cap_sz;
     
@@ -433,6 +433,11 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
 
         if (MCTSNode* p = n->parent) {
             const float pov = (p->board.side_to_move() == "w") ? 1.0f : -1.0f;
+        
+            // do this first to gate the penalty threshold with updated Q
+            n->W += v;
+            const int nv = n->visit_count();
+            n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
 
             if (is_terminal) {
                 const bool stm_wins = (pov * v > 0.0f);
@@ -447,10 +452,6 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
                 }
             }
         }
-
-        n->W += v;
-        const int nv = n->visit_count();
-        n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
     }
 
     if (last != root_.get()) {
@@ -770,6 +771,7 @@ void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch
         }
 
         wi.epoch = new_epoch;
+        n->queued_epoch = new_epoch;
         ++i;
     }
 
@@ -798,6 +800,7 @@ void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch
         }
 
         wi.epoch = new_epoch;
+        n->queued_epoch = new_epoch;
         ++i;
     }
 }
