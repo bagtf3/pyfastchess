@@ -527,8 +527,6 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("total_must_visit", &CollectResults::total_must_visit)
           .def_readonly("total_with_priors", &CollectResults::total_with_priors)
           .def_readonly("total_priorless", &CollectResults::total_priorless)
-          .def_readonly("total_priorless_parentN",
-                         &CollectResults::total_priorless_parentN)
 
           .def_readonly("total_skipped", &CollectResults::total_skipped)
           .def_readonly("total_pruned", &CollectResults::total_pruned)

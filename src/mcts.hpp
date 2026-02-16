@@ -29,7 +29,6 @@ struct CollectCounts {
     uint32_t count_must_visit = 0;  // times a node was forced to be selected
     uint32_t count_with_priors = 0; // times puct (with priors) selection was used during this descent
     uint32_t count_priorless = 0;   // times uniform selection was taken during this descent
-    uint32_t priorless_parentN = 0; // sum of visits seen when priorless selection was made
     uint32_t count_skipped = 0;     // number of children skipped due to early trimming
     uint32_t count_pruned = 0;      // number of children pruned due to visit counts
     uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
@@ -44,7 +43,6 @@ struct CollectResults {
     uint64_t total_must_visit = 0;
     uint64_t total_with_priors = 0;
     uint64_t total_priorless = 0;
-    uint64_t total_priorless_parentN = 0;
 
     uint64_t total_skipped = 0;
     uint64_t total_pruned = 0;

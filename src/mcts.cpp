@@ -67,8 +67,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         thread_local uint64_t rr_counter = 0;
         const size_t idx = static_cast<size_t>((rr_counter++) % n_child);
 
-        ++cc->count_priorless; 
-        cc->priorless_parentN += this->visit_count();        
+        ++cc->count_priorless;      
 
         ChildEntry& ce = ordered_children[idx];
         return get_or_create_child(ce);
@@ -215,7 +214,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // descend while expanded and has children (now uses ordered_children)
     while (node->is_expanded && !node->ordered_children.empty()) {
         // If this node is expanded but still missing real priors, it may be an
-        // orphan from an epoch bump. Requeue to rescue.
+        // orphan from an epoch bump. Requeue to rescue. (basically neever happens)
         if (!node->children_have_priors && node->queued_epoch != cur_epoch) {
             if (!node->is_pending && !node->is_inflight){
                 queue_pending(node);
@@ -274,8 +273,31 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         return cc;
     }
 
-    // Fresh non-terminal leaf: expand with uniform priors and return as pending.
+    // if here we need to expand.
     expand_with_uniform_priors(node);
+
+    // Raw cache fast-path (preds already exist; resolve immediately).
+    const RawEntry* re = raw_policy_cache().lookup(key);
+    if (re && re->has_value) {
+        const bool stm_white = (node->board.side_to_move() == "w");
+        const float value_white_pov = stm_white ? re->value : -re->value;
+        
+        // legal mask and map needs to be set
+        if (!node->legal_mask_map) {
+            backend::LegalMaskandMap lm = node->board.legal_move_mask();
+            auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
+            set_legal_mask_map(node,
+                std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp));
+        }
+
+        std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
+        apply_result(node, built_priors, value_white_pov, /*cache=*/true);
+
+        node->is_pending = false;
+        node->is_inflight = false;
+        cc.tag = CollectTag::CACHED;
+        return cc;
+    }
 
     // if here, needs full preds, send to GPU
     cc.tag = CollectTag::NEW_LEAF;
@@ -300,7 +322,6 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     uint64_t total_must_visit = 0;
     uint64_t total_with_priors = 0;
     uint64_t total_priorless = 0;
-    uint64_t total_priorless_parentN = 0;
 
     uint64_t total_skipped = 0;
     uint64_t total_pruned = 0;
@@ -323,7 +344,6 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         total_must_visit += cc.count_must_visit;    
         total_with_priors += cc.count_with_priors;
         total_priorless += cc.count_priorless;
-        total_priorless_parentN += cc.priorless_parentN;
 
         total_skipped += cc.count_skipped;
         total_pruned += cc.count_pruned;
@@ -357,7 +377,6 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     res.total_must_visit = total_must_visit;
     res.total_with_priors = total_with_priors;
     res.total_priorless = total_priorless;
-    res.total_priorless_parentN = total_priorless_parentN;
 
     res.total_skipped = total_skipped;
     res.total_pruned = total_pruned;
