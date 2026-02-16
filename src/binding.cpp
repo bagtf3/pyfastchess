@@ -439,6 +439,18 @@ PYBIND11_MODULE(_core, m) {
                return out;
                }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
                "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
+          
+          .def("count_pending", [](const MCTSTree& t) {
+               return t.pending_nodes_.size();
+          }, "Number of nodes currently in pending queue.")
+
+          .def("count_inflight", [](const MCTSTree& t) {
+               return t.inflight_nodes_.size();
+          }, "Number of nodes currently in inflight queue.")
+
+          .def("count_unresolved", [](const MCTSTree& t) {
+               return t.pending_nodes_.size() + t.inflight_nodes_.size();
+          }, "Total unresolved nodes (pending + inflight).")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
