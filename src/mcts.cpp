@@ -465,10 +465,6 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
                 } else if (v != 0.0f) {
                     n->performance_penalty.fetch_add(1);
                 }
-            } else {
-                if (thresh > 0.0 && pov * v < pov * n->Q - thresh) {
-                    n->performance_penalty.fetch_add(1);
-                }
             }
         }
     }
