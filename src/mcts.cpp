@@ -17,10 +17,15 @@ static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-// ------------------------- MCTSNode -------------------------
-MCTSNode::MCTSNode(const backend::Board& b, MCTSNode* parent_, std::string uci_from_parent)
-    : parent(parent_), uci(std::move(uci_from_parent)), board(b) {
-    zobrist = 0ULL;  // lazy: compute at first selection
+MCTSNode::MCTSNode(
+    const backend::Board& b,
+    MCTSNode* parent_,
+    std::string uci_from_parent)
+    : parent(parent_), uci(std::move(uci_from_parent)), board(b)
+{   
+    // lazy: compute when selected/needed
+    zobrist = 0ULL;
+    stm_pov = 0.0f;
 }
 
 MCTSNode* MCTSNode::select_child_lazy_ptr(
@@ -82,7 +87,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     
     const float parentN = static_cast<float>(parent_vis);
     const float u_scale = c_puct * std::sqrt(parentN);
-    const float pov_sign = (board.side_to_move() == "w") ? 1.0f : -1.0f;
+    const float pov_sign = this->get_stm_pov();
     const float parent_q = pov_sign * this->Q;
 
     bool do_prune = (pruning_factor > 0.0f) && (cap_sz == n_child);
@@ -279,8 +284,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // Raw cache fast-path (preds already exist; resolve immediately).
     const RawEntry* re = raw_policy_cache().lookup(key);
     if (re && re->has_value) {
-        const bool stm_white = (node->board.side_to_move() == "w");
-        const float value_white_pov = stm_white ? re->value : -re->value;
+        const float value_white_pov = node->get_stm_pov() * re->value;
         
         // legal mask and map needs to be set
         if (!node->legal_mask_map) {
@@ -450,7 +454,7 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
         last = n;
 
         if (MCTSNode* p = n->parent) {
-            const float pov = (p->board.side_to_move() == "w") ? 1.0f : -1.0f;
+            const float pov = p->get_stm_pov();
         
             // do this first to gate the penalty threshold with updated Q
             n->W += v;
@@ -694,8 +698,7 @@ void MCTSTree::resolve_inflight() {
 
         node->cache_misses = 0;
 
-        const bool stm_white = (node->board.side_to_move() == "w");
-        const float value_white_pov = stm_white ? re->value : -re->value;
+        const float value_white_pov = node->get_stm_pov() * re->value;
         std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
 
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);

@@ -77,16 +77,28 @@ class MCTSTree;
 
 struct MCTSNode {
 
-    // --- Tree links ---
+    // tree links
     MCTSNode* parent = nullptr;
 
-    // --- Move info (uci from parent->this). Root has uci="".
+    // Move info (uci from parent->this). Root has uci="".
     std::string uci;
 
-    // --- Stats ---
+    // W Q Qmm are all white-POV
+    float W     = 0.0f;    // total value
+    float Q     = 0.0f;    // mean value
+    float Qmm   = 0.0f;    // minimaxed Q value
+
     std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
-    float W     = 0.0f;   // total value (white-POV)
-    float Q     = 0.0f;   // mean value
+    std::atomic<int> Qmm_visits{0}; // visit depth of Qmm (for TT)
+
+    // +1.0 if side-to-move is white, -1.0 if side-to-move is black.
+    // Stored once to avoid recomputing on hot paths.
+    float stm_pov = 0.0f;
+    float get_stm_pov() {
+        if (stm_pov != 0.0f) return stm_pov;
+        stm_pov = (board.side_to_move() == "w") ? 1.0f : -1.0f;
+        return stm_pov;
+    }
 
     // --- Provisional eval & terminal bookkeeping ---
     bool  is_terminal     = false;
