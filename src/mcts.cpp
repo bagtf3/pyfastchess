@@ -439,11 +439,10 @@ void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
 }
 
 // Nolock variant: caller must hold tree_mutex_. Applies W and recomputes Q.
-// This mirrors the naming/semantics used by your expand_*_nolock helpers.
+// This mirrors the naming/semantics used by expand_*_nolock helpers.
 void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
     if (!leaf) return;
 
-    const float thresh = cooldown_thresh_;
     const bool is_terminal = leaf->is_terminal;
     MCTSNode* last = nullptr;
 

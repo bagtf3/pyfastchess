@@ -265,10 +265,6 @@ public:
     // Add Dirichlet noise to root priors (thread-safe)
     void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
     bool advance_root(const std::string& move_uci);
-    
-    // house and update the cooldown threshold.
-    void set_cooldown_thresh(float v) { cooldown_thresh_ = v; }
-    float cooldown_thresh() const { return cooldown_thresh_; }
 
     std::vector<ChildDetail> root_child_details() const;
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -299,7 +295,6 @@ private:
     // Simulation budget and pruning config (tree-level)
     float sim_budget_ = 800.0f;
     float pruning_factor_ = 1.2f;
-    float cooldown_thresh_ = 0.15f;
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.

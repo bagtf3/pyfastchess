@@ -384,8 +384,6 @@ PYBIND11_MODULE(_core, m) {
           .def("cpuct", &MCTSTree::cpuct)
           .def("set_sim_budget", &MCTSTree::set_sim_budget, py::arg("sim_budget"))
           .def("sim_budget", &MCTSTree::sim_budget)
-          .def("set_cooldown_thresh", &MCTSTree::set_cooldown_thresh, py::arg("thresh"))
-          .def("cooldown_thresh", &MCTSTree::cooldown_thresh)
 
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
