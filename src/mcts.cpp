@@ -144,7 +144,18 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         ++cc->count_puct;
 
         const float prior = ce.prior;
-        const float q = ch ? (pov_sign * ch->Q) : parent_q;
+        float q = parent_q;
+        if (ch) {
+            float q_base = ch->Q;
+        if (n_int > 150) {
+            float qmm = ch->Qmm_is_set ? ch->Qmm : ch->Q;
+            q_base = 0.50f * ch->Q + 0.50f * qmm;
+        } else if (n_int > 50) {
+            float qmm = ch->Qmm_is_set ? ch->Qmm : ch->Q;
+            q_base = 0.75f * ch->Q + 0.25f * qmm;
+        }
+            q = pov_sign * q_base;
+        }
         const float u = u_scale * prior / (1.0f + n);
         float score = q + u;
 
@@ -220,11 +231,11 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     while (node->is_expanded && !node->ordered_children.empty()) {
         // If this node is expanded but still missing real priors, it may be an
         // orphan from an epoch bump. Requeue to rescue. (basically neever happens)
-        if (!node->children_have_priors && node->queued_epoch != cur_epoch) {
-            if (!node->is_pending && !node->is_inflight){
-                queue_pending(node);
-            }
-        }
+        //if (!node->children_have_priors && node->queued_epoch != cur_epoch) {
+        //   if (!node->is_pending && !node->is_inflight){
+        //        queue_pending(node);
+        //    }
+        //}
 
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
         MCTSNode* child = node->select_child_lazy_ptr(
@@ -434,6 +445,131 @@ void MCTSTree::apply_result(
     }
 }
 
+static inline bool qmm_better(float stm_pov, float a, float b) {
+    // Values are white-POV.
+    // White to move: higher is better.
+    // Black to move: lower is better.
+    return (stm_pov > 0.0f) ? (a > b) : (a < b);
+}
+
+static inline float qmm_worstcase(float stm_pov) {
+    // Worst for side-to-move, in white-POV.
+    // White wants high, worst is -1. Black wants low, worst is +1.
+    return (stm_pov > 0.0f) ? -1.0f : 1.0f;
+}
+
+static void qmm_rescan_children(MCTSNode* p) {
+    const float stm = p->get_stm_pov();
+    const float worst = qmm_worstcase(stm);
+
+    float best = worst;
+    float second = worst;
+    MCTSNode* best_child = nullptr;
+
+    for (auto& ce : p->ordered_children) {
+        MCTSNode* ch = ce.child.get();
+        if (!ch) continue;
+        if (ch->visit_count() <= 0) continue;
+        if (!ch->is_terminal && !(ch->children_have_priors || ch->Qmm_is_set)) {
+            continue;
+        }
+
+        const float cand = ch->Qmm_is_set ? ch->Qmm : ch->value;
+
+        if (!best_child || qmm_better(stm, cand, best)) {
+            second = best;
+            best = cand;
+            best_child = ch;
+            continue;
+        }
+
+        if (qmm_better(stm, cand, second)) {
+            second = cand;
+        }
+    }
+
+    p->Qmm = best;
+    p->Qmm_best_child = best_child;
+    p->Qmm_second = second;
+    p->Qmm_is_set = (best_child != nullptr);
+}
+
+static bool qmm_update_from_child(MCTSTree* t, MCTSNode* p, MCTSNode* ch) {
+    // Gate: ignore until parent has enough visits.
+    if (p->visit_count() <= t->Qmm_count_after) {
+        return false;
+    }
+
+    const float stm = p->get_stm_pov();
+    const float worst = qmm_worstcase(stm);
+
+    // init with a scan. Qmm_is_set can still be false
+    if (!p->Qmm_is_set) {
+        qmm_rescan_children(p);
+
+        // If scan found nothing usable yet, keep it unset and bail.
+        if (!p->Qmm_is_set) {
+            return false;
+        }
+        // if its now set, we updated Qmm on the scan
+        return true;
+    }
+
+    // children_have_priors is a proxy for NN eval
+    if (!ch->is_terminal && !(ch->children_have_priors || ch->Qmm_is_set)) {
+        return false;
+    }
+
+    const float cand = ch->Qmm_is_set? ch->Qmm: ch->value;
+    const float old_best = p->Qmm;
+
+    // handle ties
+    if (cand == old_best) {
+        if (ch != p->Qmm_best_child) {
+            p->Qmm_second = old_best;
+        }
+        return false;
+    }
+
+    // If no owner yet, take the first candidate immediately.
+    if (!p->Qmm_best_child) {
+        p->Qmm_best_child = ch;
+        p->Qmm = cand;
+        p->Qmm_second = worst;
+        p->Qmm_is_set = true;
+        return true;
+    }
+
+    // Non-owner child: only matters if it becomes new best.
+    if (ch != p->Qmm_best_child) {    
+        if (qmm_better(stm, cand, p->Qmm)) {
+            p->Qmm_second = p->Qmm;
+            p->Qmm_best_child = ch;
+            p->Qmm = cand;
+            p->Qmm_is_set = true;
+            return true;
+        }
+
+        // tighten second-best without scanning.
+        // Update second if cand is better than second, but not better than best.
+        if (qmm_better(stm, cand, p->Qmm_second)) {
+            p->Qmm_second = cand;
+        }
+        return false;
+    }
+
+    // if here, ch is current owner. need to update its value and check against second
+    p->Qmm = cand;
+    p->Qmm_is_set = true;
+
+    // If owner got worse than second, we need a rescan to find new best/second.
+    if (qmm_better(stm, p->Qmm_second, p->Qmm)) {
+        qmm_rescan_children(p);
+    }
+
+    return p->Qmm != old_best;
+}
+
 // Public wrapper: acquires the lock and delegates to the nolock variant.
 void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
     if (!leaf) return;
@@ -449,18 +585,22 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
 
     const bool is_terminal = leaf->is_terminal;
     MCTSNode* last = nullptr;
+    
+    const float stm = leaf->get_stm_pov();
+    leaf->Qmm = qmm_worstcase(stm);
+    bool qmm_changed = true;
 
     for (MCTSNode* n = leaf; n; n = n->parent) {
         last = n;
 
         if (MCTSNode* p = n->parent) {
             const float pov = p->get_stm_pov();
-        
-            // do this first to gate the penalty threshold with updated Q
+
             n->W += v;
             const int nv = n->visit_count();
             n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
 
+            // enforce must_visit MateLock logic for terminals
             if (is_terminal) {
                 const bool stm_wins = (pov * v > 0.0f);
                 if (stm_wins) {
@@ -469,6 +609,17 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
                     n->performance_penalty.fetch_add(1);
                 }
             }
+
+            // Qmm handled here
+            if (qmm_changed) {
+                const bool changed = qmm_update_from_child(this, p, n);
+                if (changed) {
+                    p->Qmm_visits.fetch_add(1, std::memory_order_relaxed);
+                    // if we found a new Qmm best, force a revisit
+                    p->set_must_visit_uci(n->uci);
+                }
+                qmm_changed = changed;
+            }
         }
     }
 
@@ -476,7 +627,7 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
         std::fprintf(stderr,
             "[MCTS] backprop chain did not end at root: leaf_uci=%s last_uci=%s\n",
             leaf->uci.c_str(),
-            last ? last->uci.c_str() : "<null>"
+            last->uci.c_str()
         );
     }
 }
@@ -862,18 +1013,29 @@ bool MCTSTree::advance_root(const std::string& mv) {
     return true;
 }
 
-std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
+std::vector<std::pair<std::string, int>>MCTSTree::root_child_visits() const {
     const MCTSNode* r = root_.get();
     std::vector<std::pair<std::string, int>> rows;
+
     if (!r) return rows;
+
     rows.reserve(r->ordered_children.size());
+
     for (const auto& ce : r->ordered_children) {
         const std::string& mv = ce.uci;
         const MCTSNode* ch = ce.child.get();
+
         int nvis = ch ? ch->visit_count() : 0;
         rows.emplace_back(mv, nvis);
     }
-    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b){ return a.second > b.second; });
+
+    auto cmp = [](const std::pair<std::string, int>& a,
+                  const std::pair<std::string, int>& b) {
+        return a.second > b.second;
+    };
+
+    std::sort(rows.begin(), rows.end(), cmp);
+
     return rows;
 }
 
@@ -921,7 +1083,6 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     return { *best_mv, best_ch };
 }
 
-
 std::vector<ChildDetail> MCTSTree::root_child_details() const {
     std::vector<ChildDetail> out;
     const MCTSNode* r = root_.get();
@@ -936,13 +1097,16 @@ std::vector<ChildDetail> MCTSTree::root_child_details() const {
         cd.uci = mv;
         cd.N = ch ? ch->visit_count() : 0;
         cd.Q = ch ? ch->Q : 0.0f;
+        cd.Qmm = ch ? (ch->Qmm_is_set ? ch->Qmm : ch->Q) : 0.0f;
+        cd.Qmm_visits = ch ? ch->Qmm_visits.load() : 0;
         cd.prior = ce.prior;
         cd.U = 0.0f;
         cd.is_terminal = ch ? ch->is_terminal : false;
         cd.value = ch ? ch->value : 0.0f;
-        out.push_back(std::move(cd));
 
+        out.push_back(std::move(cd));
     }
+
     std::sort(out.begin(), out.end(),
               [](const ChildDetail& a, const ChildDetail& b){ return a.N > b.N; });
     return out;

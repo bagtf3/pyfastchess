@@ -56,11 +56,14 @@ struct ChildDetail {
     std::string uci;
     int   N;
     float Q;
+    float Qmm;
+    int   Qmm_visits;
     float prior;
     float U;
     bool  is_terminal = false;
     float value       = 0.0f;
 };
+
 
 struct PVItem {
     std::string uci;
@@ -83,10 +86,21 @@ struct MCTSNode {
     // Move info (uci from parent->this). Root has uci="".
     std::string uci;
 
+    bool is_expanded = false;
+    bool children_have_priors = false;
+    float value = 0.0f;     // cached leaf value when expanded (optional)
+    int cache_misses = 0;
+    uint32_t queued_epoch = 0;
+
     // W Q Qmm are all white-POV
-    float W     = 0.0f;    // total value
-    float Q     = 0.0f;    // mean value
-    float Qmm   = 0.0f;    // minimaxed Q value
+    float W     = 0.0f;       // total value
+    float Q     = 0.0f;       // mean value
+    float Qmm   = 0.0f;       // minimaxed Q value
+    float Qmm_second = 0.0f;  // second best Qmm
+    bool Qmm_is_set = false;
+
+    // which child currently "owns" Qmm
+    MCTSNode* Qmm_best_child = nullptr;
 
     std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
     std::atomic<int> Qmm_visits{0}; // visit depth of Qmm (for TT)
@@ -99,13 +113,6 @@ struct MCTSNode {
         stm_pov = (board.side_to_move() == "w") ? 1.0f : -1.0f;
         return stm_pov;
     }
-
-    // --- Provisional eval & terminal bookkeeping ---
-    bool  is_terminal     = false;
-
-    // state indicators
-    bool is_pending = false;
-    bool is_inflight = false;
 
     mutable std::atomic<int> performance_penalty{0};
     std::atomic<uint8_t> must_visit_state{0};  // 0 empty, 2 writing, 1 ready
@@ -183,12 +190,10 @@ struct MCTSNode {
     backend::Board board;   // exact position at this node
     uint64_t zobrist = 0;   // computed lazily when the node is first selected
     std::vector<std::string> legal_moves;  // filled on expand; reused later
-
-    bool is_expanded = false;
-    bool children_have_priors = false;
-    float value = 0.0f;     // cached leaf value when expanded (optional)
-    int cache_misses = 0;
-    uint32_t queued_epoch = 0;
+    
+    bool is_terminal = false;
+    bool is_pending = false;
+    bool is_inflight = false;
 
     // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
     // heap object and store it here so the node can later access it without copies.
@@ -297,6 +302,8 @@ public:
     void set_legal_mask_map(
         MCTSNode* node,
         std::shared_ptr<const backend::LegalMaskandMap> lm_sp);
+    
+    uint32_t Qmm_count_after = 3;
 
 private:
     std::unique_ptr<MCTSNode> root_;

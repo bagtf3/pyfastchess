@@ -300,6 +300,8 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("uci",            &ChildDetail::uci)
           .def_readonly("N",              &ChildDetail::N)
           .def_readonly("Q",              &ChildDetail::Q)
+          .def_readonly("Qmm",            &ChildDetail::Qmm)
+          .def_readonly("Qmm_visits",     &ChildDetail::Qmm_visits)
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
           .def_readonly("value",          &ChildDetail::value);
