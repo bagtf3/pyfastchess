@@ -56,6 +56,8 @@ struct ChildDetail {
     std::string uci;
     int   N = 0;
     float Q = 0.0f;
+    float Qema = 0.0f;
+    float Qdelta_sign = 0.0f;
     float prior = 0.0f;
     float U = 0.0f;
     bool  is_terminal = false;
@@ -63,7 +65,6 @@ struct ChildDetail {
     float visit_share = 0.0f;
     int   last_visit = 0;
 };
-
 
 struct PVItem {
     std::string uci;
@@ -86,11 +87,25 @@ struct MCTSNode {
     // Move info (uci from parent->this). Root has uci="".
     std::string uci;
 
-    // W Q Qmm are all white-POV
-    float W     = 0.0f;    // total value
-    float Q     = 0.0f;    // mean value
+    // visits (atomic so selection can bump without lock)
+    std::atomic<int> N{0}; 
 
-    std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
+    // W Q Qmm are all white-POV
+    float W     = 0.0f;       // total value
+    float Q     = 0.0f;       // mean value
+    float Qema  = 0.0f;       // EMA of Q
+    float Qdelta_sign = 0.0f; // sign of last few deltas
+    
+    static constexpr int qdelta_span = 100;
+    static constexpr float qdelta_a = 2.0f / (static_cast<float>(qdelta_span) + 1.0f);
+    static constexpr float qdelta_d = 1.0f - qdelta_a
+    
+    static constexpr int qema_span = 40;
+    static constexpr float qema_a = 2.0f / (static_cast<float>(qema_span) + 1.0f);
+    static constexpr float qema_a = 1.0f - qema_a
+
+    int Qdelta_span = qdelta_span;
+    int Qema_span = qema_span;
 
     // visit share tracking
     int last_visit = 0;
@@ -110,12 +125,10 @@ struct MCTSNode {
         return stm_pov;
     }
 
-    // --- Provisional eval & terminal bookkeeping ---
-    bool  is_terminal     = false;
-
     // state indicators
     bool is_pending = false;
     bool is_inflight = false;
+    bool  is_terminal = false;
 
     mutable std::atomic<int> performance_penalty{0};
     std::atomic<uint8_t> must_visit_state{0};  // 0 empty, 2 writing, 1 ready

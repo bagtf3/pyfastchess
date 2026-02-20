@@ -35,7 +35,7 @@ MCTSNode::MCTSNode(
     vs_decay = 1.0f - vs_alpha;
 
     last_visit = 0;
-    visit_share = 0.025f;
+    visit_share = 0.0f;
 }
 
 void MCTSNode::update_visit_share(int current_visit, bool with_visit) {
@@ -107,7 +107,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     ++cc->count_with_priors;
 
     const int parent_vis = std::max(1, this->visit_count());
-    const int cap = 4 + parent_vis;
+    const int cap = 2 + parent_vis;
     const size_t cap_sz = std::min(n_child, static_cast<size_t>(cap));
     cc->count_skipped += n_child - cap_sz;
     
@@ -151,8 +151,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         tested += 1;
 
         // pruning pass based on visit target and max visits encountered
-        // setting a floor of 3 to make sure we dont restrict selection too much
-        if (do_prune && have_seen_any && tested > 3) {
+        // setting a floor to make sure we dont restrict selection too much
+        if (do_prune && have_seen_any && tested > 4) {
             if (n_int > max_visits){
                  max_visits = n_int;
                  max_visits_idx = static_cast<int>(i);
@@ -489,21 +489,30 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
     for (MCTSNode* n = leaf; n; n = n->parent) {
         last = n;
 
-        if (MCTSNode* p = n->parent) {
-            const float pov = p->get_stm_pov();
-        
-            // do this first to gate the penalty threshold with updated Q
-            n->W += v;
-            const int nv = n->visit_count();
-            n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
+        MCTSNode* p = n->parent;
+        if (!p) continue;
 
-            if (is_terminal) {
-                const bool stm_wins = (pov * v > 0.0f);
-                if (stm_wins) {
-                    p->set_must_visit_uci(n->uci);
-                } else if (v != 0.0f) {
-                    n->performance_penalty.fetch_add(1);
-                }
+        const float pov = p->get_stm_pov();
+
+        // computes sign -1, 0, 1 of v - Q (pre update)
+        const float q_pre = n->Q;
+        const float s = (v > q_pre) - (v < q_pre);
+        n->Qdelta_sign = n->Qdelta_sign * MCTSNode::qdelta_d + MCTSNode::qdelta_a * s;
+
+        // apply the update
+        n->W += v;
+        const int nv = n->visit_count();
+        n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
+
+        // compute new Qema
+        n->Qema = n->Qema * MCTSNode::qema_d + MCTSNode::qema_a * n->Q;
+
+        if (is_terminal) {
+            const bool stm_wins = (pov * v > 0.0f);
+            if (stm_wins) {
+                p->set_must_visit_uci(n->uci);
+            } else if (v != 0.0f) {
+                n->performance_penalty.fetch_add(1);
             }
         }
     }
@@ -976,6 +985,8 @@ std::vector<ChildDetail> MCTSTree::root_child_details() {
             ch->update_visit_share(tick, false);
             cd.N = ch->visit_count();
             cd.Q = ch->Q;
+            cd.Qema = ch->Qema;
+            cd.Qdelta_sign = ch->Qdelta_sign;
             cd.is_terminal = ch->is_terminal;
             cd.value = ch->value;
             cd.visit_share = ch->visit_share;
