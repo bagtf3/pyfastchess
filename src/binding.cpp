@@ -302,7 +302,9 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("Q",              &ChildDetail::Q)
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
-          .def_readonly("value",          &ChildDetail::value);
+          .def_readonly("value",          &ChildDetail::value)
+          .def_readonly("visit_share",    &ChildDetail::visit_share)
+          .def_readonly("last_visit",     &ChildDetail::last_visit);
      
      py::class_<PVItem>(m, "PVItem")
           .def_readonly("uci", &PVItem::uci)

@@ -54,13 +54,16 @@ struct CollectResults {
 // ChildDetail — used for introspection / Python bindings
 struct ChildDetail {
     std::string uci;
-    int   N;
-    float Q;
-    float prior;
-    float U;
+    int   N = 0;
+    float Q = 0.0f;
+    float prior = 0.0f;
+    float U = 0.0f;
     bool  is_terminal = false;
-    float value       = 0.0f;
+    float value = 0.0f;
+    float visit_share = 0.0f;
+    int   last_visit = 0;
 };
+
 
 struct PVItem {
     std::string uci;
@@ -86,10 +89,17 @@ struct MCTSNode {
     // W Q Qmm are all white-POV
     float W     = 0.0f;    // total value
     float Q     = 0.0f;    // mean value
-    float Qmm   = 0.0f;    // minimaxed Q value
 
     std::atomic<int> N{0}; // visits (atomic so selection can bump without lock)
-    std::atomic<int> Qmm_visits{0}; // visit depth of Qmm (for TT)
+
+    // visit share tracking
+    int last_visit = 0;
+    float visit_share = 0.025f;
+    int visit_share_span = 400;
+    float vs_alpha = 0.0f;
+    float vs_decay = 1.0f;
+
+    void update_visit_share(int current_visit, bool with_visit = true);
 
     // +1.0 if side-to-move is white, -1.0 if side-to-move is black.
     // Stored once to avoid recomputing on hot paths.
@@ -201,8 +211,11 @@ struct MCTSNode {
     MCTSNode(MCTSNode&&) noexcept = default;
     MCTSNode& operator=(MCTSNode&&) noexcept = default;
 
-    // --- Constructors ---
-    MCTSNode(const backend::Board& b, MCTSNode* parent_=nullptr, std::string uci_from_parent="");
+    // Constructors
+    MCTSNode(const backend::Board& b,
+         MCTSNode* parent_ = nullptr,
+         std::string uci_from_parent = "",
+         int visit_share_span_ = 400);
     
     // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
     MCTSNode* select_child_lazy_ptr(
@@ -220,7 +233,6 @@ struct MCTSNode {
     void add_visit(int delta = 1) noexcept {
         N.fetch_add(delta, std::memory_order_relaxed);
     }
-
 };
 
 class MCTSTree {
@@ -278,7 +290,7 @@ public:
     void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
     bool advance_root(const std::string& move_uci);
 
-    std::vector<ChildDetail> root_child_details() const;
+    std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
 

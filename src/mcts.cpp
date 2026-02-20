@@ -20,12 +20,38 @@ static inline float clampf(float x, float lo, float hi) {
 MCTSNode::MCTSNode(
     const backend::Board& b,
     MCTSNode* parent_,
-    std::string uci_from_parent)
+    std::string uci_from_parent,
+    int visit_share_span_)
     : parent(parent_), uci(std::move(uci_from_parent)), board(b)
-{   
-    // lazy: compute when selected/needed
+{
     zobrist = 0ULL;
     stm_pov = 0.0f;
+
+    // set span (guard against junk)
+    if (visit_share_span_ < 1) visit_share_span_ = 1;
+    visit_share_span = visit_share_span_;
+
+    vs_alpha = 2.0f / (visit_share_span + 1.0f);
+    vs_decay = 1.0f - vs_alpha;
+
+    last_visit = 0;
+    visit_share = 0.025f;
+}
+
+void MCTSNode::update_visit_share(int current_visit, bool with_visit) {
+    int k = current_visit - last_visit;
+
+    if (k > 0) {
+        visit_share *= std::pow(vs_decay, (float)k);
+        last_visit = current_visit;
+    }
+
+    if (with_visit) {
+        visit_share += vs_alpha;
+        if (k <= 0) {
+            last_visit = current_visit;
+        }
+    }
 }
 
 MCTSNode* MCTSNode::select_child_lazy_ptr(
@@ -109,6 +135,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     bool have_seen_any = false;
     int unseen_visits = parent_vis - 1;
 
+    // make sure we're testing at least a few
+    int tested = 0;
+
     // main puct loop. will implement pruning on the fly
     for (size_t i = 0; i < cap_sz; ++i) {
         const ChildEntry& ce = ordered_children[i];
@@ -119,9 +148,11 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         unseen_visits -= n_int;
         
         if (ch) have_seen_any = true;
+        tested += 1;
 
         // pruning pass based on visit target and max visits encountered
-        if (do_prune && have_seen_any) {
+        // setting a floor of 3 to make sure we dont restrict selection too much
+        if (do_prune && have_seen_any && tested > 3) {
             if (n_int > max_visits){
                  max_visits = n_int;
                  max_visits_idx = static_cast<int>(i);
@@ -231,6 +262,12 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
             this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_);
 
         if (!child) break;
+
+        // update visit_share EMWA
+        // technically should be parent vis -1 but its fine
+        int tick = node->visit_count() - 1;
+        child->update_visit_share(tick, true);
+
         node = child;
         last_path_.push_back(node);
         // increment visit for this node immediately (psuedo virtual loss)
@@ -307,7 +344,6 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     cc.tag = CollectTag::NEW_LEAF;
     return cc;
 }
-
 
 // Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
 MCTSNode* MCTSTree::collect_one_leaf() {
@@ -921,30 +957,39 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     return { *best_mv, best_ch };
 }
 
-
-std::vector<ChildDetail> MCTSTree::root_child_details() const {
+std::vector<ChildDetail> MCTSTree::root_child_details() {
     std::vector<ChildDetail> out;
-    const MCTSNode* r = root_.get();
+    MCTSNode* r = root_.get();
     if (!r) return out;
+
+    int tick = r->visit_count() - 1;
 
     out.reserve(r->ordered_children.size());
     for (const auto& ce : r->ordered_children) {
-        const std::string& mv = ce.uci;
-        const MCTSNode* ch = ce.child.get();
+        MCTSNode* ch = ce.child.get();
 
         ChildDetail cd;
-        cd.uci = mv;
-        cd.N = ch ? ch->visit_count() : 0;
-        cd.Q = ch ? ch->Q : 0.0f;
+        cd.uci = ce.uci;
         cd.prior = ce.prior;
-        cd.U = 0.0f;
-        cd.is_terminal = ch ? ch->is_terminal : false;
-        cd.value = ch ? ch->value : 0.0f;
-        out.push_back(std::move(cd));
 
+        if (ch) {
+            ch->update_visit_share(tick, false);
+            cd.N = ch->visit_count();
+            cd.Q = ch->Q;
+            cd.is_terminal = ch->is_terminal;
+            cd.value = ch->value;
+            cd.visit_share = ch->visit_share;
+            cd.last_visit = ch->last_visit;
+        }
+
+        out.push_back(std::move(cd));
     }
+
     std::sort(out.begin(), out.end(),
-              [](const ChildDetail& a, const ChildDetail& b){ return a.N > b.N; });
+              [](const ChildDetail& a, const ChildDetail& b) {
+                  return a.N > b.N;
+              });
+
     return out;
 }
 
