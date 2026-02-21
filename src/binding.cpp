@@ -487,6 +487,10 @@ PYBIND11_MODULE(_core, m) {
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
           .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
+          .def("robust_selection_criteria",
+               &MCTSTree::robust_selection_criteria,
+               py::arg("top_n") = 5,
+               py::arg("min_visits") = 100)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
           

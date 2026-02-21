@@ -1078,6 +1078,130 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
     return pv;
 }
 
+std::pair<
+    std::optional<std::unordered_map<std::string, float>>,
+    std::vector<ChildDetail>
+> MCTSTree::robust_selection_criteria(int top_n, int min_visits) {
+    std::vector<ChildDetail> details = root_child_details();
+
+    if (details.size() <= 1) {
+        return {std::nullopt, std::move(details)};
+    }
+
+    if (top_n <= 0) {
+        return {std::nullopt, std::move(details)};
+    }
+
+    if (min_visits < 0) {
+        min_visits = 0;
+    }
+
+    const int k = std::min<int>(top_n, static_cast<int>(details.size()));
+
+    std::vector<const ChildDetail*> top;
+    top.reserve(k);
+    for (int i = 0; i < k; ++i) {
+        if (details[i].N >= min_visits) {
+            top.push_back(&details[i]);
+        }
+    }
+
+    if (top.size() <= 1) {
+        return {std::nullopt, std::move(details)};
+    }
+
+    // dont want to be messing with root here, make it const
+    const MCTSNode* r = root_.get();
+    const float flip = (r && r->board.side_to_move() == "w") ? 1.0f : -1.0f;
+
+    auto minmax01 = [](const std::vector<float>& v) {
+        std::vector<float> out;
+        out.resize(v.size(), 0.5f);
+
+        if (v.empty()) return out;
+
+        float lo = v[0];
+        float hi = v[0];
+        for (float x : v) {
+            if (x < lo) lo = x;
+            if (x > hi) hi = x;
+        }
+
+        if (hi <= lo) {
+            return out;
+        }
+
+        const float inv = 1.0f / (hi - lo);
+        for (size_t i = 0; i < v.size(); ++i) {
+            out[i] = (v[i] - lo) * inv;
+        }
+
+        return out;
+    };
+
+    auto to_prob = [](const std::vector<float>& v01) {
+        std::vector<float> out;
+        out.resize(v01.size(), 0.0f);
+
+        float s = 0.0f;
+        for (float x : v01) s += x;
+
+        if (s <= 0.0f) {
+            const float invk = 1.0f / static_cast<float>(v01.size());
+            for (size_t i = 0; i < v01.size(); ++i) out[i] = invk;
+            return out;
+        }
+
+        const float inv = 1.0f / s;
+        for (size_t i = 0; i < v01.size(); ++i) out[i] = v01[i] * inv;
+        return out;
+    };
+
+    std::vector<float> v_vis;
+    std::vector<float> v_q;
+    std::vector<float> v_qe;
+    std::vector<float> v_vs;
+    std::vector<float> v_ds;
+
+    v_vis.reserve(top.size());
+    v_q.reserve(top.size());
+    v_qe.reserve(top.size());
+    v_vs.reserve(top.size());
+    v_ds.reserve(top.size());
+
+    for (const ChildDetail* d : top) {
+        v_vis.push_back(static_cast<float>(d->N));
+        v_q.push_back(flip * d->Q);
+        v_qe.push_back(flip * d->Qema);
+        v_vs.push_back(d->visit_share);
+        v_ds.push_back(d->Qdelta_sign);
+    }
+
+    const std::vector<float> p_vis = to_prob(minmax01(v_vis));
+    const std::vector<float> p_q = to_prob(minmax01(v_q));
+    const std::vector<float> p_qe = to_prob(minmax01(v_qe));
+    const std::vector<float> p_vs = to_prob(minmax01(v_vs));
+    const std::vector<float> p_ds = to_prob(minmax01(v_ds));
+
+    const float w = 0.2f;
+
+    std::unordered_map<std::string, float> rsc;
+    rsc.reserve(top.size());
+
+    for (size_t i = 0; i < top.size(); ++i) {
+        const float score =
+            w * p_vis[i] +
+            w * p_q[i] +
+            w * p_qe[i] +
+            w * p_vs[i] +
+            w * p_ds[i];
+
+        rsc[top[i]->uci] = score;
+    }
+
+    return {std::move(rsc), std::move(details)};
+}
+
 // --- runtime tunables ---
 void MCTSTree::set_cpuct(float v) {
     std::lock_guard<std::mutex> g(tree_mutex_);

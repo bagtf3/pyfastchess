@@ -307,8 +307,12 @@ public:
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
-
     std::vector<PVItem> principal_variation(int max_len = 24) const;
+
+    std::pair<
+        std::optional<std::unordered_map<std::string, float>>,
+        std::vector<ChildDetail>
+    > robust_selection_criteria(int top_n = 5, int min_visits = 100);
 
     // runtime tunables: allow Python to change search parameters on the fly
     void set_cpuct(float v);
