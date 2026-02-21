@@ -177,7 +177,10 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         const float prior = ce.prior;
         const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
-        float score = q + u;
+        // max attn range: -0.25 to 0.25
+        const float ds = ch ? clampf(ch->Qdelta_sign, -0.25, 0.25) : 0.0f;
+        const float attn = 0.1f * ds; 
+        float score = q + u + attn;
 
         if (ch) {
             int pen = ch->performance_penalty.load();
@@ -263,8 +266,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
 
         if (!child) break;
 
-        // update visit_share EMWA
-        // technically should be parent vis -1 but its fine
+        // update visit_share EMA
         int tick = node->visit_count() - 1;
         child->update_visit_share(tick, true);
 
@@ -289,8 +291,9 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // Fresh terminal? catches repetition draws and similar
     if (auto tv = backend::terminal_value_white_pov(node->board)) {
         node->is_terminal = true;
-        node->value = *tv;
         node->is_expanded = true;
+        node->value = *tv;
+        node->Qema = *tv;
         cc.tag = CollectTag::TERMINAL;
         back_up_along_path(node, node->value);
         return cc;
@@ -309,6 +312,8 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         expand_with_priors(node, pe->priors);
 
         // N was already incremented during descent; just backprop the cached value.
+        node->value = pe->value;
+        node->Qema = pe->value;
         back_up_along_path(node, pe->value);
 
         cc.tag = CollectTag::CACHED;
@@ -427,7 +432,6 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     return res;
 }
 
-
 void MCTSTree::apply_result(
     MCTSNode* node,
     const std::vector<std::pair<std::string, float>>& move_priors,
@@ -454,6 +458,7 @@ void MCTSTree::apply_result(
 
     node->children_have_priors = true;
     node->value = value_white_pov;
+    node->Qema = value_white_pov;
 
     // Backpropagate value up the path (we hold tree_mutex_)
     back_up_along_path_nolock(node, value_white_pov);
@@ -494,18 +499,18 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
 
         const float pov = p->get_stm_pov();
 
-        // computes sign -1, 0, 1 of v - Q (pre update)
+        // computes sign -1, 0, 1 of v - Q (pre update) relative to STM POV
         const float q_pre = n->Q;
-        const float s = (v > q_pre) - (v < q_pre);
+        const float s = ((v > q_pre) - (v < q_pre)) * pov;
         n->Qdelta_sign = n->Qdelta_sign * MCTSNode::qdelta_d + MCTSNode::qdelta_a * s;
+
+        // compute new Qema
+        n->Qema = n->Qema * MCTSNode::qema_d + MCTSNode::qema_a * v;
 
         // apply the update
         n->W += v;
         const int nv = n->visit_count();
         n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
-
-        // compute new Qema
-        n->Qema = n->Qema * MCTSNode::qema_d + MCTSNode::qema_a * n->Q;
 
         if (is_terminal) {
             const bool stm_wins = (pov * v > 0.0f);
@@ -982,6 +987,8 @@ std::vector<ChildDetail> MCTSTree::root_child_details() {
         cd.prior = ce.prior;
 
         if (ch) {
+            // need to do this first to capture true last visit
+            cd.last_visit = ch->last_visit;
             ch->update_visit_share(tick, false);
             cd.N = ch->visit_count();
             cd.Q = ch->Q;
@@ -990,7 +997,6 @@ std::vector<ChildDetail> MCTSTree::root_child_details() {
             cd.is_terminal = ch->is_terminal;
             cd.value = ch->value;
             cd.visit_share = ch->visit_share;
-            cd.last_visit = ch->last_visit;
         }
 
         out.push_back(std::move(cd));

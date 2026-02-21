@@ -96,16 +96,17 @@ struct MCTSNode {
     float Qema  = 0.0f;       // EMA of Q
     float Qdelta_sign = 0.0f; // sign of last few deltas
     
-    static constexpr int qdelta_span = 100;
-    static constexpr float qdelta_a = 2.0f / (static_cast<float>(qdelta_span) + 1.0f);
-    static constexpr float qdelta_d = 1.0f - qdelta_a
-    
-    static constexpr int qema_span = 40;
-    static constexpr float qema_a = 2.0f / (static_cast<float>(qema_span) + 1.0f);
-    static constexpr float qema_a = 1.0f - qema_a
+    static constexpr float qdelta_span = 100.0f;
+    static constexpr float qdelta_a = 2.0f / (qdelta_span + 1.0f);
+    static constexpr float qdelta_d = 1.0f - qdelta_a;
 
-    int Qdelta_span = qdelta_span;
-    int Qema_span = qema_span;
+    static constexpr float qema_span = 40.0f;
+    static constexpr float qema_a = 2.0f / (qema_span + 1.0f);
+    static constexpr float qema_d = 1.0f - qema_a;
+
+    // probably expecting these to be ints
+    //int Qdelta_span = static_cast<int>(qdelta_span);
+    //int Qema_span = static_cast<int>(qema_span);
 
     // visit share tracking
     int last_visit = 0;
