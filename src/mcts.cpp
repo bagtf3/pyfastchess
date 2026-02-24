@@ -177,10 +177,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         const float prior = ce.prior;
         const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
-        // max attn range: -0.25 to 0.25
-        const float ds = ch ? clampf(ch->Qdelta_sign, -0.25, 0.25) : 0.0f;
-        const float attn = 0.1f * ds; 
-        float score = q + u + attn;
+        // max attenuator range: 1.0 + [-0.25 to 0.25]
+        const float attn = ch ? 0.5f * clampf(ch->Qdelta_sign, -0.5, 0.5) : 0.0f;
+        float score = q + u *(1.0f + attn);
 
         if (ch) {
             int pen = ch->performance_penalty.load();
@@ -1106,11 +1105,10 @@ std::pair<
         }
     }
 
-    if (top.size() <= 1) {
+    if (top.empty()) {
         return {std::nullopt, std::move(details)};
     }
 
-    // dont want to be messing with root here, make it const
     const MCTSNode* r = root_.get();
     const float flip = (r && r->board.side_to_move() == "w") ? 1.0f : -1.0f;
 
