@@ -1,12 +1,7 @@
 #include "singleton_registry.hpp"
-#include "mcts.hpp" 
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
-
-// ---------- PriorEngine globals (moved here from prior_registry.cpp) ----------
-std::shared_ptr<PriorEngine> g_prior_engine = nullptr;
-std::atomic<PriorEngine*>   g_prior_engine_raw{nullptr};
 
 // ---------- RawPolicyCache implementation ----------
 RawPolicyCache::RawPolicyCache(size_t capacity)

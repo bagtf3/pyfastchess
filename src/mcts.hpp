@@ -73,9 +73,6 @@ struct PVItem {
     float Q;       // child->Q (white-POV)
 };
 
-// forward declare
-struct PriorEngine;
-
 // Forward decl
 class MCTSTree;
 
@@ -321,9 +318,6 @@ public:
     void set_sim_budget(float v);
     float sim_budget() const;
 
-    // fast hot-path pointer (non-owning)
-    PriorEngine* prior_engine_raw_ = nullptr;
-
     void set_legal_mask_map(
         MCTSNode* node,
         std::shared_ptr<const backend::LegalMaskandMap> lm_sp);
@@ -357,70 +351,3 @@ private:
     mutable std::mutex tree_mutex_; 
 };
 
-// --------- Helpers ---------
-
-// Map NN “policy head” (already shaped per-legal move) into (move, prior) pairs
-// and re-normalize (optional uniform mix in Python layer before passing here).
-std::vector<std::pair<std::string, float>>
-priors_from_heads(const std::vector<std::string>& legal_moves,
-                  const std::vector<float>& policy_per_legal);
-
-std::vector<std::pair<std::string, float>>
-priors_from_heads(const backend::Board& board,
-                  const std::vector<std::string>& legal,
-                  const std::vector<float>& p_from,
-                  const std::vector<float>& p_to,
-                  const std::vector<float>& p_piece,
-                  const std::vector<float>& p_promo,
-                  float mix = 0.5f);
-
-struct FloatView {
-    const float* data;
-    size_t size;
-    inline float get(size_t i) const {
-        return (i < size) ? data[i] : 0.0f;
-    }
-};
-
-struct PriorConfig {
-    float anytime_uniform_mix = 0.5f;
-    float endgame_uniform_mix = 0.5f;
-
-    bool  use_prior_boosts = false;
-    float anytime_gives_check = 0.15f;
-    float anytime_repetition_sub = 0.25f;
-
-    float endgame_pawn_push = 0.15f;
-    float endgame_capture = 0.15f;
-    float endgame_repetition_sub = 0.40f;
-
-    bool  clip_enabled = true;
-    float clip_min = 1e-6f;
-    float clip_max = 1.0f;
-};
-
-class PriorEngine {
-public:
-    explicit PriorEngine(const PriorConfig& cfg) : cfg_(cfg) {}
-
-    // Build priors from factorized heads. piece_count is obtained from board(). 
-    std::vector<std::pair<std::string, float>>
-    build(const backend::Board& board,
-          const std::vector<std::string>& legal,
-          FloatView p_from, FloatView p_to,
-          FloatView p_piece, FloatView p_promo) const;
-
-    // Return a copy of the current PriorConfig (handy for configure/details helpers).
-    PriorConfig get_config() const { return cfg_; }
-
-private:
-    PriorConfig cfg_;
-};
-
-// Single core impl used by all public overloads
-std::vector<std::pair<std::string, float>>
-priors_from_heads_views(const backend::Board& board,
-                        const std::vector<std::string>& legal,
-                        FloatView p_from, FloatView p_to,
-                        FloatView p_piece, FloatView p_promo,
-                        float mix = 0.5f);

@@ -2,7 +2,6 @@
 
 #include "cache.hpp"
 #include <memory>
-#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -15,7 +14,6 @@
 // This header exposes all process-global singletons used by MCTS:
 //  - priors_cache()   -> Cache (LRU) capacity 600000
 //  - raw_policy_cache()-> RawPolicyCache (deque eviction) capacity 16384
-//  - PriorEngine globals (g_prior_engine + g_prior_engine_raw) used by bindings / trees
 //
 // Use these accessors from C++ code. The implementation is in singleton_registry.cpp
 //
@@ -75,18 +73,6 @@ private:
     size_t evictions_{0};
     void evict_if_needed_unlocked();
 };
-
-// ---------------- PriorEngine globals (moved here from prior_registry.hpp) ----------------
-// Forward declaration - PriorEngine defined in mcts.hpp
-struct PriorEngine;
-
-// Globals are defined in singleton_registry.cpp (one TU).
-extern std::shared_ptr<PriorEngine> g_prior_engine;
-extern std::atomic<PriorEngine*>   g_prior_engine_raw;
-
-// Inline accessors
-inline std::shared_ptr<PriorEngine> get_prior_engine_shared() { return g_prior_engine; }
-inline PriorEngine* get_prior_engine_raw() { return g_prior_engine_raw.load(std::memory_order_acquire); }
 
 // ---------------- Singletons accessors ----------------
 Cache& priors_cache();      // LRU cache, capacity 750000
