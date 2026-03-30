@@ -796,15 +796,16 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
         built_priors.emplace_back(uci, prob);
     }
 
-    // POC: boost captures (+2/k) and checks (+2/k), combined (+4/k); clip at 0.65; renormalize.
+    // Floor captures/checks at 3/k (both) or 1.5/k (either); clip at 0.65; renormalize.
     const float k = static_cast<float>(built_priors.size());
     if (k > 0.0f) {
-        const float step = 2.0f / k;
+        const float floor_either = 1.5f / k;
+        const float floor_both   = 3.0f / k;
         for (auto& mp : built_priors) {
             const bool cap = node->board.is_capture(mp.first);
             const bool chk = node->board.gives_check(mp.first);
-            if (cap && chk) mp.second += 2.0f * step;
-            else if (cap || chk) mp.second += step;
+            if (cap && chk) mp.second = std::max(mp.second, floor_both);
+            else if (cap || chk) mp.second = std::max(mp.second, floor_either);
         }
 
         // clip

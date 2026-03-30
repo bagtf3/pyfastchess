@@ -553,6 +553,12 @@ PYBIND11_MODULE(_core, m) {
                });
           
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
+          m.def("raw_cache_lookup", [](uint64_t key) -> py::object {
+               const RawEntry* re = raw_policy_cache().lookup(key);
+               if (!re || !re->has_value || !re->has_policy) return py::none();
+               py::array_t<float> policy(re->p_policy.size(), re->p_policy.data());
+               return py::make_tuple(re->value, policy);
+          }, "Look up raw NN outputs by zobrist key. Returns (value, policy_4288) or None.");
           m.def("raw_cache_stats", []() {
                RawStats s = raw_policy_cache().stats();
                py::dict d;
