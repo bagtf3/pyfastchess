@@ -219,12 +219,16 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 MCTSTree::MCTSTree(const backend::Board& root_board,
                    float c_puct,
                    float sim_budget,
-                   float pruning_factor)
+                   float pruning_factor,
+                   float uniform_eps,
+                   float prior_clip_max)
 
 : root_(std::make_unique<MCTSNode>(root_board, nullptr, "")),
     c_puct_(c_puct),
     sim_budget_(sim_budget),
-    pruning_factor_(pruning_factor)
+    pruning_factor_(pruning_factor),
+    uniform_eps_(uniform_eps),
+    prior_clip_max_(prior_clip_max)
 {
     // set root zobrist from the provided board
     root_->zobrist = root_board.hash();
@@ -331,7 +335,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
                 std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp));
         }
 
-        std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
+        std::vector<PriorEntry> built_priors = build_priors(node, re);
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
 
         node->is_pending = false;
@@ -429,41 +433,43 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
 void MCTSTree::apply_result(
     MCTSNode* node,
-    const std::vector<std::pair<std::string, float>>& move_priors,
+    const std::vector<PriorEntry>& move_priors,
     float value_white_pov,
     bool cache
 ) {
     if (!node) return;
 
-    // build fast lookup (uci -> prior) from sorted priors
-    std::unordered_map<std::string,float> priormap;
+    // build fast lookup (uci -> prior, raw_prior)
+    std::unordered_map<std::string, std::pair<float,float>> priormap;
     priormap.reserve(move_priors.size());
-    for (const auto &p : move_priors) priormap.emplace(p.first, p.second);
+    for (const auto& p : move_priors)
+        priormap.emplace(p.uci, std::make_pair(p.prior, p.raw_prior));
 
-    // update priors in-place on existing ordered_children (all moves are present)
-    for (auto &ce : node->ordered_children) {
-        ce.prior = priormap.at(ce.uci);
+    // update priors in-place on existing ordered_children
+    for (auto& ce : node->ordered_children) {
+        const auto& pv = priormap.at(ce.uci);
+        ce.prior     = pv.first;
+        ce.raw_prior = pv.second;
     }
 
-    // stable-sort in-place by prior descending (preserves any existing child ownership)
+    // stable-sort in-place by fudged prior descending
     std::stable_sort(node->ordered_children.begin(), node->ordered_children.end(),
-                     [](const MCTSNode::ChildEntry &a, const MCTSNode::ChildEntry &b){
+                     [](const MCTSNode::ChildEntry& a, const MCTSNode::ChildEntry& b){
                          return a.prior > b.prior;
                      });
 
     node->children_have_priors = true;
     node->value = value_white_pov;
-    node->Qema = value_white_pov;
+    node->Qema  = value_white_pov;
 
-    // Backpropagate value up the path (we hold tree_mutex_)
     back_up_along_path_nolock(node, value_white_pov);
 
-    // Optionally populate the priors cache from the canonical ordered_children order
     if (cache) {
         CacheEntry e;
         e.value = value_white_pov;
         e.priors.reserve(node->ordered_children.size());
-        for (const auto &ce : node->ordered_children) e.priors.emplace_back(ce.uci, ce.prior);
+        for (const auto& ce : node->ordered_children)
+            e.priors.push_back({ce.uci, ce.prior, ce.raw_prior});
 
         uint64_t key = (node->zobrist != 0) ? node->zobrist : node->board.hash();
         priors_cache().insert(key, std::move(e));
@@ -561,40 +567,45 @@ void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
 }
 
 void MCTSTree::expand_with_priors(MCTSNode* node,
-    const std::vector<std::pair<std::string,float>>& priors) {
+    const std::vector<PriorEntry>& priors) {
     if (!node) return;
 
-    //std::lock_guard<std::mutex> g(tree_mutex_);
-
-    // Build a fast lookup from incoming priors (no sorting here).
-    std::unordered_map<std::string,float> priormap;
+    // Build a fast lookup from incoming priors.
+    std::unordered_map<std::string, std::pair<float,float>> priormap;
     priormap.reserve(priors.size());
-    for (const auto &pp : priors) priormap.emplace(pp.first, pp.second);
+    for (const auto& pp : priors)
+        priormap.emplace(pp.uci, std::make_pair(pp.prior, pp.raw_prior));
 
     // Update priors on any existing entries (do NOT touch their child unique_ptrs).
-    for (auto &ce : node->ordered_children) {
+    for (auto& ce : node->ordered_children) {
         auto it = priormap.find(ce.uci);
-        ce.prior = (it != priormap.end()) ? it->second : 0.0f;
+        if (it != priormap.end()) {
+            ce.prior     = it->second.first;
+            ce.raw_prior = it->second.second;
+        } else {
+            ce.prior = ce.raw_prior = 0.0f;
+        }
     }
 
     std::unordered_set<std::string> existing;
     existing.reserve(node->ordered_children.size());
-    for (const auto &ce : node->ordered_children) existing.insert(ce.uci);
+    for (const auto& ce : node->ordered_children) existing.insert(ce.uci);
 
-    for (const auto &pp : priors) {
-        if (existing.find(pp.first) == existing.end()) {
+    for (const auto& pp : priors) {
+        if (existing.find(pp.uci) == existing.end()) {
             MCTSNode::ChildEntry ce;
-            ce.uci = pp.first;
-            ce.child.reset(nullptr);   // new entries have no subtree yet (lazy-create)
-            ce.prior = pp.second;
+            ce.uci       = pp.uci;
+            ce.child.reset(nullptr);
+            ce.prior     = pp.prior;
+            ce.raw_prior = pp.raw_prior;
             node->ordered_children.emplace_back(std::move(ce));
-            existing.insert(pp.first);
+            existing.insert(pp.uci);
         }
     }
 
-    // Single canonical sort: primary = prior desc, secondary = uci asc for determinism.
+    // Single canonical sort: primary = fudged prior desc, secondary = uci asc for determinism.
     std::sort(node->ordered_children.begin(), node->ordered_children.end(),
-              [](const MCTSNode::ChildEntry &a, const MCTSNode::ChildEntry &b){
+              [](const MCTSNode::ChildEntry& a, const MCTSNode::ChildEntry& b){
                   if (a.prior != b.prior) return a.prior > b.prior;
                   return a.uci < b.uci;
               });
@@ -744,7 +755,7 @@ void MCTSTree::resolve_inflight() {
         node->cache_misses = 0;
 
         const float value_white_pov = node->get_stm_pov() * re->value;
-        std::vector<std::pair<std::string, float>> built_priors = build_priors(node, re);
+        std::vector<PriorEntry> built_priors = build_priors(node, re);
 
         apply_result(node, built_priors, value_white_pov, /*cache=*/true);
 
@@ -755,7 +766,7 @@ void MCTSTree::resolve_inflight() {
     }
 }
 
-std::vector<std::pair<std::string, float>>
+std::vector<PriorEntry>
 MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
 {
     if (!node) {
@@ -781,45 +792,76 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
         throw std::runtime_error(ss.str());
     }
 
-    // Pluck priors directly from the model's raw policy vector (STM-POV).
-    const auto& policy_vec = re->p_policy; // model-provided vector (STM-POV)
+    // Softmax over legal move logits, then apply uniform_eps + prior_clip_max.
+    const auto& policy_vec = re->p_policy;
     const auto& pairs = lm_sp->lookup();
 
-    std::vector<std::pair<std::string, float>> built_priors;
+    std::vector<PriorEntry> built_priors;
     built_priors.reserve(pairs.size());
 
+    float max_logit = -1e30f;
     for (const auto& p : pairs) {
-        const std::string& uci = p.first;
-        const uint16_t idx = p.second; // expected index into policy_vec
-
-        const float prob = policy_vec[idx];
-        built_priors.emplace_back(uci, prob);
+        const float logit = policy_vec[p.second];
+        if (logit > max_logit) max_logit = logit;
     }
 
-    // Floor captures/checks at 3/k (both) or 1.5/k (either); clip at 0.65; renormalize.
+    float sum_exp = 0.0f;
+    for (const auto& p : pairs) {
+        const float e = std::exp(policy_vec[p.second] - max_logit);
+        built_priors.push_back({p.first, e, 0.0f});
+        sum_exp += e;
+    }
+
     const float k = static_cast<float>(built_priors.size());
+    if (sum_exp > 0.0f) {
+        const float inv = 1.0f / sum_exp;
+        for (auto& mp : built_priors) mp.prior *= inv;
+    } else if (k > 0.0f) {
+        const float u = 1.0f / k;
+        for (auto& mp : built_priors) mp.prior = u;
+    }
+
+    // snapshot raw softmax priors before any fudging
+    for (auto& mp : built_priors) mp.raw_prior = mp.prior;
+
     if (k > 0.0f) {
+        // uniform_eps mixing
+        if (uniform_eps_ > 0.0f) {
+            const float u = 1.0f / k;
+            const float one_minus = 1.0f - uniform_eps_;
+            for (auto& mp : built_priors)
+                mp.prior = one_minus * mp.prior + uniform_eps_ * u;
+        }
+
+        // capture/check floors: 3/k if both, 1.5/k if either
         const float floor_either = 1.5f / k;
         const float floor_both   = 3.0f / k;
         for (auto& mp : built_priors) {
-            const bool cap = node->board.is_capture(mp.first);
-            const bool chk = node->board.gives_check(mp.first);
-            if (cap && chk) mp.second = std::max(mp.second, floor_both);
-            else if (cap || chk) mp.second = std::max(mp.second, floor_either);
+            if (mp.prior >= floor_both) continue;
+            const bool cap = node->board.is_capture(mp.uci);
+            if (cap) {
+                const bool chk = node->board.gives_check(mp.uci);
+                mp.prior = std::max(mp.prior, chk ? floor_both : floor_either);
+            } else if (mp.prior < floor_either) {
+                const bool chk = node->board.gives_check(mp.uci);
+                if (chk) mp.prior = floor_either;
+            }
         }
 
-        // clip
-        for (auto& mp : built_priors) mp.second = std::min(mp.second, 0.65f);
+        // prior_clip_max clip then renorm
+        if (prior_clip_max_ < 1.0f) {
+            for (auto& mp : built_priors)
+                mp.prior = std::min(mp.prior, prior_clip_max_);
+        }
 
-        // renormalize
         double s = 0.0;
-        for (const auto& mp : built_priors) s += std::max(0.0f, mp.second);
+        for (const auto& mp : built_priors) s += std::max(0.0f, mp.prior);
         if (s > 0.0) {
             const float inv = static_cast<float>(1.0 / s);
-            for (auto& mp : built_priors) mp.second = std::max(0.0f, mp.second) * inv;
+            for (auto& mp : built_priors) mp.prior = std::max(0.0f, mp.prior) * inv;
         } else {
             const float u = 1.0f / k;
-            for (auto& mp : built_priors) mp.second = u;
+            for (auto& mp : built_priors) mp.prior = u;
         }
     }
 
@@ -1242,6 +1284,55 @@ void MCTSTree::set_sim_budget(float v) {
 float MCTSTree::sim_budget() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     return sim_budget_;
+}
+
+void MCTSTree::set_uniform_eps(float v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    uniform_eps_ = v;
+}
+
+float MCTSTree::uniform_eps() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return uniform_eps_;
+}
+
+void MCTSTree::set_prior_clip_max(float v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    prior_clip_max_ = v;
+}
+
+float MCTSTree::prior_clip_max() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return prior_clip_max_;
+}
+
+MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
+    NNResult result;
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    const MCTSNode* r = root_.get();
+    if (!r || !r->is_expanded || !r->children_have_priors) return result;
+
+    result.value = r->value;
+    result.raw_priors.reserve(r->ordered_children.size());
+    for (const auto& ce : r->ordered_children)
+        result.raw_priors.emplace_back(ce.uci, ce.raw_prior);
+
+    // opportunistic mass_on_legal — only computable if raw cache entry still alive
+    const RawEntry* re = raw_policy_cache().lookup(r->zobrist);
+    if (re && re->has_policy && r->legal_mask_map) {
+        const auto& policy_vec = re->p_policy;
+        const auto& mask = r->legal_mask_map->mask;
+        float max_logit = *std::max_element(policy_vec.begin(), policy_vec.end());
+        float sum_all = 0.0f, sum_legal = 0.0f;
+        for (size_t i = 0; i < policy_vec.size(); ++i) {
+            const float e = std::exp(policy_vec[i] - max_logit);
+            sum_all += e;
+            if (mask[i]) sum_legal += e;
+        }
+        if (sum_all > 0.0f) result.mass_on_legal = sum_legal / sum_all;
+    }
+
+    return result;
 }
 
 

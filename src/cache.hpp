@@ -6,9 +6,14 @@
 #include <vector>
 #include <string>
 
+struct PriorEntry {
+    std::string uci;
+    float prior = 0.0f;      // fudged prior (post uniform_eps, floors, clip)
+    float raw_prior = 0.0f;  // raw softmax prior (post softmax, pre fudging)
+};
+
 struct CacheEntry {
-    // store final move priors as (uci, prob) pairs and the value
-    std::vector<std::pair<std::string, float>> priors;
+    std::vector<PriorEntry> priors;
     float value = 0.0f;
 };
 

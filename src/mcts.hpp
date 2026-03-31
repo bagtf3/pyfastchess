@@ -186,11 +186,12 @@ struct MCTSNode {
     struct ChildEntry {
         std::string uci;                    // move in UCI form (parent->child)
         std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
-        float prior = 0.0f;                 // prior for this move
+        float prior = 0.0f;                 // fudged prior (post uniform_eps, floors, clip)
+        float raw_prior = 0.0f;             // raw softmax prior (post softmax, pre fudging)
 
         ChildEntry() = default;
-        ChildEntry(const std::string& u, float p = 0.0f)
-            : uci(u), child(nullptr), prior(p) {}
+        ChildEntry(const std::string& u, float p = 0.0f, float rp = 0.0f)
+            : uci(u), child(nullptr), prior(p), raw_prior(rp) {}
     };
 
     // Authoritative, ordered list of children.
@@ -255,7 +256,9 @@ public:
     MCTSTree(const backend::Board& root_board,
              float c_puct,
              float sim_budget = 800.0f,
-             float pruning_factor = 1.2f);
+             float pruning_factor = 1.2f,
+             float uniform_eps = 0.05f,
+             float prior_clip_max = 0.65f);
 
     // Walk with PUCT+virtual loss to a leaf
     // and return the leaf. Stores the chosen path internally for apply_result().
@@ -264,10 +267,10 @@ public:
     // collects many leaves, stores in a pending queue, returns counts
     CollectResults collect_many_leaves(size_t n_new, size_t n_fastpath);
 
-    // Expand 'node' using (move, prior) pairs and apply value (white POV).
+    // Expand 'node' using PriorEntry vec and apply value (white POV).
     void apply_result(
         MCTSNode* node,
-        const std::vector<std::pair<std::string, float>>& move_priors,
+        const std::vector<PriorEntry>& move_priors,
         float value_white_pov, bool cache=true);
     
     // Queue a leaf as pending
@@ -318,6 +321,19 @@ public:
     void set_sim_budget(float v);
     float sim_budget() const;
 
+    void set_uniform_eps(float v);
+    float uniform_eps() const;
+
+    void set_prior_clip_max(float v);
+    float prior_clip_max() const;
+
+    struct NNResult {
+        float value = 0.0f;
+        std::vector<std::pair<std::string, float>> raw_priors;
+        float mass_on_legal = -1.0f;  // -1 if unavailable (raw cache evicted)
+    };
+    NNResult emulate_nn_result() const;
+
     void set_legal_mask_map(
         MCTSNode* node,
         std::shared_ptr<const backend::LegalMaskandMap> lm_sp);
@@ -331,6 +347,8 @@ private:
     // Simulation budget and pruning config (tree-level)
     float sim_budget_ = 800.0f;
     float pruning_factor_ = 1.2f;
+    float uniform_eps_ = 0.05f;
+    float prior_clip_max_ = 0.65f;
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
@@ -339,11 +357,11 @@ private:
 
     void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
-    void expand_with_priors(MCTSNode* node, const std::vector<std::pair<std::string, float>>& priors);
+    void expand_with_priors(MCTSNode* node, const std::vector<PriorEntry>& priors);
     
     void filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch);
 
-    std::vector<std::pair<std::string, float>>
+    std::vector<PriorEntry>
     build_priors(MCTSNode* node, const RawEntry* re = nullptr) const;
 
     CollectCounts collect_one_leaf_tagged();

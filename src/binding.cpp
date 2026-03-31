@@ -303,20 +303,29 @@ PYBIND11_MODULE(_core, m) {
           .def(py::init([](const backend::Board& board,
                          float c_puct,
                          float sim_budget,
-                         float pruning_factor
+                         float pruning_factor,
+                         float uniform_eps,
+                         float prior_clip_max
                     ) {
-               return new MCTSTree(board, c_puct, sim_budget, pruning_factor);
+               return new MCTSTree(board, c_puct, sim_budget, pruning_factor,
+                                   uniform_eps, prior_clip_max);
           }),
                py::arg("board"),
                py::arg("c_puct") = 1.5f,
                py::arg("sim_budget") = 800.0f,
                py::arg("pruning_factor") = 1.2f,
+               py::arg("uniform_eps") = 0.05f,
+               py::arg("prior_clip_max") = 0.65f,
                "Create MCTSTree in C++")
-          
+
           .def("set_cpuct", &MCTSTree::set_cpuct, py::arg("c_puct"))
           .def("cpuct", &MCTSTree::cpuct)
           .def("set_sim_budget", &MCTSTree::set_sim_budget, py::arg("sim_budget"))
           .def("sim_budget", &MCTSTree::sim_budget)
+          .def("set_uniform_eps", &MCTSTree::set_uniform_eps, py::arg("uniform_eps"))
+          .def("uniform_eps", &MCTSTree::uniform_eps)
+          .def("set_prior_clip_max", &MCTSTree::set_prior_clip_max, py::arg("prior_clip_max"))
+          .def("prior_clip_max", &MCTSTree::prior_clip_max)
 
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
@@ -387,9 +396,27 @@ PYBIND11_MODULE(_core, m) {
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
                     float value_white_pov, bool cache = true) {
-                    t.apply_result(node, move_priors, value_white_pov, cache);
+                    std::vector<PriorEntry> entries;
+                    entries.reserve(move_priors.size());
+                    for (const auto& p : move_priors)
+                        entries.push_back({p.first, p.second, 0.0f});
+                    t.apply_result(node, entries, value_white_pov, cache);
                },
                py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+
+          .def("emulate_nn_result", [](const MCTSTree& t) {
+               auto res = t.emulate_nn_result();
+               py::dict out;
+               out["value"] = res.value;
+               py::list priors;
+               for (const auto& p : res.raw_priors)
+                    priors.append(py::make_tuple(p.first, p.second));
+               out["raw_priors"] = priors;
+               out["mass_on_legal"] = (res.mass_on_legal >= 0.0f)
+                    ? py::cast(res.mass_on_legal)
+                    : py::none();
+               return out;
+          }, "Returns {value, raw_priors [(uci, prob),...], mass_on_legal or None}.")
 
           .def("resolve_inflight", [](MCTSTree &t) {
                t.resolve_inflight();
