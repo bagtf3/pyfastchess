@@ -834,19 +834,19 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
         }
 
         // capture/check floors: 3/k if both, 1.5/k if either
-        const float floor_either = 1.5f / k;
-        const float floor_both   = 3.0f / k;
-        for (auto& mp : built_priors) {
-            if (mp.prior >= floor_both) continue;
-            const bool cap = node->board.is_capture(mp.uci);
-            if (cap) {
-                const bool chk = node->board.gives_check(mp.uci);
-                mp.prior = std::max(mp.prior, chk ? floor_both : floor_either);
-            } else if (mp.prior < floor_either) {
-                const bool chk = node->board.gives_check(mp.uci);
-                if (chk) mp.prior = floor_either;
-            }
-        }
+        // const float floor_either = 1.5f / k;
+        // const float floor_both   = 3.0f / k;
+        // for (auto& mp : built_priors) {
+        //     if (mp.prior >= floor_both) continue;
+        //     const bool cap = node->board.is_capture(mp.uci);
+        //     if (cap) {
+        //         const bool chk = node->board.gives_check(mp.uci);
+        //         mp.prior = std::max(mp.prior, chk ? floor_both : floor_either);
+        //     } else if (mp.prior < floor_either) {
+        //         const bool chk = node->board.gives_check(mp.uci);
+        //         if (chk) mp.prior = floor_either;
+        //     }
+        // }
 
         // prior_clip_max clip then renorm
         if (prior_clip_max_ < 1.0f) {
