@@ -330,9 +330,8 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         // legal mask and map needs to be set
         if (!node->legal_mask_map) {
             backend::LegalMaskandMap lm = node->board.legal_move_mask();
-            auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
             set_legal_mask_map(node,
-                std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp));
+                std::make_unique<backend::LegalMaskandMap>(std::move(lm)));
         }
 
         std::vector<PriorEntry> built_priors = build_priors(node, re);
@@ -780,21 +779,17 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
         throw std::runtime_error(ss.str());
     }
 
-    // Grab the LegalMaskandMap attached to the node. Must be present.
-    std::shared_ptr<const backend::LegalMaskandMap> lm_sp;
-    lm_sp = node->legal_mask_map; // copy shared_ptr (cheap)
-
-    if (!lm_sp) {
+    if (!node->legal_mask_map) {
         const uint64_t z = node->zobrist;
         std::stringstream ss;
         ss << "build_priors: missing LegalMaskandMap on node (zobrist=" << z
-           << "). Ensure pending_encoded_stm_pov attached it.";
+           << "). Ensure pending_encoded_64_tokens attached it.";
         throw std::runtime_error(ss.str());
     }
 
     // Softmax over legal move logits, then apply uniform_eps + prior_clip_max.
     const auto& policy_vec = re->p_policy;
-    const auto& pairs = lm_sp->lookup();
+    const auto& pairs = node->legal_mask_map->lookup();
 
     std::vector<PriorEntry> built_priors;
     built_priors.reserve(pairs.size());
@@ -870,10 +865,9 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
 
 void MCTSTree::set_legal_mask_map(
     MCTSNode* node,
-    std::shared_ptr<const backend::LegalMaskandMap> lm_sp)
+    std::unique_ptr<const backend::LegalMaskandMap> lm)
 {
-    
-    node->legal_mask_map = std::move(lm_sp);
+    node->legal_mask_map = std::move(lm);
 }
 
 void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch) {

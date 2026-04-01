@@ -363,22 +363,16 @@ PYBIND11_MODULE(_core, m) {
 
                     // produce LegalMaskandMap and attach it to node (move -> heap)
                     backend::LegalMaskandMap lm = n->board.legal_move_mask();
-                    auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
                     t.set_legal_mask_map(
-                         n,
-                    std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp));
+                        n,
+                        std::make_unique<backend::LegalMaskandMap>(std::move(lm)));
 
-                    // convert mask -> numpy array (copy)
-                    const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)
-                    py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
-                    std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
-
-                    // append (zobrist, tokens64, mask)
-                    out.append(py::make_tuple(z, tokens, mask));
+                    // append (zobrist, tokens64)
+                    out.append(py::make_tuple(z, tokens));
                }
                return out;
-               }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
-               "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
+               }, "Encode pending leaves as [(zobrist, tokens(64,)), ...].\n"
+               "tokens: (64,) int16 (STM-made-white canonical token ids). LegalMaskandMap attached to node internally.")
           
           .def("count_pending", [](const MCTSTree& t) {
                return t.pending_nodes_.size();

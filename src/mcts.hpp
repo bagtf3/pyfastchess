@@ -212,9 +212,9 @@ struct MCTSNode {
     int cache_misses = 0;
     uint32_t queued_epoch = 0;
 
-    // When pending_encoded_stm_pov runs we move the LegalMaskandMap into a
+    // When pending_encoded_64_tokens runs we move the LegalMaskandMap into a
     // heap object and store it here so the node can later access it without copies.
-    std::shared_ptr<const backend::LegalMaskandMap> legal_mask_map;
+    std::unique_ptr<const backend::LegalMaskandMap> legal_mask_map;
 
     // Disallow copying (because we hold unique_ptr children)
     MCTSNode(const MCTSNode&) = delete;
@@ -336,7 +336,7 @@ public:
 
     void set_legal_mask_map(
         MCTSNode* node,
-        std::shared_ptr<const backend::LegalMaskandMap> lm_sp);
+        std::unique_ptr<const backend::LegalMaskandMap> lm);
 
 private:
     std::unique_ptr<MCTSNode> root_;
