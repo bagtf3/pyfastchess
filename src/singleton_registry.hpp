@@ -10,13 +10,25 @@
 #include <vector>
 #include <tuple>
 
+// Process-global singletons used by MCTS.
 //
-// This header exposes all process-global singletons used by MCTS:
-//  - priors_cache()   -> Cache (LRU) capacity 600000
-//  - raw_policy_cache()-> RawPolicyCache (deque eviction) capacity 16384
+// priors_cache()      LRU Cache, 1M capacity.
+//                     Stores "fudged" priors + NN value keyed by zobrist.
+//                     "Fudged" = raw NN softmax output after uniform_eps mixing
+//                     (blends in a flat uniform prior) and prior_clip_max clipping
+//                     (caps any single move prior), then renormalized.
+//                     Persists for the whole session; shared across all trees
+//                     in this process. Updated by apply_result on first NN
+//                     resolution, and periodically refreshed with visit-derived
+//                     priors by maybe_update_priors_cache.
 //
-// Use these accessors from C++ code. The implementation is in singleton_registry.cpp
+// raw_policy_cache()  RawPolicyCache, 48k capacity, deque eviction.
+//                     Mailbox for NN inference results: Python writes raw outputs
+//                     (4288-float policy + scalar value) here after each batch;
+//                     C++ drains it during resolve_inflight / collect_one_leaf_tagged.
+//                     Entries are consumed once processed and not retained.
 //
+// Use these accessors from C++ code. Implementation is in singleton_registry.cpp.
 
 // ---------------- Raw entry + stats ----------------
 struct RawEntry {
@@ -75,8 +87,8 @@ private:
 };
 
 // ---------------- Singletons accessors ----------------
-Cache& priors_cache();      // LRU cache, capacity 750000
-RawPolicyCache& raw_policy_cache(); // deque-eviction raw buffer, capacity 72000
+Cache& priors_cache();          // LRU cache, 1M capacity
+RawPolicyCache& raw_policy_cache(); // deque-eviction raw mailbox, 48k capacity
 
 // Convenience wrappers for stats/clear (useful to expose to python)
 CacheStats priors_cache_stats();
