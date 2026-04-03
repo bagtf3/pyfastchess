@@ -246,6 +246,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     MCTSNode* node = root_.get();
     last_path_.push_back(node);
     node->add_visit();
+    maybe_resort_by_visits(node);
 
     uint32_t cur_epoch = tree_epoch_;
 
@@ -273,6 +274,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         last_path_.push_back(node);
         // increment visit for this node immediately (psuedo virtual loss)
         node->add_visit();
+        maybe_resort_by_visits(node);
     }
 
     // set leaf pointer for the caller
@@ -461,14 +463,6 @@ void MCTSTree::apply_result(
     node->value = value_white_pov;
     node->Qema  = value_white_pov;
 
-    // auto-apply Dirichlet noise when root gets its first priors
-    if (node == root_.get() && dirichlet_eps_ > 0.0f && !noise_added_) {
-        apply_root_noise_nolock(dirichlet_eps_, dirichlet_alpha_);
-        noise_added_ = true;
-    }
-
-    back_up_along_path_nolock(node, value_white_pov);
-
     if (cache) {
         CacheEntry e;
         e.value = value_white_pov;
@@ -479,6 +473,14 @@ void MCTSTree::apply_result(
         uint64_t key = (node->zobrist != 0) ? node->zobrist : node->board.hash();
         priors_cache().insert(key, std::move(e));
     }
+
+    // auto-apply Dirichlet noise when root gets its first priors (after cache write)
+    if (node == root_.get() && dirichlet_eps_ > 0.0f && !noise_added_) {
+        apply_root_noise_nolock(dirichlet_eps_, dirichlet_alpha_);
+        noise_added_ = true;
+    }
+
+    back_up_along_path_nolock(node, value_white_pov);
 }
 
 // Public wrapper: acquires the lock and delegates to the nolock variant.
@@ -665,6 +667,22 @@ void MCTSTree::apply_root_noise_nolock(float eps, float alpha) {
         const float u = 1.0f / static_cast<float>(n);
         for (size_t i = 0; i < n; ++i) r->ordered_children[i].prior = u;
     }
+
+    std::stable_sort(r->ordered_children.begin(), r->ordered_children.end(),
+                     [](const MCTSNode::ChildEntry& a, const MCTSNode::ChildEntry& b){
+                         return a.prior > b.prior;
+                     });
+}
+
+void MCTSTree::maybe_resort_by_visits(MCTSNode* node) {
+    if (!node->children_have_priors) return;
+    if (node->visit_count() != visit_resort_threshold_) return;
+    std::stable_sort(node->ordered_children.begin(), node->ordered_children.end(),
+                     [](const MCTSNode::ChildEntry& a, const MCTSNode::ChildEntry& b) {
+                         int na = a.child ? a.child->visit_count() : 0;
+                         int nb = b.child ? b.child->visit_count() : 0;
+                         return na > nb;
+                     });
 }
 
 void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {

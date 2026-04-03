@@ -307,6 +307,8 @@ public:
     // Configure automatic Dirichlet noise (applied in C++ after priors are set)
     // Set eps=0 to disable.
     void set_dirichlet(float eps, float alpha);
+    float dirichlet_eps() const { return dirichlet_eps_; }
+    float dirichlet_alpha() const { return dirichlet_alpha_; }
 
     // Tree reuse: when true (default), advance_root reuses existing subtree.
     void set_reuse_tree(bool v);
@@ -382,6 +384,10 @@ private:
 
     // Noise internals (no lock, caller must ensure safety)
     void apply_root_noise_nolock(float eps, float alpha);
+
+    // Re-sort a node's children by visit count once it crosses visit_resort_threshold_
+    void maybe_resort_by_visits(MCTSNode* node);
+    static constexpr int visit_resort_threshold_ = 250;
 
     CollectCounts collect_one_leaf_tagged();
 

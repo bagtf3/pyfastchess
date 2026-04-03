@@ -447,6 +447,8 @@ PYBIND11_MODULE(_core, m) {
           .def("set_dirichlet", &MCTSTree::set_dirichlet,
                py::arg("eps"), py::arg("alpha"),
                "Set automatic Dirichlet noise params (eps=0 disables).")
+          .def("dirichlet_eps", &MCTSTree::dirichlet_eps)
+          .def("dirichlet_alpha", &MCTSTree::dirichlet_alpha)
           .def("set_reuse_tree", &MCTSTree::set_reuse_tree, py::arg("reuse"),
                "Enable or disable tree reuse on advance_root.")
           .def("reuse_tree", &MCTSTree::reuse_tree,
