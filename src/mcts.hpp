@@ -300,9 +300,17 @@ public:
     MCTSNode* root() { return root_.get(); }
     const MCTSNode* root() const { return root_.get(); }
     
-    // Add Dirichlet noise to root priors (thread-safe)
+    // Add Dirichlet noise to root priors (thread-safe); uses given eps/alpha directly
     void add_root_dirichlet_noise(float eps = 0.25f, float alpha = 0.1f);
     bool advance_root(const std::string& move_uci);
+
+    // Configure automatic Dirichlet noise (applied in C++ after priors are set)
+    // Set eps=0 to disable.
+    void set_dirichlet(float eps, float alpha);
+
+    // Tree reuse: when true (default), advance_root reuses existing subtree.
+    void set_reuse_tree(bool v);
+    bool reuse_tree() const;
 
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -349,6 +357,14 @@ private:
     float pruning_factor_ = 1.2f;
     float uniform_eps_ = 0.05f;
     float prior_clip_max_ = 0.65f;
+
+    // Automatic Dirichlet noise params (eps=0 disables)
+    float dirichlet_eps_ = 0.0f;
+    float dirichlet_alpha_ = 0.3f;
+    bool noise_added_ = false;
+
+    // Whether to reuse existing subtree on advance_root
+    bool reuse_tree_ = true;
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
@@ -363,6 +379,9 @@ private:
 
     std::vector<PriorEntry>
     build_priors(MCTSNode* node, const RawEntry* re = nullptr) const;
+
+    // Noise internals (no lock, caller must ensure safety)
+    void apply_root_noise_nolock(float eps, float alpha);
 
     CollectCounts collect_one_leaf_tagged();
 

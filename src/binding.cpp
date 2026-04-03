@@ -443,7 +443,15 @@ PYBIND11_MODULE(_core, m) {
                py::arg("min_visits") = 100)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
-          
+
+          .def("set_dirichlet", &MCTSTree::set_dirichlet,
+               py::arg("eps"), py::arg("alpha"),
+               "Set automatic Dirichlet noise params (eps=0 disables).")
+          .def("set_reuse_tree", &MCTSTree::set_reuse_tree, py::arg("reuse"),
+               "Enable or disable tree reuse on advance_root.")
+          .def("reuse_tree", &MCTSTree::reuse_tree,
+               "Return whether tree reuse is enabled.")
+
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
      py::class_<CollectResults>(m, "CollectResults")

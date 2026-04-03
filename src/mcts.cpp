@@ -461,6 +461,12 @@ void MCTSTree::apply_result(
     node->value = value_white_pov;
     node->Qema  = value_white_pov;
 
+    // auto-apply Dirichlet noise when root gets its first priors
+    if (node == root_.get() && dirichlet_eps_ > 0.0f && !noise_added_) {
+        apply_root_noise_nolock(dirichlet_eps_, dirichlet_alpha_);
+        noise_added_ = true;
+    }
+
     back_up_along_path_nolock(node, value_white_pov);
 
     if (cache) {
@@ -613,26 +619,22 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
     node->children_have_priors = true;
 }
 
-void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
+void MCTSTree::apply_root_noise_nolock(float eps, float alpha) {
     if (eps <= 0.0f || alpha <= 0.0f) return;
 
-    std::lock_guard<std::mutex> g(tree_mutex_);
     MCTSNode* r = root_.get();
     if (!r) return;
 
     if (!r->is_expanded) {
-        // ensure the root has children to mix with noise
         expand_with_uniform_priors_nolock(r);
     }
 
     const size_t n = r->ordered_children.size();
     if (n == 0) return;
 
-    // copy existing priors
     std::vector<float> pri(n);
     for (size_t i = 0; i < n; ++i) pri[i] = r->ordered_children[i].prior;
 
-    // sample Dirichlet via independent Gamma(alpha,1) draws
     std::random_device rd;
     std::mt19937 gen(rd());
     std::gamma_distribution<float> gdist(alpha, 1.0f);
@@ -648,11 +650,9 @@ void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
         for (size_t i = 0; i < n; ++i) dir[i] *= inv;
     }
 
-    // mix noise into priors and renormalize
     double s = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        float p0 = pri[i];
-        float pnew = (1.0f - eps) * p0 + eps * dir[i];
+        float pnew = (1.0f - eps) * pri[i] + eps * dir[i];
         if (pnew < 0.0f) pnew = 0.0f;
         pri[i] = pnew;
         s += static_cast<double>(pri[i]);
@@ -660,14 +660,27 @@ void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
 
     if (s > 0.0) {
         const float invs = static_cast<float>(1.0 / s);
-        for (size_t i = 0; i < n; ++i) {
-            r->ordered_children[i].prior = pri[i] * invs;
-        }
+        for (size_t i = 0; i < n; ++i) r->ordered_children[i].prior = pri[i] * invs;
     } else {
         const float u = 1.0f / static_cast<float>(n);
         for (size_t i = 0; i < n; ++i) r->ordered_children[i].prior = u;
     }
 }
+
+void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
+    if (eps <= 0.0f || alpha <= 0.0f) return;
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    apply_root_noise_nolock(eps, alpha);
+    noise_added_ = true;
+}
+
+void MCTSTree::set_dirichlet(float eps, float alpha) {
+    dirichlet_eps_ = eps;
+    dirichlet_alpha_ = alpha;
+}
+
+void MCTSTree::set_reuse_tree(bool v) { reuse_tree_ = v; }
+bool MCTSTree::reuse_tree() const { return reuse_tree_; }
 
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
     uint32_t cur_epoch = tree_epoch_;
@@ -933,28 +946,38 @@ void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch
 bool MCTSTree::advance_root(const std::string& mv) {
     std::lock_guard<std::mutex> g(tree_mutex_);
     last_path_.clear();
+    noise_added_ = false;
 
     auto old_root = std::move(root_);
     if (!old_root) return false;
 
-    // Try to reuse an existing instantiated subtree.
-    for (auto it = old_root->ordered_children.begin();
-         it != old_root->ordered_children.end();
-         ++it) {
-        if (it->uci != mv || !it->child) continue;
+    // Try to reuse an existing instantiated subtree (only when enabled).
+    if (reuse_tree_) {
+        for (auto it = old_root->ordered_children.begin();
+             it != old_root->ordered_children.end();
+             ++it) {
+            if (it->uci != mv || !it->child) continue;
 
-        auto new_root = std::move(it->child);
-        new_root->parent = nullptr;
-        old_root->ordered_children.erase(it);
+            auto new_root = std::move(it->child);
+            new_root->parent = nullptr;
+            old_root->ordered_children.erase(it);
 
-        tree_epoch_ += 1;
-        filter_queues_for_new_root(new_root.get(), tree_epoch_);
+            tree_epoch_ += 1;
+            filter_queues_for_new_root(new_root.get(), tree_epoch_);
 
-        root_ = std::move(new_root);
-        return true;
+            root_ = std::move(new_root);
+
+            // reused subtree already has priors — apply noise now
+            if (root_->children_have_priors && dirichlet_eps_ > 0.0f) {
+                apply_root_noise_nolock(dirichlet_eps_, dirichlet_alpha_);
+                noise_added_ = true;
+            }
+
+            return true;
+        }
     }
 
-    // No existing subtree: create a fresh root (old tree will be discarded).
+    // No reuse: create a fresh root (old tree will be discarded).
     backend::Board nb = old_root->board;
     if (!nb.push_uci(mv)) {
         root_ = std::move(old_root);
