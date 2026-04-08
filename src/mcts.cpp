@@ -58,7 +58,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     float c_puct,
     CollectCounts* cc,
     float sim_budget,
-    float pruning_factor)
+    float pruning_factor,
+    bool use_u_attn)
 {
     if (ordered_children.empty()) return nullptr;
 
@@ -176,8 +177,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         // max attenuator range: 1.0 + [-0.25 to 0.25]
-        const float attn = ch ? 0.5f * clampf(ch->Qdelta_sign, -0.5, 0.5) : 0.0f;
-        float score = q + u *(1.0f + attn);
+        const float attn = (use_u_attn && ch) ? 0.5f * clampf(ch->Qdelta_sign, -0.5, 0.5) : 0.0f;
+        float score = q + u * (1.0f + attn);
 
         if (ch) {
             int pen = ch->performance_penalty.load();
@@ -262,7 +263,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
 
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
         MCTSNode* child = node->select_child_lazy_ptr(
-            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_);
+            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_, this->use_u_attn_);
 
         if (!child) break;
 
@@ -700,6 +701,9 @@ void MCTSTree::set_dirichlet(float eps, float alpha) {
 void MCTSTree::set_reuse_tree(bool v) { reuse_tree_ = v; }
 bool MCTSTree::reuse_tree() const { return reuse_tree_; }
 
+void MCTSTree::set_use_u_attn(bool v) { use_u_attn_ = v; }
+bool MCTSTree::use_u_attn() const { return use_u_attn_; }
+
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
     uint32_t cur_epoch = tree_epoch_;
 
@@ -969,8 +973,11 @@ bool MCTSTree::advance_root(const std::string& mv) {
     auto old_root = std::move(root_);
     if (!old_root) return false;
 
-    // Try to reuse an existing instantiated subtree (only when enabled).
-    if (reuse_tree_) {
+    // Try to reuse an existing instantiated subtree.
+    // Force reuse when in matelock (|Q| > 0.9) even if reuse_tree_ is off —
+    // restarting cold would throw away a locked mate line.
+    bool force_reuse = std::abs(old_root->Q) > 0.9f;
+    if (reuse_tree_ || force_reuse) {
         for (auto it = old_root->ordered_children.begin();
              it != old_root->ordered_children.end();
              ++it) {

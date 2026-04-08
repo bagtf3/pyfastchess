@@ -454,6 +454,11 @@ PYBIND11_MODULE(_core, m) {
           .def("reuse_tree", &MCTSTree::reuse_tree,
                "Return whether tree reuse is enabled.")
 
+          .def("set_use_u_attn", &MCTSTree::set_use_u_attn, py::arg("v"),
+               "Enable or disable Qdelta_sign attenuation on U in PUCT scoring.")
+          .def("use_u_attn", &MCTSTree::use_u_attn,
+               "Return whether U attenuation is enabled.")
+
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
      py::class_<CollectResults>(m, "CollectResults")

@@ -234,7 +234,8 @@ struct MCTSNode {
         float c_puct,
         CollectCounts* cc,
         float sim_budget,
-        float pruning_factor);
+        float pruning_factor,
+        bool use_u_attn = true);
 
     // safe, convenient accessors for the atomic visit counter
     int visit_count() const noexcept {
@@ -314,6 +315,9 @@ public:
     void set_reuse_tree(bool v);
     bool reuse_tree() const;
 
+    void set_use_u_attn(bool v);
+    bool use_u_attn() const;
+
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
@@ -367,6 +371,9 @@ private:
 
     // Whether to reuse existing subtree on advance_root
     bool reuse_tree_ = true;
+
+    // Whether to apply Qdelta_sign attenuation to U in PUCT scoring
+    bool use_u_attn_ = true;
     
     // Backprop of value along path (adds v to W and recomputes Q).
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
