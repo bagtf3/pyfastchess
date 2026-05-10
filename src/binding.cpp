@@ -234,6 +234,9 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
           .def_readonly("value",          &ChildDetail::value)
+          .def_readonly("win",            &ChildDetail::win)
+          .def_readonly("draw",           &ChildDetail::draw)
+          .def_readonly("loss",           &ChildDetail::loss)
           .def_readonly("visit_share",    &ChildDetail::visit_share)
           .def_readonly("last_visit",     &ChildDetail::last_visit);
      
@@ -255,13 +258,18 @@ PYBIND11_MODULE(_core, m) {
                return oss.str();
           })
           // return int visits (not the atomic object)
-          .def_property_readonly("N", [](const MCTSNode &n) { return n.visit_count(); })
-          .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
-          .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
-          .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
+          .def_property_readonly("N",      [](const MCTSNode &n) { return n.visit_count(); })
+          .def_property_readonly("p_win",  [](const MCTSNode& n){ return n.p_win; })
+          .def_property_readonly("p_draw", [](const MCTSNode& n){ return n.p_draw; })
+          .def_property_readonly("p_loss", [](const MCTSNode& n){ return n.p_loss; })
+          .def_property_readonly("W",      [](const MCTSNode& n){ return n.W; })
+          .def_property_readonly("Q",      [](const MCTSNode& n){ return n.Q; })
+          .def_property_readonly("uci",    [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
-          .def_property_readonly("value",         [](const MCTSNode& n){ return n.value; })
+          .def_property_readonly("value", [](const MCTSNode& n){
+               return py::make_tuple(n.value.win, n.value.draw, n.value.loss);
+          })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
           .def_property_readonly("zobrist", [](const MCTSNode& n){ return n.zobrist; })
@@ -389,14 +397,20 @@ PYBIND11_MODULE(_core, m) {
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
-                    float value_white_pov, bool cache = true) {
+                    py::tuple wdl_tuple, bool cache = true) {
+                    if (wdl_tuple.size() != 3)
+                        throw std::runtime_error("apply_result: wdl must be a 3-tuple (win, draw, loss)");
+                    WDL wdl;
+                    wdl.win  = wdl_tuple[0].cast<float>();
+                    wdl.draw = wdl_tuple[1].cast<float>();
+                    wdl.loss = wdl_tuple[2].cast<float>();
                     std::vector<PriorEntry> entries;
                     entries.reserve(move_priors.size());
                     for (const auto& p : move_priors)
                         entries.push_back({p.first, p.second, 0.0f});
-                    t.apply_result(node, entries, value_white_pov, cache);
+                    t.apply_result(node, entries, wdl, cache);
                },
-               py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+               py::arg("node"), py::arg("move_priors"), py::arg("wdl_white_pov"), py::arg("cache") = true)
 
           .def("emulate_nn_result", [](const MCTSTree& t) {
                auto res = t.emulate_nn_result();
@@ -422,7 +436,6 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
 
           .def("root_child_visits", &MCTSTree::root_child_visits)
-          .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
                return t.root(); }, py::return_value_policy::reference_internal)
 
@@ -454,10 +467,9 @@ PYBIND11_MODULE(_core, m) {
           .def("reuse_tree", &MCTSTree::reuse_tree,
                "Return whether tree reuse is enabled.")
 
-          .def("set_use_u_attn", &MCTSTree::set_use_u_attn, py::arg("v"),
-               "Enable or disable Qdelta_sign attenuation on U in PUCT scoring.")
-          .def("use_u_attn", &MCTSTree::use_u_attn,
-               "Return whether U attenuation is enabled.")
+          .def("set_vscale", &MCTSTree::set_vscale, py::arg("v"),
+               "Set value scale: multiplied into (win-loss) during backprop.")
+          .def("vscale", &MCTSTree::vscale)
 
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
@@ -556,7 +568,7 @@ PYBIND11_MODULE(_core, m) {
           .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
-               std::vector<std::tuple<uint64_t, float, std::vector<float>>> vec;
+               std::vector<std::tuple<uint64_t, WDL, std::vector<float>>> vec;
                // Try to reserve if length is available
                try {
                     py::ssize_t n = py::len(batch);
@@ -576,25 +588,65 @@ PYBIND11_MODULE(_core, m) {
                for (py::handle item_handle : batch) {
                     py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
                     if (t.size() != 3) throw std::runtime_error(
-                              "raw_cache_bulk_insert: each item must be (key, value, policy_vector)");
+                              "raw_cache_bulk_insert: each item must be (key, (win,draw,loss), policy_vector)");
                     uint64_t key = t[0].cast<uint64_t>();
-                    float net_value = t[1].cast<float>();
+                    py::tuple wdl_t = py::reinterpret_borrow<py::tuple>(t[1]);
+                    if (wdl_t.size() != 3) throw std::runtime_error(
+                              "raw_cache_bulk_insert: wdl must be a 3-tuple (win, draw, loss)");
+                    WDL wdl;
+                    wdl.win  = wdl_t[0].cast<float>();
+                    wdl.draw = wdl_t[1].cast<float>();
+                    wdl.loss = wdl_t[2].cast<float>();
                     std::vector<float> policy = to_vec(t[2]);
                     if (policy.size() != 4288) throw std::runtime_error(
                               "raw_cache_bulk_insert: policy_vector must have length 4288");
-                    vec.emplace_back(key, net_value, std::move(policy));
+                    vec.emplace_back(key, wdl, std::move(policy));
                }
 
                raw_policy_cache().bulk_insert(std::move(vec));
                });
           
+          // Fast batch insert from numpy arrays — zero Python loop.
+          // keys:   (B,)    uint64
+          // wdl:    (B, 3)  float32, STM-POV softmax probs [win, draw, loss]
+          // policy: (B, 4288) float32, raw policy logits
+          m.def("raw_cache_bulk_insert_np", [](
+               py::array_t<uint64_t, py::array::c_style | py::array::forcecast> keys,
+               py::array_t<float,    py::array::c_style | py::array::forcecast> wdl_batch,
+               py::array_t<float,    py::array::c_style | py::array::forcecast> policy_batch
+          ) {
+               auto k = keys.unchecked<1>();
+               auto w = wdl_batch.unchecked<2>();
+               auto p = policy_batch.unchecked<2>();
+
+               const size_t B = static_cast<size_t>(k.shape(0));
+               if (static_cast<size_t>(w.shape(0)) != B || static_cast<size_t>(p.shape(0)) != B)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: batch size mismatch");
+               if (w.shape(1) != 3)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: wdl must be shape (B, 3)");
+               if (p.shape(1) != 4288)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: policy must be shape (B, 4288)");
+
+               std::vector<std::tuple<uint64_t, WDL, std::vector<float>>> vec;
+               vec.reserve(B);
+
+               for (size_t i = 0; i < B; ++i) {
+                    WDL wdl{ w(i, 0), w(i, 1), w(i, 2) };
+                    const float* pol = &p(i, 0);
+                    vec.emplace_back(k[i], wdl, std::vector<float>(pol, pol + 4288));
+               }
+
+               raw_policy_cache().bulk_insert(std::move(vec));
+          }, "Fast batch insert: keys (B,) uint64, wdl (B,3) float32 STM-POV, policy (B,4288) float32 logits.");
+
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_lookup", [](uint64_t key) -> py::object {
                const RawEntry* re = raw_policy_cache().lookup(key);
-               if (!re || !re->has_value || !re->has_policy) return py::none();
+               if (!re || !re->has_wdl || !re->has_policy) return py::none();
                py::array_t<float> policy(re->p_policy.size(), re->p_policy.data());
-               return py::make_tuple(re->value, policy);
-          }, "Look up raw NN outputs by zobrist key. Returns (value, policy_4288) or None.");
+               py::tuple wdl = py::make_tuple(re->wdl.win, re->wdl.draw, re->wdl.loss);
+               return py::make_tuple(wdl, policy);
+          }, "Look up raw NN outputs by zobrist key. Returns ((win,draw,loss), policy_4288) or None.");
           m.def("raw_cache_stats", []() {
                RawStats s = raw_policy_cache().stats();
                py::dict d;

@@ -6,19 +6,29 @@
 #include <vector>
 #include <string>
 
+// WDL lives here because cache.hpp is the base header included by everything.
+// Named fields prevent silent win/loss swaps during STM flips.
+struct WDL {
+    float win  = 0.0f;
+    float draw = 0.0f;
+    float loss = 0.0f;
+};
+
+
 struct PriorEntry {
     std::string uci;
     float prior = 0.0f;      // fudged prior (post uniform_eps, floors, clip)
     float raw_prior = 0.0f;  // raw softmax prior (post softmax, pre fudging)
 };
 
-// Priors cache entry: fudged priors for all legal moves + NN leaf value.
+// Priors cache entry: fudged priors for all legal moves + NN leaf WDL.
 // Written by apply_result (on first NN resolution) and updated periodically
 // by maybe_update_priors_cache (visit-derived priors, preserving raw_prior).
-// Value is always the original NN leaf value — never updated with Q.
+// WDL is always the original NN leaf output — never updated with accumulated Q.
 struct CacheEntry {
     std::vector<PriorEntry> priors;
-    float value = 0.0f;       // NN leaf value (white POV); never replaced with Q
+    WDL wdl;                  // NN leaf WDL (white-POV); never replaced with accumulated Q
+    float value = 0.0f;       // wdl.win - wdl.loss, kept for Qema init and inspection
     int visits = 0;           // node visit count when this entry was last written
 };
 

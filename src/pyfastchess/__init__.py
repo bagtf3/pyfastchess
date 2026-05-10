@@ -9,6 +9,8 @@ MCTSTree = _core.MCTSTree
 
 # Raw policy cache API (bulk upload, clear, stats) — may raise if not built into the module
 raw_cache_bulk_insert = _core.raw_cache_bulk_insert
+raw_cache_bulk_insert_np = _core.raw_cache_bulk_insert_np
+raw_cache_lookup = _core.raw_cache_lookup
 raw_cache_clear = _core.raw_cache_clear
 raw_cache_stats = _core.raw_cache_stats
 
@@ -28,6 +30,8 @@ __all__ = [
     "MCTSNode",
     "MCTSTree",
     "raw_cache_bulk_insert",
+    "raw_cache_bulk_insert_np",
+    "raw_cache_lookup",
     "raw_cache_clear",
     "raw_cache_stats",
     "priors_cache_stats",

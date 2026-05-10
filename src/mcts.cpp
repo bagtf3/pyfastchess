@@ -58,8 +58,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     float c_puct,
     CollectCounts* cc,
     float sim_budget,
-    float pruning_factor,
-    bool use_u_attn)
+    float pruning_factor)
 {
     if (ordered_children.empty()) return nullptr;
 
@@ -176,9 +175,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         const float prior = ce.prior;
         const float q = ch ? (pov_sign * ch->Q) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
-        // max attenuator range: 1.0 + [-0.25 to 0.25]
-        const float attn = (use_u_attn && ch) ? 0.5f * clampf(ch->Qdelta_sign, -0.5, 0.5) : 0.0f;
-        float score = q + u * (1.0f + attn);
+        float score = q + u;
 
         if (ch) {
             int pen = ch->performance_penalty.load();
@@ -263,7 +260,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
 
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
         MCTSNode* child = node->select_child_lazy_ptr(
-            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_, this->use_u_attn_);
+            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_);
 
         if (!child) break;
 
@@ -282,11 +279,10 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     cc.leaf = node;
 
     // IMPORTANT terminal checks must go first to catch draws (3fold, 50move)
-    // Known terminal
+    // Known terminal — node->value is already WDL, pass directly
     if (node->is_terminal) {
         cc.tag = CollectTag::TERMINAL;
-        const float v = node->value;
-        back_up_along_path(node, v);
+        back_up_along_path(node, node->value);
         return cc;
     }
 
@@ -294,8 +290,11 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     if (auto tv = backend::terminal_value_white_pov(node->board)) {
         node->is_terminal = true;
         node->is_expanded = true;
-        node->value = *tv;
-        node->Qema = *tv;
+        const float tv_f = *tv;
+        if (tv_f > 0.0f)       node->value = WDL{1.0f, 0.0f, 0.0f};
+        else if (tv_f < 0.0f)  node->value = WDL{0.0f, 0.0f, 1.0f};
+        else                   node->value = WDL{0.0f, 1.0f, 0.0f};
+        node->Qema = tv_f;
         cc.tag = CollectTag::TERMINAL;
         back_up_along_path(node, node->value);
         return cc;
@@ -314,9 +313,9 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         expand_with_priors(node, pe->priors);
 
         // N was already incremented during descent; just backprop the cached value.
-        node->value = pe->value;
-        node->Qema = pe->value;
-        back_up_along_path(node, pe->value);
+        node->value = pe->wdl;
+        node->Qema  = pe->value;   // pe->value = win - loss scalar
+        back_up_along_path(node, node->value);
 
         cc.tag = CollectTag::CACHED;
         return cc;
@@ -327,9 +326,11 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
 
     // Raw cache fast-path (preds already exist; resolve immediately).
     const RawEntry* re = raw_policy_cache().lookup(key);
-    if (re && re->has_value) {
-        const float value_white_pov = node->get_stm_pov() * re->value;
-        
+    if (re && re->has_wdl) {
+        // STM flip: raw cache holds STM-POV; flip to white-POV for black nodes
+        WDL wdl_white_pov = re->wdl;
+        if (node->get_stm_pov() < 0.0f) std::swap(wdl_white_pov.win, wdl_white_pov.loss);
+
         // legal mask and map needs to be set
         if (!node->legal_mask_map) {
             backend::LegalMaskandMap lm = node->board.legal_move_mask();
@@ -338,7 +339,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         }
 
         std::vector<PriorEntry> built_priors = build_priors(node, re);
-        apply_result(node, built_priors, value_white_pov, /*cache=*/true);
+        apply_result(node, built_priors, wdl_white_pov, /*cache=*/true);
 
         node->is_pending = false;
         node->is_inflight = false;
@@ -436,7 +437,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 void MCTSTree::apply_result(
     MCTSNode* node,
     const std::vector<PriorEntry>& move_priors,
-    float value_white_pov,
+    WDL wdl_white_pov,
     bool cache
 ) {
     if (!node) return;
@@ -461,12 +462,14 @@ void MCTSTree::apply_result(
                      });
 
     node->children_have_priors = true;
-    node->value = value_white_pov;
-    node->Qema  = value_white_pov;
+    const float q = wdl_white_pov.win - wdl_white_pov.loss;
+    node->value = wdl_white_pov;
+    node->Qema  = q;
 
     if (cache) {
         CacheEntry e;
-        e.value = value_white_pov;
+        e.wdl   = wdl_white_pov;
+        e.value = q;
         e.priors.reserve(node->ordered_children.size());
         for (const auto& ce : node->ordered_children)
             e.priors.push_back({ce.uci, ce.prior, ce.raw_prior});
@@ -481,51 +484,55 @@ void MCTSTree::apply_result(
         noise_added_ = true;
     }
 
-    back_up_along_path_nolock(node, value_white_pov);
+    back_up_along_path_nolock(node, wdl_white_pov);
 }
 
 // Public wrapper: acquires the lock and delegates to the nolock variant.
-void MCTSTree::back_up_along_path(MCTSNode* leaf, float v) {
+void MCTSTree::back_up_along_path(MCTSNode* leaf, WDL wdl) {
     if (!leaf) return;
 
     //std::lock_guard<std::mutex> g(tree_mutex_);
-    back_up_along_path_nolock(leaf, v);
+    back_up_along_path_nolock(leaf, wdl);
 }
 
-// Nolock variant: caller must hold tree_mutex_. Applies W and recomputes Q.
-// This mirrors the naming/semantics used by expand_*_nolock helpers.
-void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, float v) {
+// Nolock variant: caller must hold tree_mutex_. Accumulates p_win/p_draw/p_loss and recomputes Q.
+void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
     if (!leaf) return;
 
     const bool is_terminal = leaf->is_terminal;
+    // terminals backprop at full power; NN win-loss compressed by vscale_
+    const float v_scalar = (wdl.win - wdl.loss) * (is_terminal ? 1.0f : vscale_);
     MCTSNode* last = nullptr;
 
     for (MCTSNode* n = leaf; n; n = n->parent) {
         last = n;
 
-        MCTSNode* p = n->parent;
-        if (!p) continue;
-
-        const float pov = p->get_stm_pov();
-
-        // computes sign -1, 0, 1 of v - Q (pre update) relative to STM POV
+        // WDL accumulation and Q recompute always happen, including at root.
+        // Capture q_pre before the update for Qdelta_sign below.
         const float q_pre = n->Q;
-        const float s = ((v > q_pre) - (v < q_pre)) * pov;
-        n->Qdelta_sign = n->Qdelta_sign * MCTSNode::qdelta_d + MCTSNode::qdelta_a * s;
-
-        // compute new Qema
-        n->Qema = n->Qema * MCTSNode::qema_d + MCTSNode::qema_a * v;
-
-        // apply the update
-        n->W += v;
+        n->p_win  += wdl.win;
+        n->p_draw += wdl.draw;
+        n->p_loss += wdl.loss;
+        n->W      += v_scalar;
         const int nv = n->visit_count();
         n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
 
+        MCTSNode* p = n->parent;
+        if (!p) continue;  // root: skip parent-dependent updates
+
+        const float pov = p->get_stm_pov();
+
+        // sign of (v - Q_pre) relative to STM POV
+        const float s = ((v_scalar > q_pre) - (v_scalar < q_pre)) * pov;
+        n->Qdelta_sign = n->Qdelta_sign * MCTSNode::qdelta_d + MCTSNode::qdelta_a * s;
+
+        n->Qema = n->Qema * MCTSNode::qema_d + MCTSNode::qema_a * v_scalar;
+
         if (is_terminal) {
-            const bool stm_wins = (pov * v > 0.0f);
+            const bool stm_wins = (pov * v_scalar > 0.0f);
             if (stm_wins) {
                 p->set_must_visit_uci(n->uci);
-            } else if (v != 0.0f) {
+            } else if (v_scalar != 0.0f) {
                 n->performance_penalty.fetch_add(1);
             }
         }
@@ -701,8 +708,9 @@ void MCTSTree::set_dirichlet(float eps, float alpha) {
 void MCTSTree::set_reuse_tree(bool v) { reuse_tree_ = v; }
 bool MCTSTree::reuse_tree() const { return reuse_tree_; }
 
-void MCTSTree::set_use_u_attn(bool v) { use_u_attn_ = v; }
-bool MCTSTree::use_u_attn() const { return use_u_attn_; }
+void MCTSTree::set_vscale(float v) { vscale_ = v; }
+float MCTSTree::vscale() const { return vscale_; }
+
 
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
     uint32_t cur_epoch = tree_epoch_;
@@ -779,7 +787,7 @@ void MCTSTree::resolve_inflight() {
         const uint64_t z = node->zobrist;
 
         const RawEntry* re = raw_policy_cache().lookup(z);
-        if (!re || !re->has_value) {
+        if (!re || !re->has_wdl) {
             // keep it inflight; move on
             node->cache_misses += 1;
             ++i;
@@ -788,10 +796,12 @@ void MCTSTree::resolve_inflight() {
 
         node->cache_misses = 0;
 
-        const float value_white_pov = node->get_stm_pov() * re->value;
+        // STM flip: raw cache holds STM-POV; flip to white-POV for black nodes
+        WDL wdl_white_pov = re->wdl;
+        if (node->get_stm_pov() < 0.0f) std::swap(wdl_white_pov.win, wdl_white_pov.loss);
         std::vector<PriorEntry> built_priors = build_priors(node, re);
 
-        apply_result(node, built_priors, value_white_pov, /*cache=*/true);
+        apply_result(node, built_priors, wdl_white_pov, /*cache=*/true);
 
         node->is_inflight = false;
 
@@ -1033,27 +1043,6 @@ std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
     return rows;
 }
 
-float MCTSTree::visit_weighted_Q() const {
-    const MCTSNode* r = root_.get();
-    if (!r || r->ordered_children.empty()) return 0.0f;
-
-    double sum_w = 0.0;
-    double sum_wq = 0.0;
-    for (const auto& ce : r->ordered_children) {
-        const MCTSNode* ch = ce.child.get();
-        if (!ch) continue;
-
-        // load visits from the atomic counter
-        const int nvis = ch->visit_count();
-        if (nvis > 0) {
-            sum_w  += static_cast<double>(nvis);
-            sum_wq += static_cast<double>(ch->Q) * static_cast<double>(nvis);
-        }
-    }
-
-    return (sum_w > 0.0) ? static_cast<float>(sum_wq / sum_w) : 0.0f;
-}
-
 std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     const MCTSNode* r = root_.get();
     if (!r || r->ordered_children.empty()) return {"", nullptr};
@@ -1101,7 +1090,11 @@ std::vector<ChildDetail> MCTSTree::root_child_details() {
             cd.Qema = ch->Qema;
             cd.Qdelta_sign = ch->Qdelta_sign;
             cd.is_terminal = ch->is_terminal;
-            cd.value = ch->value;
+            cd.value = ch->value.win - ch->value.loss;
+            const float inv = (cd.N > 0) ? 1.0f / static_cast<float>(cd.N) : 0.0f;
+            cd.win  = ch->p_win  * inv;
+            cd.draw = ch->p_draw * inv;
+            cd.loss = ch->p_loss * inv;
             cd.visit_share = ch->visit_share;
         }
 
@@ -1354,7 +1347,7 @@ MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
     const MCTSNode* r = root_.get();
     if (!r || !r->is_expanded || !r->children_have_priors) return result;
 
-    result.value = r->value;
+    result.value = r->value.win - r->value.loss;
     result.raw_priors.reserve(r->ordered_children.size());
     for (const auto& ce : r->ordered_children)
         result.raw_priors.emplace_back(ce.uci, ce.raw_prior);

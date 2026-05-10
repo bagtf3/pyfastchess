@@ -62,6 +62,9 @@ struct ChildDetail {
     float U = 0.0f;
     bool  is_terminal = false;
     float value = 0.0f;
+    float win  = 0.0f;   // best child's normalised WDL (white-POV): p_win / N
+    float draw = 0.0f;
+    float loss = 0.0f;
     float visit_share = 0.0f;
     int   last_visit = 0;
 };
@@ -87,9 +90,12 @@ struct MCTSNode {
     // visits (atomic so selection can bump without lock)
     std::atomic<int> N{0}; 
 
-    // W Q Qmm are all white-POV
-    float W     = 0.0f;       // total value
-    float Q     = 0.0f;       // mean value
+    // WDL accumulators and derived Q — all white-POV
+    float p_win  = 0.0f;      // cumulative sum of win  probs backpropped through this node
+    float p_draw = 0.0f;      // cumulative sum of draw probs backpropped through this node
+    float p_loss = 0.0f;      // cumulative sum of loss probs backpropped through this node
+    float W      = 0.0f;      // cumulative vscaled (win-loss); terminals at full power, NN compressed
+    float Q      = 0.0f;      // W / N, recomputed each backprop
     float Qema  = 0.0f;       // EMA of Q
     float Qdelta_sign = 0.0f; // sign of last few deltas
     
@@ -208,7 +214,7 @@ struct MCTSNode {
 
     bool is_expanded = false;
     bool children_have_priors = false;
-    float value = 0.0f;     // cached leaf value when expanded (optional)
+    WDL value{};             // NN leaf WDL (white-POV); set on expansion, never updated by backprop
     int cache_misses = 0;
     uint32_t queued_epoch = 0;
 
@@ -234,8 +240,7 @@ struct MCTSNode {
         float c_puct,
         CollectCounts* cc,
         float sim_budget,
-        float pruning_factor,
-        bool use_u_attn = true);
+        float pruning_factor);
 
     // safe, convenient accessors for the atomic visit counter
     int visit_count() const noexcept {
@@ -268,11 +273,11 @@ public:
     // collects many leaves, stores in a pending queue, returns counts
     CollectResults collect_many_leaves(size_t n_new, size_t n_fastpath);
 
-    // Expand 'node' using PriorEntry vec and apply value (white POV).
+    // Expand 'node' using PriorEntry vec and apply WDL (white POV).
     void apply_result(
         MCTSNode* node,
         const std::vector<PriorEntry>& move_priors,
-        float value_white_pov, bool cache=true);
+        WDL wdl_white_pov, bool cache=true);
     
     // Queue a leaf as pending
     uint64_t queue_pending(MCTSNode* n);
@@ -291,9 +296,6 @@ public:
     std::vector<WorkItem> pending_nodes_;
     std::vector<WorkItem> inflight_nodes_;
     
-    // Visit-weighted average Q across root children
-    float visit_weighted_Q() const;
-
     // Best move to play: argmax visits; returns (uci, node*)
     std::pair<std::string, const MCTSNode*> best() const;
 
@@ -315,8 +317,8 @@ public:
     void set_reuse_tree(bool v);
     bool reuse_tree() const;
 
-    void set_use_u_attn(bool v);
-    bool use_u_attn() const;
+    void set_vscale(float v);
+    float vscale() const;
 
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -372,13 +374,14 @@ private:
     // Whether to reuse existing subtree on advance_root
     bool reuse_tree_ = true;
 
-    // Whether to apply Qdelta_sign attenuation to U in PUCT scoring
-    bool use_u_attn_ = true;
+    // Value scale: multiplied into (win-loss) during backprop so Q stays in [-vscale, vscale].
+    // Equivalent to the old tanh*vscale. finalize_game_data divides Q by vscale to unscale.
+    float vscale_ = 1.0f;
     
-    // Backprop of value along path (adds v to W and recomputes Q).
+    // Backprop WDL along path (white-POV). Updates p_win/p_draw/p_loss and recomputes Q.
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
-    void back_up_along_path(MCTSNode* leaf, float v);           // locks internally
-    void back_up_along_path_nolock(MCTSNode* leaf, float v);    // assumes caller holds tree_mutex_
+    void back_up_along_path(MCTSNode* leaf, WDL wdl);           // locks internally
+    void back_up_along_path_nolock(MCTSNode* leaf, WDL wdl);    // assumes caller holds tree_mutex_
 
     void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);

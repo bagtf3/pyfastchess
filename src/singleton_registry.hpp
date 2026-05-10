@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cache.hpp"
+#include <array>
 #include <memory>
 #include <cstdint>
 #include <deque>
@@ -24,7 +25,7 @@
 //
 // raw_policy_cache()  RawPolicyCache, 48k capacity, deque eviction.
 //                     Mailbox for NN inference results: Python writes raw outputs
-//                     (4288-float policy + scalar value) here after each batch;
+//                     (4288-float policy + WDL probs STM-POV) here after each batch;
 //                     C++ drains it during resolve_inflight / collect_one_leaf_tagged.
 //                     Entries are consumed once processed and not retained.
 //
@@ -36,16 +37,16 @@ struct RawEntry {
     std::vector<float> p_policy;
     bool has_policy = false;
 
-    // network scalar value and flag indicating if present
-    float value = 0.0f;
-    bool has_value = false;
+    // WDL probabilities (softmaxed, STM-POV from Python; flipped to white-POV before priors cache)
+    WDL wdl;
+    bool has_wdl = false;
 
     RawEntry() = default;
 
     // ctor for full policy vector
-    RawEntry(float v, std::vector<float>&& policy_vec)
+    RawEntry(WDL w, std::vector<float>&& policy_vec)
       : p_policy(std::move(policy_vec)), has_policy(true),
-        value(v), has_value(true) {}
+        wdl(w), has_wdl(true) {}
 };
 
 
@@ -69,7 +70,7 @@ class RawPolicyCache {
 public:
     explicit RawPolicyCache(size_t capacity = 72000);
 
-    void bulk_insert(std::vector<std::tuple<uint64_t, float, std::vector<float>>>&& batch);
+    void bulk_insert(std::vector<std::tuple<uint64_t, WDL, std::vector<float>>>&& batch);
 
     const RawEntry* lookup(uint64_t key) const;
     void erase(uint64_t key);
