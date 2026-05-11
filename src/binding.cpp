@@ -416,6 +416,7 @@ PYBIND11_MODULE(_core, m) {
                auto res = t.emulate_nn_result();
                py::dict out;
                out["value"] = res.value;
+               out["wdl"] = py::make_tuple(res.wdl.win, res.wdl.draw, res.wdl.loss);
                py::list priors;
                for (const auto& p : res.raw_priors)
                     priors.append(py::make_tuple(p.first, p.second));
@@ -424,7 +425,7 @@ PYBIND11_MODULE(_core, m) {
                     ? py::cast(res.mass_on_legal)
                     : py::none();
                return out;
-          }, "Returns {value, raw_priors [(uci, prob),...], mass_on_legal or None}.")
+          }, "Returns {value, wdl (win,draw,loss), raw_priors [(uci, prob),...], mass_on_legal or None}.")
 
           .def("resolve_inflight", [](MCTSTree &t) {
                t.resolve_inflight();

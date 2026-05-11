@@ -1348,6 +1348,7 @@ MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
     if (!r || !r->is_expanded || !r->children_have_priors) return result;
 
     result.value = r->value.win - r->value.loss;
+    result.wdl   = r->value;
     result.raw_priors.reserve(r->ordered_children.size());
     for (const auto& ce : r->ordered_children)
         result.raw_priors.emplace_back(ce.uci, ce.raw_prior);

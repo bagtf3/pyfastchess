@@ -345,6 +345,7 @@ public:
 
     struct NNResult {
         float value = 0.0f;
+        WDL wdl{};
         std::vector<std::pair<std::string, float>> raw_priors;
         float mass_on_legal = -1.0f;  // -1 if unavailable (raw cache evicted)
     };
