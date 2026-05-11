@@ -73,7 +73,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 
         auto up = std::make_unique<MCTSNode>(childb, this, ce.uci);
         up->zobrist = childb.hash();
-        up->Q = this->Q;
+        up->Q     = this->Q;
+        up->Q_eff = this->Q_eff;
 
         ch = up.get();
         ce.child = std::move(up);
@@ -112,7 +113,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     const float parentN = static_cast<float>(parent_vis);
     const float u_scale = c_puct * std::sqrt(parentN);
     const float pov_sign = this->get_stm_pov();
-    const float parent_q = pov_sign * this->Q;
+    const float parent_q = pov_sign * this->Q_eff;
 
     bool do_prune = (pruning_factor > 0.0f) && (cap_sz == n_child);
 
@@ -173,7 +174,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         ++cc->count_puct;
 
         const float prior = ce.prior;
-        const float q = ch ? (pov_sign * ch->Q) : parent_q;
+        const float q = ch ? (pov_sign * ch->Q_eff) : parent_q;
         const float u = u_scale * prior / (1.0f + n);
         float score = q + u;
 
@@ -517,6 +518,18 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
         const int nv = n->visit_count();
         n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
 
+        if (n->is_terminal) {
+            n->Q_eff = n->Q;
+        } else if (nv > 0) {
+            const float pd = n->p_draw / static_cast<float>(nv);
+            if (n->Q > contempt_flip_q_)
+                n->Q_eff = n->Q - contempt_fight_c_ * pd;
+            else
+                n->Q_eff = n->Q + contempt_save_c_ * pd;
+        } else {
+            n->Q_eff = n->Q;
+        }
+
         MCTSNode* p = n->parent;
         if (!p) continue;  // root: skip parent-dependent updates
 
@@ -710,6 +723,16 @@ bool MCTSTree::reuse_tree() const { return reuse_tree_; }
 
 void MCTSTree::set_vscale(float v) { vscale_ = v; }
 float MCTSTree::vscale() const { return vscale_; }
+
+void MCTSTree::set_contempt(float flip_q, float fight_c, float save_c) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    contempt_flip_q_  = flip_q;
+    contempt_fight_c_ = fight_c;
+    contempt_save_c_  = save_c;
+}
+float MCTSTree::contempt_flip_q() const { return contempt_flip_q_; }
+float MCTSTree::contempt_fight_c() const { return contempt_fight_c_; }
+float MCTSTree::contempt_save_c()  const { return contempt_save_c_; }
 
 
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {

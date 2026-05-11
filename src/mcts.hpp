@@ -96,6 +96,7 @@ struct MCTSNode {
     float p_loss = 0.0f;      // cumulative sum of loss probs backpropped through this node
     float W      = 0.0f;      // cumulative vscaled (win-loss); terminals at full power, NN compressed
     float Q      = 0.0f;      // W / N, recomputed each backprop
+    float Q_eff  = 0.0f;      // Q with contempt applied (white-POV); used in PUCT selection
     float Qema  = 0.0f;       // EMA of Q
     float Qdelta_sign = 0.0f; // sign of last few deltas
     
@@ -320,6 +321,11 @@ public:
     void set_vscale(float v);
     float vscale() const;
 
+    void set_contempt(float flip_q, float fight_c, float save_c);
+    float contempt_flip_q() const;
+    float contempt_fight_c() const;
+    float contempt_save_c() const;
+
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
@@ -376,8 +382,12 @@ private:
     bool reuse_tree_ = true;
 
     // Value scale: multiplied into (win-loss) during backprop so Q stays in [-vscale, vscale].
-    // Equivalent to the old tanh*vscale. finalize_game_data divides Q by vscale to unscale.
     float vscale_ = 1.0f;
+
+    // Contempt: Q_eff = Q ± contempt_*_c * p_draw, applied per-node after Q update.
+    float contempt_flip_q_ = 0.0f;   // threshold (white-POV Q); above: fight, below: save
+    float contempt_fight_c_ = 0.0f;  // draw penalty when Q > flip_q  (0 = disabled)
+    float contempt_save_c_  = 0.0f;  // draw bonus  when Q < flip_q  (0 = disabled)
     
     // Backprop WDL along path (white-POV). Updates p_win/p_draw/p_loss and recomputes Q.
     // Visit increments happen during selection-time; backprop DOES NOT modify N.

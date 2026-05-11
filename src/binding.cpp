@@ -264,6 +264,7 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("p_loss", [](const MCTSNode& n){ return n.p_loss; })
           .def_property_readonly("W",      [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",      [](const MCTSNode& n){ return n.Q; })
+          .def_property_readonly("Q_eff",  [](const MCTSNode& n){ return n.Q_eff; })
           .def_property_readonly("uci",    [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
@@ -471,6 +472,13 @@ PYBIND11_MODULE(_core, m) {
           .def("set_vscale", &MCTSTree::set_vscale, py::arg("v"),
                "Set value scale: multiplied into (win-loss) during backprop.")
           .def("vscale", &MCTSTree::vscale)
+
+          .def("set_contempt", &MCTSTree::set_contempt,
+               py::arg("flip_q"), py::arg("fight_c"), py::arg("save_c"),
+               "Set contempt params: Q_eff = Q - fight_c*p_draw if Q>flip_q, else Q + save_c*p_draw.")
+          .def("contempt_flip_q",  &MCTSTree::contempt_flip_q)
+          .def("contempt_fight_c", &MCTSTree::contempt_fight_c)
+          .def("contempt_save_c",  &MCTSTree::contempt_save_c)
 
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
