@@ -100,17 +100,6 @@ struct MCTSNode {
     float Qema  = 0.0f;       // EMA of Q
     float Qdelta_sign = 0.0f; // sign of last few deltas
     
-    static constexpr float qdelta_span = 100.0f;
-    static constexpr float qdelta_a = 2.0f / (qdelta_span + 1.0f);
-    static constexpr float qdelta_d = 1.0f - qdelta_a;
-
-    static constexpr float qema_span = 40.0f;
-    static constexpr float qema_a = 2.0f / (qema_span + 1.0f);
-    static constexpr float qema_d = 1.0f - qema_a;
-
-    // probably expecting these to be ints
-    //int Qdelta_span = static_cast<int>(qdelta_span);
-    //int Qema_span = static_cast<int>(qema_span);
 
     // visit share tracking
     int last_visit = 0;
@@ -241,7 +230,8 @@ struct MCTSNode {
         float c_puct,
         CollectCounts* cc,
         float sim_budget,
-        float pruning_factor);
+        float pruning_factor,
+        float fpu_reduction);
 
     // safe, convenient accessors for the atomic visit counter
     int visit_count() const noexcept {
@@ -329,7 +319,7 @@ public:
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
-    std::vector<PVItem> principal_variation(int max_len = 24) const;
+    std::vector<PVItem> principal_variation(int max_len = 24, const std::string& start_move = "") const;
 
     std::pair<
         std::optional<std::unordered_map<std::string, float>>,
@@ -348,6 +338,14 @@ public:
 
     void set_prior_clip_max(float v);
     float prior_clip_max() const;
+
+    void set_fpu_reduction(float v);
+    float fpu_reduction() const;
+
+    void set_qema_span(float span);
+    float qema_span() const;
+    void set_qdelta_span(float span);
+    float qdelta_span() const;
 
     struct NNResult {
         float value = 0.0f;
@@ -372,6 +370,7 @@ private:
     float pruning_factor_ = 1.2f;
     float uniform_eps_ = 0.05f;
     float prior_clip_max_ = 0.65f;
+    float fpu_reduction_ = 0.1f;
 
     // Automatic Dirichlet noise params (eps=0 disables)
     float dirichlet_eps_ = 0.0f;
@@ -388,6 +387,12 @@ private:
     float contempt_flip_q_ = 0.0f;   // threshold (white-POV Q); above: fight, below: save
     float contempt_fight_c_ = 0.0f;  // draw penalty when Q > flip_q  (0 = disabled)
     float contempt_save_c_  = 0.0f;  // draw bonus  when Q < flip_q  (0 = disabled)
+
+    // Qema / Qdelta_sign EMA span params (span = N → alpha = 2/(N+1))
+    float qema_a_    = 2.0f / 41.0f;
+    float qema_d_    = 1.0f - 2.0f / 41.0f;
+    float qdelta_a_  = 2.0f / 101.0f;
+    float qdelta_d_  = 1.0f - 2.0f / 101.0f;
     
     // Backprop WDL along path (white-POV). Updates p_win/p_draw/p_loss and recomputes Q.
     // Visit increments happen during selection-time; backprop DOES NOT modify N.

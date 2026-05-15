@@ -58,7 +58,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     float c_puct,
     CollectCounts* cc,
     float sim_budget,
-    float pruning_factor)
+    float pruning_factor,
+    float fpu_reduction)
 {
     if (ordered_children.empty()) return nullptr;
 
@@ -73,8 +74,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 
         auto up = std::make_unique<MCTSNode>(childb, this, ce.uci);
         up->zobrist = childb.hash();
+        const float fpu_adj = fpu_reduction * this->get_stm_pov();
         up->Q     = this->Q;
-        up->Q_eff = this->Q_eff;
+        up->Q_eff = this->Q_eff - fpu_adj;
 
         ch = up.get();
         ce.child = std::move(up);
@@ -174,7 +176,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         ++cc->count_puct;
 
         const float prior = ce.prior;
-        const float q = ch ? (pov_sign * ch->Q_eff) : parent_q;
+        const float q = ch ? (pov_sign * ch->Q_eff) : (parent_q - fpu_reduction);
         const float u = u_scale * prior / (1.0f + n);
         float score = q + u;
 
@@ -261,7 +263,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
 
         // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
         MCTSNode* child = node->select_child_lazy_ptr(
-            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_);
+            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_, this->fpu_reduction_);
 
         if (!child) break;
 
@@ -312,6 +314,11 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         // expand with cached priors (placeholders; lazy children)
         // expand_with_priors should set children_have_priors = true
         expand_with_priors(node, pe->priors);
+
+        if (node == root_.get() && dirichlet_eps_ > 0.0f && !noise_added_) {
+            apply_root_noise_nolock(dirichlet_eps_, dirichlet_alpha_);
+            noise_added_ = true;
+        }
 
         // N was already incremented during descent; just backprop the cached value.
         node->value = pe->wdl;
@@ -537,9 +544,9 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
 
         // sign of (v - Q_pre) relative to STM POV
         const float s = ((v_scalar > q_pre) - (v_scalar < q_pre)) * pov;
-        n->Qdelta_sign = n->Qdelta_sign * MCTSNode::qdelta_d + MCTSNode::qdelta_a * s;
+        n->Qdelta_sign = n->Qdelta_sign * qdelta_d_ + qdelta_a_ * s;
 
-        n->Qema = n->Qema * MCTSNode::qema_d + MCTSNode::qema_a * v_scalar;
+        n->Qema = n->Qema * qema_d_ + qema_a_ * v_scalar;
 
         if (is_terminal) {
             const bool stm_wins = (pov * v_scalar > 0.0f);
@@ -1163,7 +1170,7 @@ std::pair<float,int> MCTSTree::depth_stats() const {
     return {avg, dmax};
 }
 
-std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
+std::vector<PVItem> MCTSTree::principal_variation(int max_len, const std::string& start_move) const {
     std::vector<PVItem> pv;
     const MCTSNode* node = root_.get();
     if (!node || max_len <= 0) return pv;
@@ -1173,29 +1180,44 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len) const {
     for (int depth = 0; depth < max_len; ++depth) {
         if (node->ordered_children.empty()) break;
 
-        // pick child with max visits
         const std::string* best_mv = nullptr;
         const MCTSNode*    best_ch = nullptr;
         int best_N = -1;
         float best_prior = 0.0f;
 
-        for (const auto& ce : node->ordered_children) {
-            const std::string& mv = ce.uci;
-            const MCTSNode* ch   = ce.child.get();
-            if (!ch) continue; // skip placeholder children
-            const int N = ch->visit_count();
-            if (N > best_N) {
-                best_N  = N;
-                best_mv = &mv;
-                best_ch = ch;
-                best_prior = ce.prior;
+        // at depth 0 with a requested start move, pin to that child if visited
+        if (depth == 0 && !start_move.empty()) {
+            for (const auto& ce : node->ordered_children) {
+                if (ce.uci != start_move) continue;
+                const MCTSNode* ch = ce.child.get();
+                if (!ch) break;
+                const int N = ch->visit_count();
+                if (N > 0) {
+                    best_mv    = &ce.uci;
+                    best_ch    = ch;
+                    best_N     = N;
+                    best_prior = ce.prior;
+                }
+                break;
+            }
+        } else {
+            for (const auto& ce : node->ordered_children) {
+                const MCTSNode* ch = ce.child.get();
+                if (!ch) continue;
+                const int N = ch->visit_count();
+                if (N > best_N) {
+                    best_N     = N;
+                    best_mv    = &ce.uci;
+                    best_ch    = ch;
+                    best_prior = ce.prior;
+                }
             }
         }
-        if (!best_mv || best_N <= 0 || !best_ch) break; // stop if no visited child
+
+        if (!best_mv || best_N <= 0 || !best_ch) break;
 
         pv.push_back(PVItem{*best_mv, best_N, best_prior, best_ch->Q});
-
-        node = best_ch; // descend
+        node = best_ch;
     }
     return pv;
 }
@@ -1362,6 +1384,38 @@ void MCTSTree::set_prior_clip_max(float v) {
 float MCTSTree::prior_clip_max() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     return prior_clip_max_;
+}
+
+void MCTSTree::set_fpu_reduction(float v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    fpu_reduction_ = v;
+}
+
+float MCTSTree::fpu_reduction() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return fpu_reduction_;
+}
+
+void MCTSTree::set_qema_span(float span) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    qema_a_ = 2.0f / (span + 1.0f);
+    qema_d_ = 1.0f - qema_a_;
+}
+
+float MCTSTree::qema_span() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return (2.0f / qema_a_) - 1.0f;
+}
+
+void MCTSTree::set_qdelta_span(float span) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    qdelta_a_ = 2.0f / (span + 1.0f);
+    qdelta_d_ = 1.0f - qdelta_a_;
+}
+
+float MCTSTree::qdelta_span() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return (2.0f / qdelta_a_) - 1.0f;
 }
 
 MCTSTree::NNResult MCTSTree::emulate_nn_result() const {

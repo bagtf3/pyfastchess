@@ -336,6 +336,13 @@ PYBIND11_MODULE(_core, m) {
           .def("set_prior_clip_max", &MCTSTree::set_prior_clip_max, py::arg("prior_clip_max"))
           .def("prior_clip_max", &MCTSTree::prior_clip_max)
 
+          .def("set_fpu_reduction", &MCTSTree::set_fpu_reduction, py::arg("fpu_reduction"))
+          .def("fpu_reduction", &MCTSTree::fpu_reduction)
+          .def("set_qema_span", &MCTSTree::set_qema_span, py::arg("span"))
+          .def("qema_span", &MCTSTree::qema_span)
+          .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
+          .def("qdelta_span", &MCTSTree::qdelta_span)
+
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
@@ -451,7 +458,8 @@ PYBIND11_MODULE(_core, m) {
           })
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
-          .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
+          .def("principal_variation", &MCTSTree::principal_variation,
+               py::arg("max_len") = 24, py::arg("start_move") = "")
           .def("robust_selection_criteria",
                &MCTSTree::robust_selection_criteria,
                py::arg("top_n") = 5,
