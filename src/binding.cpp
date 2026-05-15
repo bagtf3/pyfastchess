@@ -224,85 +224,21 @@ PYBIND11_MODULE(_core, m) {
           },
           py::arg("board"));
 
-     // Create the singleton with default PriorConfig (defaults from mcts.hpp).
-     m.def("create_prior_engine", []() {
-          g_prior_engine = std::make_shared<PriorEngine>(PriorConfig());
-          g_prior_engine_raw.store(g_prior_engine.get(), std::memory_order_release);
-     }, "Create a PriorEngine singleton with default settings.");
-
-     // Configure (partial) from a Python dict. Missing keys leave previous/default values unchanged.
-     m.def("configure_prior_engine", [](py::dict d) {
-          PriorConfig cfg;
-          if (g_prior_engine) cfg = g_prior_engine->get_config();
-          if (d.contains("use_prior_boosts")) cfg.use_prior_boosts = d["use_prior_boosts"].cast<bool>();
-          if (d.contains("anytime_uniform_mix")) cfg.anytime_uniform_mix = d["anytime_uniform_mix"].cast<float>();
-          if (d.contains("anytime_gives_check")) cfg.anytime_gives_check = d["anytime_gives_check"].cast<float>();
-          if (d.contains("anytime_repetition_sub")) cfg.anytime_repetition_sub = d["anytime_repetition_sub"].cast<float>();
-          if (d.contains("endgame_uniform_mix")) cfg.endgame_uniform_mix = d["endgame_uniform_mix"].cast<float>();
-          if (d.contains("endgame_pawn_push")) cfg.endgame_pawn_push = d["endgame_pawn_push"].cast<float>();
-          if (d.contains("endgame_capture")) cfg.endgame_capture = d["endgame_capture"].cast<float>();
-          if (d.contains("endgame_repetition_sub")) cfg.endgame_repetition_sub = d["endgame_repetition_sub"].cast<float>();
-          if (d.contains("clip_enabled")) cfg.clip_enabled = d["clip_enabled"].cast<bool>();
-          if (d.contains("clip_min")) cfg.clip_min = d["clip_min"].cast<float>();
-          if (d.contains("clip_max")) cfg.clip_max = d["clip_max"].cast<float>();
-
-          g_prior_engine = std::make_shared<PriorEngine>(cfg);
-          g_prior_engine_raw.store(g_prior_engine.get(), std::memory_order_release);
-     }, "Configure or partially update the PriorEngine singleton from a dict.");
-
-     // Build priors using the configured singleton. Returns list[(uci, prob), ...]
-     m.def("prior_engine_build",
-               [](const backend::Board& board,
-               const std::vector<std::string>& legal,
-               py::array_t<float> p_from,
-               py::array_t<float> p_to,
-               py::array_t<float> p_piece,
-               py::array_t<float> p_promo) {
-                    if (!g_prior_engine) throw std::runtime_error("PriorEngine not configured");
-                    auto vf = p_from.unchecked<1>();
-                    auto vt = p_to.unchecked<1>();
-                    auto vp = p_piece.unchecked<1>();
-                    auto vr = p_promo.unchecked<1>();
-                    FloatView ff{vf.data(0), (size_t)vf.shape(0)};
-                    FloatView ft{vt.data(0), (size_t)vt.shape(0)};
-                    FloatView fp{vp.data(0), (size_t)vp.shape(0)};
-                    FloatView fr{vr.data(0), (size_t)vr.shape(0)};
-                    auto pri = g_prior_engine->build(board, legal, ff, ft, fp, fr);
-                    py::list out;
-                    for (const auto &pp : pri) out.append(py::make_tuple(pp.first, pp.second));
-                    return out;
-               },
-               py::arg("board"), py::arg("legal"),
-               py::arg("p_from"), py::arg("p_to"),
-               py::arg("p_piece"), py::arg("p_promo"),
-               "Build priors using the configured PriorEngine singleton.");
-
-     // Expose current PriorEngine configuration as a Python dict
-     m.def("prior_engine_details", []() {
-          py::dict d;
-          if (!g_prior_engine) return d;
-          PriorConfig cfg = g_prior_engine->get_config();
-          d["use_prior_boosts"] = cfg.use_prior_boosts;
-          d["anytime_uniform_mix"] = cfg.anytime_uniform_mix;
-          d["anytime_gives_check"] = cfg.anytime_gives_check;
-          d["anytime_repetition_sub"] = cfg.anytime_repetition_sub;
-          d["endgame_uniform_mix"] = cfg.endgame_uniform_mix;
-          d["endgame_pawn_push"] = cfg.endgame_pawn_push;
-          d["endgame_capture"] = cfg.endgame_capture;
-          d["endgame_repetition_sub"] = cfg.endgame_repetition_sub;
-          d["clip_enabled"] = cfg.clip_enabled;
-          d["clip_min"] = cfg.clip_min;
-          d["clip_max"] = cfg.clip_max;
-          return d;
-     }, "Return the current PriorEngine settings as a dict.");
 
      py::class_<ChildDetail>(m, "ChildDetail")
           .def_readonly("uci",            &ChildDetail::uci)
           .def_readonly("N",              &ChildDetail::N)
           .def_readonly("Q",              &ChildDetail::Q)
+          .def_readonly("Qema",           &ChildDetail::Qema)
+          .def_readonly("Qdelta_sign",    &ChildDetail::Qdelta_sign)
           .def_readonly("prior",          &ChildDetail::prior)
           .def_readonly("is_terminal",    &ChildDetail::is_terminal)
-          .def_readonly("value",          &ChildDetail::value);
+          .def_readonly("value",          &ChildDetail::value)
+          .def_readonly("win",            &ChildDetail::win)
+          .def_readonly("draw",           &ChildDetail::draw)
+          .def_readonly("loss",           &ChildDetail::loss)
+          .def_readonly("visit_share",    &ChildDetail::visit_share)
+          .def_readonly("last_visit",     &ChildDetail::last_visit);
      
      py::class_<PVItem>(m, "PVItem")
           .def_readonly("uci", &PVItem::uci)
@@ -322,13 +258,19 @@ PYBIND11_MODULE(_core, m) {
                return oss.str();
           })
           // return int visits (not the atomic object)
-          .def_property_readonly("N", [](const MCTSNode &n) { return n.visit_count(); })
-          .def_property_readonly("W",    [](const MCTSNode& n){ return n.W; })
-          .def_property_readonly("Q",    [](const MCTSNode& n){ return n.Q; })
-          .def_property_readonly("uci",  [](const MCTSNode& n){ return n.uci; })
+          .def_property_readonly("N",      [](const MCTSNode &n) { return n.visit_count(); })
+          .def_property_readonly("p_win",  [](const MCTSNode& n){ return n.p_win; })
+          .def_property_readonly("p_draw", [](const MCTSNode& n){ return n.p_draw; })
+          .def_property_readonly("p_loss", [](const MCTSNode& n){ return n.p_loss; })
+          .def_property_readonly("W",      [](const MCTSNode& n){ return n.W; })
+          .def_property_readonly("Q",      [](const MCTSNode& n){ return n.Q; })
+          .def_property_readonly("Q_eff",  [](const MCTSNode& n){ return n.Q_eff; })
+          .def_property_readonly("uci",    [](const MCTSNode& n){ return n.uci; })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
-          .def_property_readonly("value",         [](const MCTSNode& n){ return n.value; })
+          .def_property_readonly("value", [](const MCTSNode& n){
+               return py::make_tuple(n.value.win, n.value.draw, n.value.loss);
+          })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
           .def_property_readonly("zobrist", [](const MCTSNode& n){ return n.zobrist; })
@@ -370,20 +312,36 @@ PYBIND11_MODULE(_core, m) {
           .def(py::init([](const backend::Board& board,
                          float c_puct,
                          float sim_budget,
-                         float pruning_factor
+                         float pruning_factor,
+                         float uniform_eps,
+                         float prior_clip_max
                     ) {
-               return new MCTSTree(board, c_puct, sim_budget, pruning_factor);
+               return new MCTSTree(board, c_puct, sim_budget, pruning_factor,
+                                   uniform_eps, prior_clip_max);
           }),
                py::arg("board"),
                py::arg("c_puct") = 1.5f,
                py::arg("sim_budget") = 800.0f,
                py::arg("pruning_factor") = 1.2f,
+               py::arg("uniform_eps") = 0.05f,
+               py::arg("prior_clip_max") = 0.65f,
                "Create MCTSTree in C++")
-          
+
           .def("set_cpuct", &MCTSTree::set_cpuct, py::arg("c_puct"))
           .def("cpuct", &MCTSTree::cpuct)
           .def("set_sim_budget", &MCTSTree::set_sim_budget, py::arg("sim_budget"))
           .def("sim_budget", &MCTSTree::sim_budget)
+          .def("set_uniform_eps", &MCTSTree::set_uniform_eps, py::arg("uniform_eps"))
+          .def("uniform_eps", &MCTSTree::uniform_eps)
+          .def("set_prior_clip_max", &MCTSTree::set_prior_clip_max, py::arg("prior_clip_max"))
+          .def("prior_clip_max", &MCTSTree::prior_clip_max)
+
+          .def("set_fpu_reduction", &MCTSTree::set_fpu_reduction, py::arg("fpu_reduction"))
+          .def("fpu_reduction", &MCTSTree::fpu_reduction)
+          .def("set_qema_span", &MCTSTree::set_qema_span, py::arg("span"))
+          .def("qema_span", &MCTSTree::qema_span)
+          .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
+          .def("qdelta_span", &MCTSTree::qdelta_span)
 
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
@@ -394,7 +352,8 @@ PYBIND11_MODULE(_core, m) {
           
           .def("pending_encoded", [](MCTSTree& t, int nplanes) {
                py::list out;
-               for (MCTSNode* n : t.pending_nodes_) {
+               std::vector<MCTSNode*> nodes = t.pop_pending_to_inflight();
+               for (MCTSNode* n : nodes) {
                     if (!n) continue;
                     uint64_t z   = n->zobrist;
                     auto planes  = ::stacked_planes_bitboards(n->board, nplanes);
@@ -405,51 +364,87 @@ PYBIND11_MODULE(_core, m) {
 
           .def("pending_encoded_64_tokens", [](MCTSTree& t) {
                py::list out;
-               for (MCTSNode* n : t.pending_nodes_) {
+               std::vector<MCTSNode*> nodes = t.pop_pending_to_inflight();
+               for (MCTSNode* n : nodes) {
                     if (!n) continue;
 
                     uint64_t z = n->zobrist;
+                    if (z == 0) {
+                        z = n->board.hash();
+                        n->zobrist = z;
+                    }
 
                     // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
                     py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
 
                     // produce LegalMaskandMap and attach it to node (move -> heap)
                     backend::LegalMaskandMap lm = n->board.legal_move_mask();
-                    auto lm_sp = std::make_shared<backend::LegalMaskandMap>(std::move(lm));
-                    n->legal_mask_map = std::static_pointer_cast<const backend::LegalMaskandMap>(lm_sp);
+                    t.set_legal_mask_map(
+                        n,
+                        std::make_unique<backend::LegalMaskandMap>(std::move(lm)));
 
-                    // convert mask -> numpy array (copy)
-                    const size_t mask_len = lm_sp->mask.size(); // should be 64 * MOVE_TO_WIDTH (4288)
-                    py::array_t<uint8_t> mask({ static_cast<py::ssize_t>(mask_len) });
-                    std::memcpy(mask.mutable_data(), lm_sp->mask.data(), mask_len * sizeof(uint8_t));
-
-                    // append (zobrist, tokens64, mask)
-                    out.append(py::make_tuple(z, tokens, mask));
+                    // append (zobrist, tokens64)
+                    out.append(py::make_tuple(z, tokens));
                }
                return out;
-               }, "Encode pending leaves as [(zobrist, tokens(64,), legal_mask), ...].\n"
-               "tokens: (64,) int16 (STM-made-white canonical token ids). mask: (4288,) uint8 legal-move mask.")
+               }, "Encode pending leaves as [(zobrist, tokens(64,)), ...].\n"
+               "tokens: (64,) int16 (STM-made-white canonical token ids). LegalMaskandMap attached to node internally.")
+          
+          .def("count_pending", [](const MCTSTree& t) {
+               return t.pending_nodes_.size();
+          }, "Number of nodes currently in pending queue.")
+
+          .def("count_inflight", [](const MCTSTree& t) {
+               return t.inflight_nodes_.size();
+          }, "Number of nodes currently in inflight queue.")
+
+          .def("count_unresolved", [](const MCTSTree& t) {
+               return t.pending_nodes_.size() + t.inflight_nodes_.size();
+          }, "Total unresolved nodes (pending + inflight).")
 
           .def("apply_result",
                [](MCTSTree& t, MCTSNode* node,
                     const std::vector<std::pair<std::string, float>>& move_priors,
-                    float value_white_pov, bool cache = true) {
-                    t.apply_result(node, move_priors, value_white_pov, cache);
+                    py::tuple wdl_tuple, bool cache = true) {
+                    if (wdl_tuple.size() != 3)
+                        throw std::runtime_error("apply_result: wdl must be a 3-tuple (win, draw, loss)");
+                    WDL wdl;
+                    wdl.win  = wdl_tuple[0].cast<float>();
+                    wdl.draw = wdl_tuple[1].cast<float>();
+                    wdl.loss = wdl_tuple[2].cast<float>();
+                    std::vector<PriorEntry> entries;
+                    entries.reserve(move_priors.size());
+                    for (const auto& p : move_priors)
+                        entries.push_back({p.first, p.second, 0.0f});
+                    t.apply_result(node, entries, wdl, cache);
                },
-               py::arg("node"), py::arg("move_priors"), py::arg("value_white_pov"), py::arg("cache") = true)
+               py::arg("node"), py::arg("move_priors"), py::arg("wdl_white_pov"), py::arg("cache") = true)
 
-          .def("resolve_pending", [](MCTSTree &t) {
-               t.resolve_pending();
-          }, "Resolve pending leaves by consuming raw cache (build priors + apply).")
+          .def("emulate_nn_result", [](const MCTSTree& t) {
+               auto res = t.emulate_nn_result();
+               py::dict out;
+               out["value"] = res.value;
+               out["wdl"] = py::make_tuple(res.wdl.win, res.wdl.draw, res.wdl.loss);
+               py::list priors;
+               for (const auto& p : res.raw_priors)
+                    priors.append(py::make_tuple(p.first, p.second));
+               out["raw_priors"] = priors;
+               out["mass_on_legal"] = (res.mass_on_legal >= 0.0f)
+                    ? py::cast(res.mass_on_legal)
+                    : py::none();
+               return out;
+          }, "Returns {value, wdl (win,draw,loss), raw_priors [(uci, prob),...], mass_on_legal or None}.")
+
+          .def("resolve_inflight", [](MCTSTree &t) {
+               t.resolve_inflight();
+          }, "Resolve pending (inflight) leaves by consuming raw cache (build priors + apply).")
 
           .def("add_root_dirichlet_noise", &MCTSTree::add_root_dirichlet_noise,
                py::arg("eps") = 0.25f, py::arg("alpha") = 0.1f)
           
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
-          .def("clear_pending", &MCTSTree::clear_pending, "Clear pending nodes queue (thread-safe).")
 
           .def("root_child_visits", &MCTSTree::root_child_visits)
-          .def("visit_weighted_Q", &MCTSTree::visit_weighted_Q)
           .def("root", [](MCTSTree& t){
                return t.root(); }, py::return_value_policy::reference_internal)
 
@@ -463,46 +458,53 @@ PYBIND11_MODULE(_core, m) {
           })
           .def("root_child_details", &MCTSTree::root_child_details)
           .def("depth_stats",        &MCTSTree::depth_stats)
-          .def("principal_variation", &MCTSTree::principal_variation, py::arg("max_len") = 24)
+          .def("principal_variation", &MCTSTree::principal_variation,
+               py::arg("max_len") = 24, py::arg("start_move") = "")
+          .def("robust_selection_criteria",
+               &MCTSTree::robust_selection_criteria,
+               py::arg("top_n") = 5,
+               py::arg("min_visits") = 100)
           .def("advance_root", &MCTSTree::advance_root, py::arg("move_uci"),
                py::call_guard<py::gil_scoped_acquire>())
+
+          .def("set_dirichlet", &MCTSTree::set_dirichlet,
+               py::arg("eps"), py::arg("alpha"),
+               "Set automatic Dirichlet noise params (eps=0 disables).")
+          .def("dirichlet_eps", &MCTSTree::dirichlet_eps)
+          .def("dirichlet_alpha", &MCTSTree::dirichlet_alpha)
+          .def("set_reuse_tree", &MCTSTree::set_reuse_tree, py::arg("reuse"),
+               "Enable or disable tree reuse on advance_root.")
+          .def("reuse_tree", &MCTSTree::reuse_tree,
+               "Return whether tree reuse is enabled.")
+
+          .def("set_vscale", &MCTSTree::set_vscale, py::arg("v"),
+               "Set value scale: multiplied into (win-loss) during backprop.")
+          .def("vscale", &MCTSTree::vscale)
+
+          .def("set_contempt", &MCTSTree::set_contempt,
+               py::arg("flip_q"), py::arg("fight_c"), py::arg("save_c"),
+               "Set contempt params: Q_eff = Q - fight_c*p_draw if Q>flip_q, else Q + save_c*p_draw.")
+          .def("contempt_flip_q",  &MCTSTree::contempt_flip_q)
+          .def("contempt_fight_c", &MCTSTree::contempt_fight_c)
+          .def("contempt_save_c",  &MCTSTree::contempt_save_c)
+
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
-          // free helpers
-          // already-scored per-legal version
-          m.def("priors_from_heads",
-               py::overload_cast<
-                    const std::vector<std::string>&,
-                    const std::vector<float>&
-               >(&priors_from_heads),
-               py::arg("legal_moves"),
-               py::arg("policy_per_legal"));
-
-          // factorized version to match your Python helper
-          m.def("priors_from_heads",
-               py::overload_cast<
-                    const backend::Board&,
-                    const std::vector<std::string>&,
-                    const std::vector<float>&,
-                    const std::vector<float>&,
-                    const std::vector<float>&,
-                    const std::vector<float>&,
-                    float
-               >(&priors_from_heads),
-               py::arg("board"),
-               py::arg("legal"),
-               py::arg("p_from"),
-               py::arg("p_to"),
-               py::arg("p_piece"),
-               py::arg("p_promo"),
-               py::arg("mix") = 0.5f);
-     
      py::class_<CollectResults>(m, "CollectResults")
           .def_readonly("count_new", &CollectResults::count_new)
           .def_readonly("count_terminal", &CollectResults::count_terminal)
           .def_readonly("count_cached", &CollectResults::count_cached)
+
+          .def_readonly("total_must_visit", &CollectResults::total_must_visit)
+          .def_readonly("total_with_priors", &CollectResults::total_with_priors)
           .def_readonly("total_priorless", &CollectResults::total_priorless)
-          .def_readonly("total_puct", &CollectResults::total_puct);
+
+          .def_readonly("total_skipped", &CollectResults::total_skipped)
+          .def_readonly("total_pruned", &CollectResults::total_pruned)
+
+          .def_readonly("total_puct", &CollectResults::total_puct)
+          .def_readonly("total_penalty", &CollectResults::total_penalty);
+
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())
@@ -583,7 +585,7 @@ PYBIND11_MODULE(_core, m) {
           .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
-               std::vector<std::tuple<uint64_t, float, std::vector<float>>> vec;
+               std::vector<std::tuple<uint64_t, WDL, std::vector<float>>> vec;
                // Try to reserve if length is available
                try {
                     py::ssize_t n = py::len(batch);
@@ -603,19 +605,65 @@ PYBIND11_MODULE(_core, m) {
                for (py::handle item_handle : batch) {
                     py::tuple t = py::reinterpret_borrow<py::tuple>(item_handle);
                     if (t.size() != 3) throw std::runtime_error(
-                              "raw_cache_bulk_insert: each item must be (key, value, policy_vector)");
+                              "raw_cache_bulk_insert: each item must be (key, (win,draw,loss), policy_vector)");
                     uint64_t key = t[0].cast<uint64_t>();
-                    float net_value = t[1].cast<float>();
+                    py::tuple wdl_t = py::reinterpret_borrow<py::tuple>(t[1]);
+                    if (wdl_t.size() != 3) throw std::runtime_error(
+                              "raw_cache_bulk_insert: wdl must be a 3-tuple (win, draw, loss)");
+                    WDL wdl;
+                    wdl.win  = wdl_t[0].cast<float>();
+                    wdl.draw = wdl_t[1].cast<float>();
+                    wdl.loss = wdl_t[2].cast<float>();
                     std::vector<float> policy = to_vec(t[2]);
                     if (policy.size() != 4288) throw std::runtime_error(
                               "raw_cache_bulk_insert: policy_vector must have length 4288");
-                    vec.emplace_back(key, net_value, std::move(policy));
+                    vec.emplace_back(key, wdl, std::move(policy));
                }
 
                raw_policy_cache().bulk_insert(std::move(vec));
                });
           
+          // Fast batch insert from numpy arrays — zero Python loop.
+          // keys:   (B,)    uint64
+          // wdl:    (B, 3)  float32, STM-POV softmax probs [win, draw, loss]
+          // policy: (B, 4288) float32, raw policy logits
+          m.def("raw_cache_bulk_insert_np", [](
+               py::array_t<uint64_t, py::array::c_style | py::array::forcecast> keys,
+               py::array_t<float,    py::array::c_style | py::array::forcecast> wdl_batch,
+               py::array_t<float,    py::array::c_style | py::array::forcecast> policy_batch
+          ) {
+               auto k = keys.unchecked<1>();
+               auto w = wdl_batch.unchecked<2>();
+               auto p = policy_batch.unchecked<2>();
+
+               const size_t B = static_cast<size_t>(k.shape(0));
+               if (static_cast<size_t>(w.shape(0)) != B || static_cast<size_t>(p.shape(0)) != B)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: batch size mismatch");
+               if (w.shape(1) != 3)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: wdl must be shape (B, 3)");
+               if (p.shape(1) != 4288)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: policy must be shape (B, 4288)");
+
+               std::vector<std::tuple<uint64_t, WDL, std::vector<float>>> vec;
+               vec.reserve(B);
+
+               for (size_t i = 0; i < B; ++i) {
+                    WDL wdl{ w(i, 0), w(i, 1), w(i, 2) };
+                    const float* pol = &p(i, 0);
+                    vec.emplace_back(k[i], wdl, std::vector<float>(pol, pol + 4288));
+               }
+
+               raw_policy_cache().bulk_insert(std::move(vec));
+          }, "Fast batch insert: keys (B,) uint64, wdl (B,3) float32 STM-POV, policy (B,4288) float32 logits.");
+
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
+          m.def("raw_cache_lookup", [](uint64_t key) -> py::object {
+               const RawEntry* re = raw_policy_cache().lookup(key);
+               if (!re || !re->has_wdl || !re->has_policy) return py::none();
+               py::array_t<float> policy(re->p_policy.size(), re->p_policy.data());
+               py::tuple wdl = py::make_tuple(re->wdl.win, re->wdl.draw, re->wdl.loss);
+               return py::make_tuple(wdl, policy);
+          }, "Look up raw NN outputs by zobrist key. Returns ((win,draw,loss), policy_4288) or None.");
           m.def("raw_cache_stats", []() {
                RawStats s = raw_policy_cache().stats();
                py::dict d;

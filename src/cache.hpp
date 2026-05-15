@@ -6,15 +6,38 @@
 #include <vector>
 #include <string>
 
-struct CacheEntry {
-    // store final move priors as (uci, prob) pairs and the value
-    std::vector<std::pair<std::string, float>> priors;
-    float value = 0.0f;
+// WDL lives here because cache.hpp is the base header included by everything.
+// Named fields prevent silent win/loss swaps during STM flips.
+struct WDL {
+    float win  = 0.0f;
+    float draw = 0.0f;
+    float loss = 0.0f;
 };
 
+
+struct PriorEntry {
+    std::string uci;
+    float prior = 0.0f;      // fudged prior (post uniform_eps, floors, clip)
+    float raw_prior = 0.0f;  // raw softmax prior (post softmax, pre fudging)
+};
+
+// Priors cache entry: fudged priors for all legal moves + NN leaf WDL.
+// Written by apply_result (on first NN resolution) and updated periodically
+// by maybe_update_priors_cache (visit-derived priors, preserving raw_prior).
+// WDL is always the original NN leaf output — never updated with accumulated Q.
+struct CacheEntry {
+    std::vector<PriorEntry> priors;
+    WDL wdl;                  // NN leaf WDL (white-POV); never replaced with accumulated Q
+    float value = 0.0f;       // wdl.win - wdl.loss, kept for Qema init and inspection
+    int visits = 0;           // node visit count when this entry was last written
+};
+
+// LRU priors cache: stores processed priors + NN value keyed by zobrist.
+// Long-lived across the entire session; 1M capacity.
+// Fast-path: a hit in collect_one_leaf_tagged expands the node without NN inference.
 class Cache {
 public:
-    explicit Cache(size_t max_size = 600000);
+    explicit Cache(size_t max_size = 1000000);
 
     // lookup returns true if present and fills `out`. Moves entry to MRU.
     bool lookup(uint64_t key, CacheEntry& out);

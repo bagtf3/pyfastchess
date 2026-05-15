@@ -1,8 +1,8 @@
 #pragma once
 
 #include "cache.hpp"
+#include <array>
 #include <memory>
-#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -11,14 +11,25 @@
 #include <vector>
 #include <tuple>
 
+// Process-global singletons used by MCTS.
 //
-// This header exposes all process-global singletons used by MCTS:
-//  - priors_cache()   -> Cache (LRU) capacity 600000
-//  - raw_policy_cache()-> RawPolicyCache (deque eviction) capacity 16384
-//  - PriorEngine globals (g_prior_engine + g_prior_engine_raw) used by bindings / trees
+// priors_cache()      LRU Cache, 1M capacity.
+//                     Stores "fudged" priors + NN value keyed by zobrist.
+//                     "Fudged" = raw NN softmax output after uniform_eps mixing
+//                     (blends in a flat uniform prior) and prior_clip_max clipping
+//                     (caps any single move prior), then renormalized.
+//                     Persists for the whole session; shared across all trees
+//                     in this process. Updated by apply_result on first NN
+//                     resolution, and periodically refreshed with visit-derived
+//                     priors by maybe_update_priors_cache.
 //
-// Use these accessors from C++ code. The implementation is in singleton_registry.cpp
+// raw_policy_cache()  RawPolicyCache, 48k capacity, deque eviction.
+//                     Mailbox for NN inference results: Python writes raw outputs
+//                     (4288-float policy + WDL probs STM-POV) here after each batch;
+//                     C++ drains it during resolve_inflight / collect_one_leaf_tagged.
+//                     Entries are consumed once processed and not retained.
 //
+// Use these accessors from C++ code. Implementation is in singleton_registry.cpp.
 
 // ---------------- Raw entry + stats ----------------
 struct RawEntry {
@@ -26,16 +37,16 @@ struct RawEntry {
     std::vector<float> p_policy;
     bool has_policy = false;
 
-    // network scalar value and flag indicating if present
-    float value = 0.0f;
-    bool has_value = false;
+    // WDL probabilities (softmaxed, STM-POV from Python; flipped to white-POV before priors cache)
+    WDL wdl;
+    bool has_wdl = false;
 
     RawEntry() = default;
 
     // ctor for full policy vector
-    RawEntry(float v, std::vector<float>&& policy_vec)
+    RawEntry(WDL w, std::vector<float>&& policy_vec)
       : p_policy(std::move(policy_vec)), has_policy(true),
-        value(v), has_value(true) {}
+        wdl(w), has_wdl(true) {}
 };
 
 
@@ -57,9 +68,9 @@ struct CacheStats {
 // ---------------- RawPolicyCache class ----------------
 class RawPolicyCache {
 public:
-    explicit RawPolicyCache(size_t capacity = 16384);
+    explicit RawPolicyCache(size_t capacity = 72000);
 
-    void bulk_insert(std::vector<std::tuple<uint64_t, float, std::vector<float>>>&& batch);
+    void bulk_insert(std::vector<std::tuple<uint64_t, WDL, std::vector<float>>>&& batch);
 
     const RawEntry* lookup(uint64_t key) const;
     void erase(uint64_t key);
@@ -76,21 +87,9 @@ private:
     void evict_if_needed_unlocked();
 };
 
-// ---------------- PriorEngine globals (moved here from prior_registry.hpp) ----------------
-// Forward declaration - PriorEngine defined in mcts.hpp
-struct PriorEngine;
-
-// Globals are defined in singleton_registry.cpp (one TU).
-extern std::shared_ptr<PriorEngine> g_prior_engine;
-extern std::atomic<PriorEngine*>   g_prior_engine_raw;
-
-// Inline accessors
-inline std::shared_ptr<PriorEngine> get_prior_engine_shared() { return g_prior_engine; }
-inline PriorEngine* get_prior_engine_raw() { return g_prior_engine_raw.load(std::memory_order_acquire); }
-
 // ---------------- Singletons accessors ----------------
-Cache& priors_cache();      // LRU cache, capacity 600000
-RawPolicyCache& raw_policy_cache(); // deque-eviction raw buffer, capacity 16384
+Cache& priors_cache();          // LRU cache, 1M capacity
+RawPolicyCache& raw_policy_cache(); // deque-eviction raw mailbox, 48k capacity
 
 // Convenience wrappers for stats/clear (useful to expose to python)
 CacheStats priors_cache_stats();
