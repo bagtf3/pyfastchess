@@ -24,6 +24,7 @@ EvalWeights = _core.EvalWeights
 
 # misc helpers
 terminal_value_white_pov = _core.terminal_value_white_pov
+build_sometimes_legal_mask = _core.build_sometimes_legal_mask
 
 __all__ = [
     "Board",
@@ -39,4 +40,5 @@ __all__ = [
     "Evaluator",
     "EvalWeights",
     "terminal_value_white_pov",
+    "build_sometimes_legal_mask",
 ]

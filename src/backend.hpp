@@ -36,6 +36,11 @@ std::vector<uint8_t> stacked_planes_bytes_bitboards(const Board& b, int num_fram
 // Return token ids, STM made white. Indexing is 0..63 (a1..h8), int16_t.
 std::array<int16_t, 64> board_to_64_tokens(const Board& b);
 
+// Return a flat uint8 mask (length TOTAL_MOVE_SPACE = 4288) where 1 = sometimes-legal.
+// Pure geometry: queen + knight reachability for main region, |df|<=1 for underpromos.
+// Identical index formula to legal_move_mask() so the two masks are directly comparable.
+std::vector<uint8_t> build_sometimes_legal_mask();
+
 static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
 static constexpr size_t NUM_UNDERPROMOS = 3;         // N, B, R underpromos
 static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67

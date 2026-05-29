@@ -685,4 +685,12 @@ PYBIND11_MODULE(_core, m) {
           });
 
           m.def("priors_cache_clear", []() { priors_cache_clear(); });
+
+          m.def("build_sometimes_legal_mask", []() {
+               auto v = backend::build_sometimes_legal_mask();
+               py::array_t<uint8_t> arr(static_cast<py::ssize_t>(v.size()));
+               std::memcpy(arr.mutable_data(), v.data(), v.size());
+               return arr;
+          }, "Return a flat uint8 numpy array (length 4288) where 1 = sometimes-legal "
+             "in STM-POV policy space. Geometry matches legal_move_mask() index formula.");
 }

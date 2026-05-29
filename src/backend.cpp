@@ -593,6 +593,43 @@ LegalMaskandMap Board::legal_move_mask() const {
 }
 
 
+std::vector<uint8_t> build_sometimes_legal_mask() {
+    std::vector<uint8_t> mask(TOTAL_MOVE_SPACE, 0);
+
+    // Main region [0, 4096): queen + knight geometry covers every piece type.
+    // King moves are a subset of queen. Pawn pushes and captures are subsets of queen.
+    for (int from_sq = 0; from_sq < 64; ++from_sq) {
+        const int fr = from_sq / 8;
+        const int ff = from_sq % 8;
+        for (int to_sq = 0; to_sq < 64; ++to_sq) {
+            if (from_sq == to_sq) continue;
+            const int dr  = to_sq / 8 - fr;
+            const int df  = to_sq % 8 - ff;
+            const int adr = std::abs(dr);
+            const int adf = std::abs(df);
+            const bool queen  = (dr == 0) || (df == 0) || (adr == adf);
+            const bool knight = (adr == 1 && adf == 2) || (adr == 2 && adf == 1);
+            if (queen || knight)
+                mask[from_sq * 64 + to_sq] = 1;
+        }
+    }
+
+    // Underpromo region [4096, 4288): pawn on rank 6 STM-POV reaches rank 7 via
+    // straight push (df=0) or diagonal capture (|df|=1). Only file pair matters.
+    for (int from_file = 0; from_file < 8; ++from_file) {
+        for (int to_file = 0; to_file < 8; ++to_file) {
+            if (std::abs(to_file - from_file) <= 1) {
+                for (int promo_type = 0; promo_type < 3; ++promo_type) {
+                    mask[4096 + from_file + 8 * to_file + 64 * promo_type] = 1;
+                }
+            }
+        }
+    }
+
+    return mask;
+}
+
+
 int Board::piece_at(int square) const {
     chess::Square s(static_cast<chess::Square::underlying>(square));
     chess::Piece p = board_.at(s);
