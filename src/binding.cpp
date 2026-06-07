@@ -25,6 +25,17 @@ static py::array_t<uint8_t> stacked_planes_bitboards(const backend::Board& b, in
     return arr;
 }
 
+// wrapper: board_to_lc0_features -> returns np.uint8 array (112, 8, 8)
+// Plane 109 holds the raw halfmove clock; divide by 99.0 when converting to float32.
+static py::array_t<uint8_t> board_lc0_features_py(const backend::Board& b) {
+    auto v = backend::board_to_lc0_features(b);
+    py::array_t<uint8_t> arr({ static_cast<py::ssize_t>(112),
+                                static_cast<py::ssize_t>(8),
+                                static_cast<py::ssize_t>(8) });
+    std::memcpy(arr.mutable_data(), v.data(), v.size());
+    return arr;
+}
+
 // wrapper: board_to_64_tokens -> returns np.int16 array (64,)
 static py::array_t<int16_t> board_to_64_tokens_py(const backend::Board& b) {
     auto arr = backend::board_to_64_tokens(b); // std::array<int16_t,64>
@@ -179,6 +190,12 @@ PYBIND11_MODULE(_core, m) {
           .def("encode_64_tokens", &board_to_64_tokens_py,
                "Return a (64,) int16 NumPy array of token ids (STM-made-white canonical).\n"
                "This is the 1D token encoding alternative to stacked_planes and takes no arguments.")
+
+          .def("lc0_features", &board_lc0_features_py,
+               "Return (112, 8, 8) uint8 array of LC0 input features (STM-as-white).\n"
+               "8 history frames x 13 planes (12 piece planes + rep flag) + 8 suffix planes.\n"
+               "Plane 109 = raw halfmove clock; divide by 99.0 when converting to float32.\n"
+               "All other planes are 0 or 1. Call .astype(np.float32) then arr[109] /= 99.0.")
 
           .def("legal_move_mask", &legal_move_mask_py,
                "Return a flattened uint8 mask (length = 64 * MOVE_TO_WIDTH = 4288). "

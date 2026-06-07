@@ -1,4 +1,5 @@
 from importlib import import_module
+import numpy as _np
 
 _core = import_module("pyfastchess._core")
 
@@ -26,6 +27,13 @@ EvalWeights = _core.EvalWeights
 terminal_value_white_pov = _core.terminal_value_white_pov
 build_sometimes_legal_mask = _core.build_sometimes_legal_mask
 
+
+def lc0_features_float(board):
+    """Return board.lc0_features() as float32 (112, 8, 8) with rule50 scaled by /99.0."""
+    arr = board.lc0_features().astype(_np.float32)
+    arr[109] /= 99.0
+    return arr
+
 __all__ = [
     "Board",
     "MCTSNode",
@@ -41,4 +49,5 @@ __all__ = [
     "EvalWeights",
     "terminal_value_white_pov",
     "build_sometimes_legal_mask",
+    "lc0_features_float",
 ]

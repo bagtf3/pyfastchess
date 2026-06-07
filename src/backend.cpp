@@ -1040,4 +1040,67 @@ std::array<int16_t,64> backend::board_to_64_tokens(const backend::Board &board) 
     return out;
 }
 
+std::vector<uint8_t> board_to_lc0_features(const Board& b) {
+    constexpr int PLANES = 112;
+    constexpr int CELLS  = 64;
+    std::vector<uint8_t> out(PLANES * CELLS, 0);
+
+    auto fill_plane = [&](int plane, uint8_t val) {
+        std::fill(out.data() + plane * CELLS, out.data() + (plane + 1) * CELLS, val);
+    };
+
+    auto write_bitboard = [&](int plane, uint64_t bb, bool flip_rank) {
+        uint8_t* p = out.data() + plane * CELLS;
+        while (bb) {
+            int sq   = ctzll_u64(bb);
+            bb      &= bb - 1ULL;
+            int row  = flip_rank ? (7 - sq / 8) : (sq / 8);
+            int col  = sq % 8;
+            p[row * 8 + col] = 1;
+        }
+    };
+
+    const bool stm_is_white = (b.raw_board().sideToMove() == chess::Color::WHITE);
+    const bool flip = !stm_is_white;
+    const chess::Color stm_col = stm_is_white ? chess::Color::WHITE : chess::Color::BLACK;
+    const chess::Color opp_col = stm_is_white ? chess::Color::BLACK : chess::Color::WHITE;
+
+    static const chess::PieceType PIECE_ORDER[6] = {
+        chess::PieceType::PAWN,   chess::PieceType::KNIGHT, chess::PieceType::BISHOP,
+        chess::PieceType::ROOK,   chess::PieceType::QUEEN,  chess::PieceType::KING
+    };
+
+    Board tmp = b;
+    for (int frame = 0; frame < 8; ++frame) {
+        if (frame > 0 && !tmp.unmake())
+            break;
+
+        const chess::Board& rb = tmp.raw_board();
+        const int base = frame * 13;
+
+        for (int pt = 0; pt < 6; ++pt) {
+            write_bitboard(base + pt,     rb.pieces(PIECE_ORDER[pt], stm_col).getBits(), flip);
+            write_bitboard(base + pt + 6, rb.pieces(PIECE_ORDER[pt], opp_col).getBits(), flip);
+        }
+
+        fill_plane(base + 12, rb.isRepetition(1) ? 1 : 0);
+    }
+
+    // Suffix planes 104..111
+    const chess::Board& rb = b.raw_board();
+    using CRSide = chess::Board::CastlingRights::Side;
+    const auto cr = rb.castlingRights();
+
+    fill_plane(104, cr.has(stm_col, CRSide::QUEEN_SIDE) ? 1 : 0);  // us_ooo
+    fill_plane(105, cr.has(stm_col, CRSide::KING_SIDE)  ? 1 : 0);  // us_oo
+    fill_plane(106, cr.has(opp_col, CRSide::QUEEN_SIDE) ? 1 : 0);  // them_ooo
+    fill_plane(107, cr.has(opp_col, CRSide::KING_SIDE)  ? 1 : 0);  // them_oo
+    fill_plane(108, stm_is_white ? 0 : 1);                          // stm
+    fill_plane(109, static_cast<uint8_t>(rb.halfMoveClock()));       // rule50 raw
+    // plane 110 = zeros (already 0)
+    fill_plane(111, 1);                                              // ones
+
+    return out;
+}
+
 } // namespace backend

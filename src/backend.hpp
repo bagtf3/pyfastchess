@@ -41,6 +41,14 @@ std::array<int16_t, 64> board_to_64_tokens(const Board& b);
 // Identical index formula to legal_move_mask() so the two masks are directly comparable.
 std::vector<uint8_t> build_sometimes_legal_mask();
 
+// Return LC0-compatible input features as flat uint8 (112 * 8 * 8 = 7168 bytes).
+// Layout: 8 history frames * 13 planes (12 piece planes + 1 rep flag) + 8 suffix planes.
+// Piece planes within a frame: [0..5] = STM P/N/B/R/Q/K, [6..11] = OPP P/N/B/R/Q/K.
+// STM-as-white orientation; ranks flipped for black to move.
+// Suffix planes (104..111): us_ooo, us_oo, them_ooo, them_oo, stm, rule50_raw, zeros, ones.
+// Plane 109 stores the raw halfmove clock — divide by 99.0 when converting to float32.
+std::vector<uint8_t> board_to_lc0_features(const Board& b);
+
 static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
 static constexpr size_t NUM_UNDERPROMOS = 3;         // N, B, R underpromos
 static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67
