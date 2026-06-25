@@ -339,13 +339,6 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         WDL wdl_white_pov = re->wdl;
         if (node->get_stm_pov() < 0.0f) std::swap(wdl_white_pov.win, wdl_white_pov.loss);
 
-        // legal mask and map needs to be set
-        if (!node->legal_mask_map) {
-            backend::LegalMaskandMap lm = node->board.legal_move_mask();
-            set_legal_mask_map(node,
-                std::make_unique<backend::LegalMaskandMap>(std::move(lm)));
-        }
-
         std::vector<PriorEntry> built_priors = build_priors(node, re);
         apply_result(node, built_priors, wdl_white_pov, /*cache=*/true);
 
@@ -572,20 +565,25 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
 
     node->ordered_children.clear();
 
-    const auto legal = node->board.legal_moves();
-    node->legal_moves = legal;
-    const size_t n = legal.size();
+    backend::LegalMaskandMap lm = node->board.legal_move_mask();
+    const size_t n = lm.uci_idx_pairs.size();
     if (n == 0) {
         node->is_expanded = false;
         return;
     }
 
+    node->policy_pairs = std::move(lm.uci_idx_pairs);
+
+    node->legal_moves.clear();
+    node->legal_moves.reserve(n);
+    for (const auto& p : node->policy_pairs)
+        node->legal_moves.push_back(p.first);
+
     const float u = 1.0f / static_cast<float>(n);
     node->ordered_children.reserve(n);
-
-    for (const auto &mv : legal) {
+    for (const auto& p : node->policy_pairs) {
         MCTSNode::ChildEntry ce;
-        ce.uci = mv;
+        ce.uci = p.first;
         ce.child.reset(nullptr);
         ce.prior = u;
         node->ordered_children.emplace_back(std::move(ce));
@@ -854,17 +852,16 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
         throw std::runtime_error(ss.str());
     }
 
-    if (!node->legal_mask_map) {
+    if (node->policy_pairs.empty()) {
         const uint64_t z = node->zobrist;
         std::stringstream ss;
-        ss << "build_priors: missing LegalMaskandMap on node (zobrist=" << z
-           << "). Ensure pending_encoded_64_tokens attached it.";
+        ss << "build_priors: policy_pairs empty on node (zobrist=" << z << ")";
         throw std::runtime_error(ss.str());
     }
 
     // Softmax over legal move logits, then apply uniform_eps + prior_clip_max.
     const auto& policy_vec = re->p_policy;
-    const auto& pairs = node->legal_mask_map->lookup();
+    const auto& pairs = node->policy_pairs;
 
     std::vector<PriorEntry> built_priors;
     built_priors.reserve(pairs.size());
@@ -938,12 +935,6 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
     return built_priors;
 }
 
-void MCTSTree::set_legal_mask_map(
-    MCTSNode* node,
-    std::unique_ptr<const backend::LegalMaskandMap> lm)
-{
-    node->legal_mask_map = std::move(lm);
-}
 
 void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch) {
     size_t i = 0;
@@ -1432,13 +1423,13 @@ MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
 
     // opportunistic mass_on_legal — only computable if raw cache entry still alive
     const RawEntry* re = raw_policy_cache().lookup(r->zobrist);
-    if (re && re->has_policy && r->legal_mask_map) {
+    if (re && re->has_policy && !r->policy_pairs.empty()) {
         const auto& policy_vec = re->p_policy;
         float max_logit = *std::max_element(policy_vec.begin(), policy_vec.end());
         float sum_all = 0.0f, sum_legal = 0.0f;
         for (const float v : policy_vec)
             sum_all += std::exp(v - max_logit);
-        for (const auto& p : r->legal_mask_map->lookup())
+        for (const auto& p : r->policy_pairs)
             sum_legal += std::exp(policy_vec[p.second] - max_logit);
         if (sum_all > 0.0f) result.mass_on_legal = sum_legal / sum_all;
     }

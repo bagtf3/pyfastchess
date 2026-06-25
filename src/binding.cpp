@@ -295,7 +295,12 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy)
           .def_property_readonly("zobrist", [](const MCTSNode& n){ return n.zobrist; })
-          .def_property_readonly("legal_moves", [](const MCTSNode& n){ return n.legal_moves; })
+          .def_property_readonly("legal_moves", [](const MCTSNode& n){
+               std::vector<std::string> moves;
+               moves.reserve(n.policy_pairs.size());
+               for (const auto& p : n.policy_pairs) moves.push_back(p.first);
+               return moves;
+          })
 
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
                for (const auto &ce : n.ordered_children) {
@@ -397,12 +402,6 @@ PYBIND11_MODULE(_core, m) {
 
                     // tokens: int16[64] STM-POV (already flips inside board_to_64_tokens)
                     py::array_t<int16_t> tokens = board_to_64_tokens_py(n->board);
-
-                    // produce LegalMaskandMap and attach it to node (move -> heap)
-                    backend::LegalMaskandMap lm = n->board.legal_move_mask();
-                    t.set_legal_mask_map(
-                        n,
-                        std::make_unique<backend::LegalMaskandMap>(std::move(lm)));
 
                     // append (zobrist, tokens64)
                     out.append(py::make_tuple(z, tokens));

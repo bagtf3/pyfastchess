@@ -200,17 +200,14 @@ struct MCTSNode {
     // --- State ---
     backend::Board board;   // exact position at this node
     uint64_t zobrist = 0;   // computed lazily when the node is first selected
-    std::vector<std::string> legal_moves;  // filled on expand; reused later
+    std::vector<std::string> legal_moves;  // pass-through: UCIs from policy_pairs in movegen order
+    std::vector<std::pair<std::string, uint16_t>> policy_pairs;  // (uci, policy_idx), movegen order
 
     bool is_expanded = false;
     bool children_have_priors = false;
     WDL value{};             // NN leaf WDL (white-POV); set on expansion, never updated by backprop
     int cache_misses = 0;
     uint32_t queued_epoch = 0;
-
-    // When pending_encoded_64_tokens runs we move the LegalMaskandMap into a
-    // heap object and store it here so the node can later access it without copies.
-    std::unique_ptr<const backend::LegalMaskandMap> legal_mask_map;
 
     // Disallow copying (because we hold unique_ptr children)
     MCTSNode(const MCTSNode&) = delete;
@@ -355,9 +352,6 @@ public:
     };
     NNResult emulate_nn_result() const;
 
-    void set_legal_mask_map(
-        MCTSNode* node,
-        std::unique_ptr<const backend::LegalMaskandMap> lm);
 
 private:
     std::unique_ptr<MCTSNode> root_;
