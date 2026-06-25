@@ -443,17 +443,11 @@ void MCTSTree::apply_result(
 ) {
     if (!node) return;
 
-    // build fast lookup (uci -> prior, raw_prior)
-    std::unordered_map<std::string, std::pair<float,float>> priormap;
-    priormap.reserve(move_priors.size());
-    for (const auto& p : move_priors)
-        priormap.emplace(p.uci, std::make_pair(p.prior, p.raw_prior));
-
-    // update priors in-place on existing ordered_children
-    for (auto& ce : node->ordered_children) {
-        const auto& pv = priormap.at(ce.uci);
-        ce.prior     = pv.first;
-        ce.raw_prior = pv.second;
+    // move_priors and ordered_children are both in policy_pairs (movegen) order --
+    // direct indexed assignment, no map needed.
+    for (size_t i = 0; i < node->ordered_children.size(); ++i) {
+        node->ordered_children[i].prior     = move_priors[i].prior;
+        node->ordered_children[i].raw_prior = move_priors[i].raw_prior;
     }
 
     // stable-sort in-place by fudged prior descending
@@ -603,45 +597,18 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
     const std::vector<PriorEntry>& priors) {
     if (!node) return;
 
-    // Build a fast lookup from incoming priors.
-    std::unordered_map<std::string, std::pair<float,float>> priormap;
-    priormap.reserve(priors.size());
-    for (const auto& pp : priors)
-        priormap.emplace(pp.uci, std::make_pair(pp.prior, pp.raw_prior));
-
-    // Update priors on any existing entries (do NOT touch their child unique_ptrs).
-    for (auto& ce : node->ordered_children) {
-        auto it = priormap.find(ce.uci);
-        if (it != priormap.end()) {
-            ce.prior     = it->second.first;
-            ce.raw_prior = it->second.second;
-        } else {
-            ce.prior = ce.raw_prior = 0.0f;
-        }
-    }
-
-    std::unordered_set<std::string> existing;
-    existing.reserve(node->ordered_children.size());
-    for (const auto& ce : node->ordered_children) existing.insert(ce.uci);
-
+    // Always called on a node with no children (priors cache fast-path).
+    // Incoming priors are already sorted by prior desc (stored that way in CacheEntry).
+    // Just push directly -- no map, no set, no re-sort needed.
+    node->ordered_children.reserve(priors.size());
     for (const auto& pp : priors) {
-        if (existing.find(pp.uci) == existing.end()) {
-            MCTSNode::ChildEntry ce;
-            ce.uci       = pp.uci;
-            ce.child.reset(nullptr);
-            ce.prior     = pp.prior;
-            ce.raw_prior = pp.raw_prior;
-            node->ordered_children.emplace_back(std::move(ce));
-            existing.insert(pp.uci);
-        }
+        MCTSNode::ChildEntry ce;
+        ce.uci       = pp.uci;
+        ce.prior     = pp.prior;
+        ce.raw_prior = pp.raw_prior;
+        ce.child.reset(nullptr);
+        node->ordered_children.emplace_back(std::move(ce));
     }
-
-    // Single canonical sort: primary = fudged prior desc, secondary = uci asc for determinism.
-    std::sort(node->ordered_children.begin(), node->ordered_children.end(),
-              [](const MCTSNode::ChildEntry& a, const MCTSNode::ChildEntry& b){
-                  if (a.prior != b.prior) return a.prior > b.prior;
-                  return a.uci < b.uci;
-              });
 
     node->is_expanded = true;
     node->children_have_priors = true;
