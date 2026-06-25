@@ -1,0 +1,214 @@
+PYFASTCHESS EFFICIENCY NOTES
+=============================
+Identified inefficiencies in the leaf collection -> inference -> prior application pipeline.
+Does not cover the 4288->1858 policy domain standardization (separate doc).
+
+
+------------------------------------------------------------------------
+1. DOUBLE LEGAL MOVE GENERATION
+------------------------------------------------------------------------
+
+Problem:
+  Every new leaf undergoes two full legal move generations:
+
+  First in expand_with_uniform_priors_nolock() (mcts.cpp:570):
+    const auto legal = node->board.legal_moves();
+    node->legal_moves = legal;
+    // populates ordered_children with uniform priors
+
+  Then again in pending_encoded_64_tokens() (binding.cpp:381):
+    backend::LegalMaskandMap lm = n->board.legal_move_mask();
+    // calls chess::movegen::legalmoves() from scratch to build uci_idx_pairs
+
+  The move list is already stored on the node (node->legal_moves) after the
+  first call. The second generation is pure waste -- same position, same moves,
+  same result, computed twice.
+
+Benefit:
+  Eliminates one full movegen per new leaf. At high leaf rates this is
+  meaningful CPU time, and it also removes a redundant heap allocation
+  (the LegalMaskandMap mask vector -- see item 2).
+
+Implementation hint:
+  Move LegalMaskandMap construction into expand_with_uniform_priors_nolock().
+  One pass over the movelist: populate ordered_children AND build uci_idx_pairs
+  simultaneously. Store the LegalMaskandMap on the node there instead of in
+  pending_encoded_64_tokens(). pending_encoded_64_tokens() then just reads the
+  already-attached map -- no movegen, no legal_move_mask() call.
+
+  This also makes LegalMaskandMap generation a prerequisite of expansion rather
+  than an afterthought during encoding, which is the correct conceptual ordering.
+
+
+------------------------------------------------------------------------
+2. 4288-BYTE MASK IN LegalMaskandMap (DEAD WEIGHT IN HOT PATH)
+------------------------------------------------------------------------
+
+Problem:
+  LegalMaskandMap carries two members:
+    std::vector<uint8_t> mask;                              // 4288 bytes
+    std::vector<std::pair<std::string, uint16_t>> uci_idx_pairs;
+
+  In the MCTS hot path, build_priors() only ever touches uci_idx_pairs.
+  The mask is never read during inference or prior application.
+
+  It is exposed to Python via the legal_move_mask_py() binding, which is
+  an inspection/debug utility, not part of the inference path. Yet the mask
+  is allocated on the heap and stored on every pending node for the duration
+  of its inflight lifetime.
+
+Benefit:
+  Eliminates a 4288-byte heap allocation and deallocation per new leaf.
+  Also reduces the memory footprint of inflight nodes, improving cache
+  locality across the node pool.
+
+Implementation hint:
+  Remove the mask field from LegalMaskandMap entirely. If the Python-side
+  legal_move_mask() binding is still needed for debugging, compute the mask
+  on-demand in the binding itself rather than carrying it on every node.
+  Alternatively keep a separate Board::legal_move_mask_only() that returns
+  just the mask without the uci_idx_pairs, for the debug binding path.
+
+
+------------------------------------------------------------------------
+3. PYTHON LOOP AND NUMPY STACK IN format_and_predict
+------------------------------------------------------------------------
+
+Problem:
+  pending_encoded_64_tokens() returns a Python list of (zobrist, tokens)
+  tuples -- one tuple per pending node. The Python caller then loops over
+  this list to reconstruct two arrays:
+
+    for item in preds_batch:
+        keys.append(item[0])
+        boards.append(np.asarray(item[1], dtype=np.int32))
+    boards_np = np.stack(boards, axis=0)
+
+  This is a Python-speed loop with per-item numpy array construction followed
+  by a stack call. For a macro batch of 32-128 nodes this runs at interpreter
+  speed and allocates many temporary objects before the inference call.
+
+Benefit:
+  Eliminating this loop removes per-item pybind11 tuple unpacking, per-item
+  numpy array construction, and the final stack() call. All three are
+  Python-speed overhead sitting directly on the critical path before every
+  GPU inference call.
+
+Implementation hint:
+  Change pending_encoded_64_tokens() to return two numpy arrays directly:
+    keys_np:    uint64[B]    -- zobrist keys
+    tokens_np:  int16[B, 64] -- encoded board tokens
+
+  C++ fills both arrays in a single pass over the inflight nodes using
+  pybind11's numpy buffer protocol. Python receives two ready-to-use arrays
+  with no further processing needed before inference. The caller becomes:
+
+    keys_np, tokens_np = tree.pending_encoded_64_tokens()
+    probs_np, vals_np = self.infer((tokens_np,))
+    raw_cache_bulk_insert_np(keys_np, vals_np, probs_np)
+
+
+------------------------------------------------------------------------
+4. STRING HASH MAPS IN expand_with_priors
+------------------------------------------------------------------------
+
+Problem:
+  When real priors arrive, expand_with_priors() (mcts.cpp:604) builds two
+  temporary string-keyed containers:
+
+    unordered_map<string, pair<float,float>> priormap   // to update existing children
+    unordered_set<string> existing                       // to detect missing children
+
+  These are constructed and destroyed on every node expansion that receives
+  real priors. The string hashing on ~30 UCI strings per node is not free,
+  and the two-container pattern exists only because the incoming priors vector
+  is not assumed to be in the same order as ordered_children.
+
+  However: build_priors() iterates node->legal_mask_map->lookup() (the
+  uci_idx_pairs), which was built from the same movegen call that populated
+  ordered_children. The ordering is identical. The priors vector returned by
+  build_priors() is therefore already in ordered_children order.
+
+Benefit:
+  Replacing the two unordered containers with a single indexed pass reduces
+  expand_with_priors() from O(n) string hashing to O(n) float writes.
+  For 30 moves per node at high expansion rates this compounds.
+
+Implementation hint:
+  Have build_priors() guarantee it returns priors in the same order as
+  ordered_children (it already does implicitly -- make it explicit via a
+  comment or a by-index return type). Then expand_with_priors() becomes a
+  simple indexed loop:
+
+    for (size_t i = 0; i < node->ordered_children.size(); ++i) {
+        node->ordered_children[i].prior     = built_priors[i].prior;
+        node->ordered_children[i].raw_prior = built_priors[i].raw_prior;
+    }
+
+  No map, no set, no string hashing. The second loop that checks for missing
+  children can also be removed -- if build_priors() and ordered_children are
+  built from the same movegen pass (as they will be after item 1 is fixed),
+  they are guaranteed to cover identical move sets.
+
+Caveat -- priors cache fast-path:
+  expand_with_priors() is called from two places with different preconditions:
+
+  a) New-leaf path (apply_result after build_priors):
+     ordered_children was populated by expand_with_uniform_priors() in the
+     same movegen pass that produced uci_idx_pairs. Order is guaranteed to
+     match. The indexed loop optimization applies cleanly here.
+
+  b) Priors cache fast-path (collect_one_leaf_tagged line 316):
+     expand_with_priors() is called on a node with NO children yet, passing
+     in a cached PriorEntry vector that was sorted by prior value at the time
+     it was stored. The incoming priors are NOT in movegen order.
+     The string map is still needed here, or the fast-path needs its own
+     expansion function that populates ordered_children directly from the
+     incoming sorted priors without the update/merge logic.
+
+  The cleanest fix is to split the two call sites into separate functions:
+  expand_from_cache(priors) for fast-path (simple push in incoming order)
+  and apply_real_priors(built_priors) for the new-leaf path (indexed update,
+  no map). Do not apply the optimization globally to expand_with_priors()
+  without accounting for the fast-path ordering difference.
+
+
+------------------------------------------------------------------------
+RAW CACHE MAILBOX -- RATIONALE FOR LEAVING AS-IS
+------------------------------------------------------------------------
+
+The current flow:
+  Python model -> raw_cache_bulk_insert_np -> [raw cache] -> resolve_inflight
+               -> build_priors -> apply_result -> [priors cache]
+
+The raw cache looks like a redundant intermediary: insert policy floats in,
+immediately read them back out to build priors. A direct apply_batch_results()
+binding would seem to short-circuit this.
+
+We previously used this direct approach and moved away from it deliberately.
+
+The reason is async inference. In selfplay/training mode, GPU inference runs
+in an async batcher (previously TensorFlow/ONNX async providers). Leaves are
+collected across many concurrent games at arbitrary times. Inference results
+finish at arbitrary times. The collect and resolve cycles do not line up.
+
+The raw cache acts as a filter capacitor: inference results are deposited
+whenever they are ready, and resolve_inflight() drains whatever is available
+on the next collection cycle, regardless of timing. This decoupling absorbs
+the mismatch between the GPU producer and the MCTS consumer.
+
+Without the cache mailbox:
+  - Deduplication breaks: two games reaching the same position produce two
+    inflight nodes with the same zobrist. A direct apply must deduplicate
+    before applying or risk double-resolution and stale pointer access.
+  - Timing coupling returns: apply_batch_results() must be called with keys
+    that exactly match the current inflight queue, which drifts when
+    collection and resolution run asynchronously.
+  - The segfault class returns: a node applied twice (once direct, once from
+    a stale reference elsewhere) is a use-after-free waiting to happen.
+
+Decision: leave the raw cache mailbox intact for selfplay/training mode.
+
+For tournament mode (single-game, synchronous, direct-drive inference loop),
+a separate apply_batch_results() path is appropriate and the mailbox can be
+bypassed entirely. The two modes warrant different inference architectures.
