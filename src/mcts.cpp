@@ -17,6 +17,7 @@ static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
+
 MCTSNode::MCTSNode(
     const backend::Board& b,
     MCTSNode* parent_,
@@ -69,10 +70,11 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         MCTSNode* ch = ce.child.get();
         if (ch) return ch;
 
+        const std::string& uci = lookup_uci(policy_pairs, ce.move_idx);
         backend::Board childb = board;
-        if (!childb.push_uci(ce.uci)) return nullptr;
+        if (!childb.push_uci(uci)) return nullptr;
 
-        auto up = std::make_unique<MCTSNode>(childb, this, ce.uci);
+        auto up = std::make_unique<MCTSNode>(childb, this, uci);
         up->zobrist = childb.hash();
         const float fpu_adj = fpu_reduction * this->get_stm_pov();
         up->Q     = this->Q;
@@ -87,9 +89,13 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     char forced_uci[16];
     if (take_must_visit_uci(forced_uci)) {
         ++cc->count_must_visit;
+        // find move_idx for forced_uci in policy_pairs, then match children
+        uint16_t forced_idx = 0xFFFF;
+        for (const auto& p : policy_pairs)
+            if (std::strcmp(p.first.c_str(), forced_uci) == 0) { forced_idx = p.second; break; }
         for (size_t i = 0; i < n_child; ++i) {
             ChildEntry& ce = ordered_children[i];
-            if (ce.uci != forced_uci) continue;
+            if (ce.move_idx != forced_idx) continue;
             return get_or_create_child(ce);
         }
     }
@@ -466,8 +472,10 @@ void MCTSTree::apply_result(
         e.wdl   = wdl_white_pov;
         e.value = q;
         e.priors.reserve(node->ordered_children.size());
-        for (const auto& ce : node->ordered_children)
-            e.priors.push_back({ce.uci, ce.prior, ce.raw_prior});
+        for (const auto& ce : node->ordered_children) {
+            const std::string& uci = lookup_uci(node->policy_pairs, ce.move_idx);
+            e.priors.push_back({uci, ce.move_idx, ce.prior, ce.raw_prior});
+        }
 
         uint64_t key = (node->zobrist != 0) ? node->zobrist : node->board.hash();
         priors_cache().insert(key, std::move(e));
@@ -577,7 +585,7 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     node->ordered_children.reserve(n);
     for (const auto& p : node->policy_pairs) {
         MCTSNode::ChildEntry ce;
-        ce.uci = p.first;
+        ce.move_idx = p.second;
         ce.child.reset(nullptr);
         ce.prior = u;
         node->ordered_children.emplace_back(std::move(ce));
@@ -599,11 +607,21 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
 
     // Always called on a node with no children (priors cache fast-path).
     // Incoming priors are already sorted by prior desc (stored that way in CacheEntry).
-    // Just push directly -- no map, no set, no re-sort needed.
-    node->ordered_children.reserve(priors.size());
+    // Reconstruct policy_pairs and legal_moves from cache data (no extra movegen).
+    const size_t n = priors.size();
+    node->policy_pairs.clear();
+    node->policy_pairs.reserve(n);
+    node->legal_moves.clear();
+    node->legal_moves.reserve(n);
+    for (const auto& pp : priors) {
+        node->policy_pairs.emplace_back(pp.uci, pp.move_idx);
+        node->legal_moves.push_back(pp.uci);
+    }
+
+    node->ordered_children.reserve(n);
     for (const auto& pp : priors) {
         MCTSNode::ChildEntry ce;
-        ce.uci       = pp.uci;
+        ce.move_idx  = pp.move_idx;
         ce.prior     = pp.prior;
         ce.raw_prior = pp.raw_prior;
         ce.child.reset(nullptr);
@@ -842,7 +860,7 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
     float sum_exp = 0.0f;
     for (const auto& p : pairs) {
         const float e = std::exp(policy_vec[p.second] - max_logit);
-        built_priors.push_back({p.first, e, 0.0f});
+        built_priors.push_back({p.first, p.second, e, 0.0f});
         sum_exp += e;
     }
 
@@ -976,10 +994,15 @@ bool MCTSTree::advance_root(const std::string& mv) {
     // restarting cold would throw away a locked mate line.
     bool force_reuse = std::abs(old_root->Q) > 0.9f;
     if (reuse_tree_ || force_reuse) {
+        // find move_idx for mv in old_root's policy_pairs
+        uint16_t mv_idx = 0xFFFF;
+        for (const auto& p : old_root->policy_pairs)
+            if (p.first == mv) { mv_idx = p.second; break; }
+
         for (auto it = old_root->ordered_children.begin();
              it != old_root->ordered_children.end();
              ++it) {
-            if (it->uci != mv || !it->child) continue;
+            if (it->move_idx != mv_idx || !it->child) continue;
 
             auto new_root = std::move(it->child);
             new_root->parent = nullptr;
@@ -1022,7 +1045,7 @@ std::vector<std::pair<std::string, int>> MCTSTree::root_child_visits() const {
     if (!r) return rows;
     rows.reserve(r->ordered_children.size());
     for (const auto& ce : r->ordered_children) {
-        const std::string& mv = ce.uci;
+        const std::string& mv = lookup_uci(r->policy_pairs, ce.move_idx);
         const MCTSNode* ch = ce.child.get();
         int nvis = ch ? ch->visit_count() : 0;
         rows.emplace_back(mv, nvis);
@@ -1035,8 +1058,8 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     const MCTSNode* r = root_.get();
     if (!r || r->ordered_children.empty()) return {"", nullptr};
 
-    const std::string* best_mv = nullptr;
-    const MCTSNode*    best_ch = nullptr;
+    uint16_t best_idx = 0xFFFF;
+    const MCTSNode* best_ch = nullptr;
     int best_N = -1;
 
     // iterate ordered_children, skipping nullptr placeholders
@@ -1045,13 +1068,13 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
         int N = ch ? ch->visit_count() : 0;
         if (N > best_N) {
             best_N = N;
-            best_mv = &ce.uci;
+            best_idx = ce.move_idx;
             best_ch = ch;
         }
     }
 
-    if (!best_mv) return {"", nullptr};
-    return { *best_mv, best_ch };
+    if (best_idx == 0xFFFF) return {"", nullptr};
+    return { lookup_uci(r->policy_pairs, best_idx), best_ch };
 }
 
 std::vector<ChildDetail> MCTSTree::root_child_details() {
@@ -1066,7 +1089,7 @@ std::vector<ChildDetail> MCTSTree::root_child_details() {
         MCTSNode* ch = ce.child.get();
 
         ChildDetail cd;
-        cd.uci = ce.uci;
+        cd.uci = lookup_uci(r->policy_pairs, ce.move_idx);
         cd.prior = ce.prior;
 
         if (ch) {
@@ -1138,20 +1161,20 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len, const std::string
     for (int depth = 0; depth < max_len; ++depth) {
         if (node->ordered_children.empty()) break;
 
-        const std::string* best_mv = nullptr;
-        const MCTSNode*    best_ch = nullptr;
+        uint16_t best_idx = 0xFFFF;
+        const MCTSNode* best_ch = nullptr;
         int best_N = -1;
         float best_prior = 0.0f;
 
         // at depth 0 with a requested start move, pin to that child if visited
         if (depth == 0 && !start_move.empty()) {
             for (const auto& ce : node->ordered_children) {
-                if (ce.uci != start_move) continue;
+                if (lookup_uci(node->policy_pairs, ce.move_idx) != start_move) continue;
                 const MCTSNode* ch = ce.child.get();
                 if (!ch) break;
                 const int N = ch->visit_count();
                 if (N > 0) {
-                    best_mv    = &ce.uci;
+                    best_idx   = ce.move_idx;
                     best_ch    = ch;
                     best_N     = N;
                     best_prior = ce.prior;
@@ -1165,16 +1188,16 @@ std::vector<PVItem> MCTSTree::principal_variation(int max_len, const std::string
                 const int N = ch->visit_count();
                 if (N > best_N) {
                     best_N     = N;
-                    best_mv    = &ce.uci;
+                    best_idx   = ce.move_idx;
                     best_ch    = ch;
                     best_prior = ce.prior;
                 }
             }
         }
 
-        if (!best_mv || best_N <= 0 || !best_ch) break;
+        if (best_idx == 0xFFFF || best_N <= 0 || !best_ch) break;
 
-        pv.push_back(PVItem{*best_mv, best_N, best_prior, best_ch->Q});
+        pv.push_back(PVItem{lookup_uci(node->policy_pairs, best_idx), best_N, best_prior, best_ch->Q});
         node = best_ch;
     }
     return pv;
@@ -1386,7 +1409,7 @@ MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
     result.wdl   = r->value;
     result.raw_priors.reserve(r->ordered_children.size());
     for (const auto& ce : r->ordered_children)
-        result.raw_priors.emplace_back(ce.uci, ce.raw_prior);
+        result.raw_priors.emplace_back(lookup_uci(r->policy_pairs, ce.move_idx), ce.raw_prior);
 
     // opportunistic mass_on_legal — only computable if raw cache entry still alive
     const RawEntry* re = raw_policy_cache().lookup(r->zobrist);

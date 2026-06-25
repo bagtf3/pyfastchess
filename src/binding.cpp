@@ -304,7 +304,7 @@ PYBIND11_MODULE(_core, m) {
 
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
                for (const auto &ce : n.ordered_children) {
-                    if (ce.uci == uci) return ce.prior;
+                    if (lookup_uci(n.policy_pairs, ce.move_idx) == uci) return ce.prior;
                }
                return 0.0f;
           }, py::arg("move_uci"))
@@ -312,7 +312,7 @@ PYBIND11_MODULE(_core, m) {
           .def("priors", [](const MCTSNode& n){
                py::dict out;
                for (const auto &ce : n.ordered_children) {
-                    out[py::str(ce.uci)] = ce.prior;
+                    out[py::str(lookup_uci(n.policy_pairs, ce.move_idx))] = ce.prior;
                }
                return out;
           });
@@ -434,8 +434,12 @@ PYBIND11_MODULE(_core, m) {
                     wdl.loss = wdl_tuple[2].cast<float>();
                     std::vector<PriorEntry> entries;
                     entries.reserve(move_priors.size());
-                    for (const auto& p : move_priors)
-                        entries.push_back({p.first, p.second, 0.0f});
+                    for (const auto& p : move_priors) {
+                        uint16_t midx = 0xFFFF;
+                        for (const auto& pp : node->policy_pairs)
+                            if (pp.first == p.first) { midx = pp.second; break; }
+                        entries.push_back({p.first, midx, p.second, 0.0f});
+                    }
                     t.apply_result(node, entries, wdl, cache);
                },
                py::arg("node"), py::arg("move_priors"), py::arg("wdl_white_pov"), py::arg("cache") = true)

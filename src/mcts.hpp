@@ -20,6 +20,15 @@
 // forward decl so CollectCounts can hold a MCTSNode*
 struct MCTSNode;
 
+inline const std::string& lookup_uci(
+    const std::vector<std::pair<std::string, uint16_t>>& pairs, uint16_t move_idx)
+{
+    for (const auto& p : pairs)
+        if (p.second == move_idx) return p.first;
+    static const std::string empty;
+    return empty;
+}
+
 // Telemetry/return types used by collect_one_leaf_tagged / collect_many_leaves
 enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
 
@@ -180,14 +189,14 @@ struct MCTSNode {
     // Canonical child entry: owner of optional child subtree, prior, and UCI string.
     // This is the single source-of-truth for both ordering and the prior values.
     struct ChildEntry {
-        std::string uci;                    // move in UCI form (parent->child)
+        uint16_t move_idx = 0xFFFF;         // policy-space index (4288 domain); 0xFFFF = unset
         std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
         float prior = 0.0f;                 // fudged prior (post uniform_eps, floors, clip)
         float raw_prior = 0.0f;             // raw softmax prior (post softmax, pre fudging)
 
         ChildEntry() = default;
-        ChildEntry(const std::string& u, float p = 0.0f, float rp = 0.0f)
-            : uci(u), child(nullptr), prior(p), raw_prior(rp) {}
+        ChildEntry(uint16_t idx, float p = 0.0f, float rp = 0.0f)
+            : move_idx(idx), child(nullptr), prior(p), raw_prior(rp) {}
     };
 
     // Authoritative, ordered list of children.
