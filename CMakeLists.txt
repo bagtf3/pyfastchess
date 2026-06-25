@@ -18,7 +18,7 @@ pybind11_add_module(pyfastchess._core
 
 # Explicit include dirs (same style as your working file)
 target_include_directories(pyfastchess._core PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/extern/chess-library/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
