@@ -66,8 +66,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 
     const size_t n_child = ordered_children.size();
 
-    auto get_or_create_child = [&](size_t child_idx) -> MCTSNode* {
-        ChildEntry& ce = ordered_children[child_idx];
+    auto get_or_create_child = [&](ChildEntry& ce) -> MCTSNode* {
         MCTSNode* ch = ce.child.get();
         if (ch) return ch;
 
@@ -80,7 +79,6 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         const float fpu_adj = fpu_reduction * this->get_stm_pov();
         up->Q     = this->Q;
         up->Q_eff = this->Q_eff - fpu_adj;
-        up->parent_child_idx = static_cast<uint16_t>(child_idx);
 
         ch = up.get();
         ce.child = std::move(up);
@@ -96,8 +94,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         for (const auto& p : policy_pairs)
             if (std::strcmp(p.first.c_str(), forced_uci) == 0) { forced_idx = p.second; break; }
         for (size_t i = 0; i < n_child; ++i) {
-            if (ordered_children[i].move_idx != forced_idx) continue;
-            return get_or_create_child(i);
+            ChildEntry& ce = ordered_children[i];
+            if (ce.move_idx != forced_idx) continue;
+            return get_or_create_child(ce);
         }
     }
 
@@ -108,7 +107,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
 
         ++cc->count_priorless;      
 
-        return get_or_create_child(idx);
+        ChildEntry& ce = ordered_children[idx];
+        return get_or_create_child(ce);
     }
 
     ++cc->count_with_priors;
@@ -148,13 +148,13 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     // main puct loop. will implement pruning on the fly
     for (size_t i = 0; i < cap_sz; ++i) {
         const ChildEntry& ce = ordered_children[i];
+        const MCTSNode* ch = ce.child.get();
 
-        // use cached_N / cached_Q_eff — no pointer chase into child node
-        const int n_int = ce.cached_N;
+        const int n_int = ch ? static_cast<int>(ch->visit_count()) : 0;
         const float n = static_cast<float>(n_int);
         unseen_visits -= n_int;
-
-        if (n_int > 0) have_seen_any = true;
+        
+        if (ch) have_seen_any = true;
         tested += 1;
 
         // pruning pass based on visit target and max visits encountered
@@ -165,30 +165,28 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
                  max_visits_idx = static_cast<int>(i);
                  prune_below = static_cast<float>(max_visits) - budget_slack;
             }
-
+            
             if (static_cast<float>(unseen_visits) < prune_below) {
                 // account for unseen children as pruned and exit
                 cc->count_pruned += static_cast<size_t>(cap_sz - i - 1);
                 break;
-
+            
             }
             if (n < prune_below) {
                 ++cc->count_pruned;
                 continue;
             }
         }
-
+        
         // if here, we will be doing puct
         ++cc->count_puct;
 
         const float prior = ce.prior;
-        const float q = (n_int > 0) ? (pov_sign * ce.cached_Q_eff) : (parent_q - fpu_reduction);
+        const float q = ch ? (pov_sign * ch->Q_eff) : (parent_q - fpu_reduction);
         const float u = u_scale * prior / (1.0f + n);
         float score = q + u;
 
-        // performance_penalty still requires the child pointer — only on potential winner
-        const MCTSNode* ch = ce.child.get();
-        if (ch && n_int > 0) {
+        if (ch) {
             int pen = ch->performance_penalty.load();
             if (pen > 0) {
                 score -= static_cast<float>(pen);
@@ -216,7 +214,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     }
 
     if (!best_child) {
-        best_child = get_or_create_child(best_idx);
+        ChildEntry& ce = ordered_children[best_idx];
+        best_child = get_or_create_child(ce);
     }
 
     return best_child;
@@ -535,13 +534,6 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
 
         MCTSNode* p = n->parent;
         if (!p) continue;  // root: skip parent-dependent updates
-
-        // mirror N and Q_eff into parent's ChildEntry — eliminates pointer chase in PUCT loop
-        if (n->parent_child_idx != 0xFFFF) {
-            auto& pce = p->ordered_children[n->parent_child_idx];
-            pce.cached_N     = nv;
-            pce.cached_Q_eff = n->Q_eff;
-        }
 
         const float pov = p->get_stm_pov();
 

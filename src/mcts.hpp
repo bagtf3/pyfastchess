@@ -92,7 +92,6 @@ struct MCTSNode {
 
     // tree links
     MCTSNode* parent = nullptr;
-    uint16_t parent_child_idx = 0xFFFF;  // index into parent->ordered_children; 0xFFFF = root/unset
 
     // Move info (uci from parent->this). Root has uci="".
     std::string uci;
@@ -190,12 +189,10 @@ struct MCTSNode {
     // Canonical child entry: owner of optional child subtree, prior, and UCI string.
     // This is the single source-of-truth for both ordering and the prior values.
     struct ChildEntry {
-        uint16_t move_idx    = 0xFFFF;      // policy-space index (4288 domain); 0xFFFF = unset
-        int      cached_N    = 0;           // mirror of child->N; updated at backprop time
-        float    cached_Q_eff = 0.0f;       // mirror of child->Q_eff; updated at backprop time
-        float    prior       = 0.0f;        // fudged prior (post uniform_eps, floors, clip)
-        float    raw_prior   = 0.0f;        // raw softmax prior (post softmax, pre fudging)
+        uint16_t move_idx = 0xFFFF;         // policy-space index (4288 domain); 0xFFFF = unset
         std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
+        float prior = 0.0f;                 // fudged prior (post uniform_eps, floors, clip)
+        float raw_prior = 0.0f;             // raw softmax prior (post softmax, pre fudging)
 
         ChildEntry() = default;
         ChildEntry(uint16_t idx, float p = 0.0f, float rp = 0.0f)
