@@ -55,11 +55,6 @@ static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67
 static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 4288
 
 struct LegalMaskandMap {
-    // mask where idx = from*MOVE_TO_WIDTH + to_slot (STM-POV)
-    // to_slot = file + rank_index*8, where rank_index in [0..7] = real board ranks,
-    // and rank_index in [8..10] encodes underpromotions: 8=N, 9=B, 10=R.
-    std::vector<uint8_t> mask;
-
     // compact per-move list: pair<uci_string, stm_pov_idx>
     std::vector<std::pair<std::string, uint16_t>> uci_idx_pairs;
 

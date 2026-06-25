@@ -527,10 +527,7 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
 
 
 LegalMaskandMap Board::legal_move_mask() const {
-    // size = TOTAL_MOVE_SPACE (64 * MOVE_TO_WIDTH == 4288)
-    constexpr size_t N = TOTAL_MOVE_SPACE;
     LegalMaskandMap out;
-    out.mask.assign(N, 0);
 
     chess::Movelist ml;
     chess::movegen::legalmoves(ml, board_);
@@ -585,7 +582,6 @@ LegalMaskandMap Board::legal_move_mask() const {
             idx = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
         }
 
-        out.mask[idx] = 1;
         out.uci_idx_pairs.emplace_back(std::move(uci), static_cast<uint16_t>(idx));
     }
 

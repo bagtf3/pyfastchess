@@ -1434,14 +1434,12 @@ MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
     const RawEntry* re = raw_policy_cache().lookup(r->zobrist);
     if (re && re->has_policy && r->legal_mask_map) {
         const auto& policy_vec = re->p_policy;
-        const auto& mask = r->legal_mask_map->mask;
         float max_logit = *std::max_element(policy_vec.begin(), policy_vec.end());
         float sum_all = 0.0f, sum_legal = 0.0f;
-        for (size_t i = 0; i < policy_vec.size(); ++i) {
-            const float e = std::exp(policy_vec[i] - max_logit);
-            sum_all += e;
-            if (mask[i]) sum_legal += e;
-        }
+        for (const float v : policy_vec)
+            sum_all += std::exp(v - max_logit);
+        for (const auto& p : r->legal_mask_map->lookup())
+            sum_legal += std::exp(policy_vec[p.second] - max_logit);
         if (sum_all > 0.0f) result.mass_on_legal = sum_legal / sum_all;
     }
 
