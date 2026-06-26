@@ -5,16 +5,14 @@
 #include <cstdint>
 #include <cctype>
 #include <algorithm>
-#include <chrono>
 #include <utility>
 #include <optional>
 #include <vector>
-#include <algorithm> 
+#include <algorithm>
 #include <cstring>
 #include <array>
-#include "chess.hpp" 
+#include "chess.hpp"
 #include "backend.hpp"
-#include "evaluator.hpp"
 
 #ifdef _MSC_VER
   #include <intrin.h>
@@ -672,145 +670,6 @@ std::vector<int> Board::attackers_list(const std::string& color, int square_inde
     return out;
 }
 
-std::pair<int, backend::QStats> Board::qsearch(int alpha, int beta,
-                                               evaluator::Evaluator* ev,
-                                               const QOptions& opts) {
-    QStats stats;
-    using clk = std::chrono::steady_clock;
-    auto start = clk::now();
-
-    int score = this->qsearch_impl(alpha, beta, 0, ev, opts, stats, start);
-
-    stats.time_used_ms = static_cast<int>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            clk::now() - start).count()
-    );
-
-    return { score, stats };
-}
-
-int Board::qsearch_impl(int alpha, int beta, int ply,
-                        evaluator::Evaluator* ev,
-                        const QOptions &opts,
-                        QStats &stats,
-                        const std::chrono::steady_clock::time_point &start) {
-    using clk = std::chrono::steady_clock;
-
-    ++stats.qnodes;
-    if (ply > stats.max_qply_seen) stats.max_qply_seen = ply;
-
-    // terminal check
-    if (auto tv = terminal_value_cp_white_pov(*this, 32000)) {
-        return *tv;
-    }
-
-    // ply cap / time limit shortcuts
-    if (opts.max_qply && ply >= opts.max_qply) {
-        int e = ev->evaluate(*this);
-        return e;
-    }
-
-    if (opts.time_limit_ms) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            clk::now() - start).count();
-        if (elapsed > opts.time_limit_ms) {
-            int e = ev->evaluate(*this);
-            return e;
-        }
-    }
-
-    const bool in_check = this->in_check();
-    const bool stm_white = (this->side_to_move() == "w");
-
-    int base_eval = ev->evaluate(*this);
-    int stand = base_eval;
-
-    // if in check, prove youre not losing a pawn + tempo
-    // compromise because full mate check is too slow
-    if (ply <= 3 && in_check) stand += (stm_white ? -120 : 120);
-
-    // stand-pat window tests
-    if (stm_white) {
-        if (stand >= beta) {return stand; }
-        if (alpha < stand) alpha = stand;
-    } else {
-        if (stand <= alpha) {return stand; }
-        if (beta > stand) beta = stand;
-    }
-
-    auto moves = this->legal_moves();
-    std::vector<std::pair<int, std::string>> scored;
-    scored.reserve(moves.size());
-
-    for (const auto &m : moves) {
-        if (in_check) {
-            scored.emplace_back(0, m);
-        } else {
-            if (this->gives_double_attack(m, true)) scored.emplace_back(800, m);
-            else if (this->is_capture(m)) scored.emplace_back(this->mvvlva(m), m);
-            else if (m.size() > 4) scored.emplace_back(700, m);
-            else if (this->gives_check(m)) scored.emplace_back(500, m);
-            else continue;
-        }
-    }
-
-    if (scored.empty()) {
-        return stand;
-    }
-
-    std::sort(scored.begin(), scored.end(),
-              [](const auto &a, const auto &b){ return a.first > b.first; });
-
-    int best = stand;
-
-    for (size_t i = 0; i < std::min<size_t>(scored.size(), opts.max_qcaptures); ++i) {
-        const auto &[score, mv] = scored[i];
-        if (!this->push_uci(mv)) continue;
-
-        int sc = this->qsearch_impl(alpha, beta, ply + 1, ev, opts, stats, start);
-        this->unmake();
-
-        if (stm_white) {
-            if (sc >= beta) {return sc; }
-            if (sc > best) best = sc;
-            if (sc > alpha) alpha = sc;
-        } else {
-            if (sc <= alpha) {return sc; }
-            if (sc < best) best = sc;
-            if (sc < beta) beta = sc;
-        }
-    }
-
-    return best;
-}
-
-
-std::vector<std::pair<int, std::string>> Board::ordered_moves(const std::optional<std::string>& tt_best) const {
-    std::vector<std::pair<int, std::string>> out;
-    auto legal = legal_moves();
-    out.reserve(legal.size());
-
-    for (const auto &mv : legal) {
-        int score = 0;
-        if (tt_best && mv == *tt_best) {
-            score = 100000;
-        }
-        else if (is_capture(mv)) {
-            score = 1000 + mvvlva(mv);
-        }
-        else if (gives_check(mv)) {
-            score = 500;
-        }
-        // else score remains 0
-        out.emplace_back(score, mv);
-    }
-
-    std::sort(out.begin(), out.end(), [](const auto &a, const auto &b){
-        return a.first > b.first;
-    });
-
-    return out;
-}
 
 std::optional<float>
 terminal_value_white_pov(const Board& b) noexcept {

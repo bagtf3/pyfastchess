@@ -11,7 +11,6 @@ pybind11_add_module(pyfastchess._core
     src/backend.cpp
     src/binding.cpp
     src/mcts.cpp
-    src/evaluator.cpp
     src/cache.cpp
     src/singleton_registry.cpp
 )

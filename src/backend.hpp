@@ -4,28 +4,10 @@
 #include <tuple>
 #include <stdexcept>
 #include <cstdint>
-#include <chrono>
 #include <optional>
 #include "chess.hpp"
 
-namespace evaluator { class Evaluator; } 
-
 namespace backend {
-
-struct QOptions {
-    int max_qply = 16;         // max quiescence ply to explore
-    int max_qcaptures = 24;    // max total captures to consider (safety)
-    int qdelta = 0;            // optional delta threshold (unused initially)
-    int time_limit_ms = 3;     // 0 => no time limit
-    uint64_t node_limit = 0;   // 0 => no limit
-};
-
-struct QStats {
-    int qnodes = 0;            // number of q-nodes visited
-    int max_qply_seen = 0;
-    int captures_considered = 0;
-    int time_used_ms = 0;
-};
 
 class Board;
 
@@ -92,7 +74,7 @@ public:
     std::string side_to_move() const;
     std::string enpassant_sq() const;
     std::string castling_rights() const;
-    
+
     int halfmove_clock() const;
     int fullmove_number() const;
     bool is_repetition(int count) const;
@@ -142,15 +124,6 @@ public:
     // expose raw chess board if you want direct access:
     const chess::Board& raw_board() const { return board_; }
 
-    // run a quiescence search rooted at this board, mutating this board via push/unmake
-    // returns pair(score_cp, stats)
-    std::pair<int, QStats> qsearch(int alpha, int beta, evaluator::Evaluator* ev, const QOptions& opts);
-
-    // returns vector of (score, uci_move) sorted descending by score
-    // tt_best is optional UCI string (transposition-table best move) — pass empty optional for none
-    std::vector<std::pair<int, std::string>> ordered_moves(
-        const std::optional<std::string>& tt_best = std::nullopt) const;
-    
 private:
     static std::string color_to_char(chess::Color c);
     static std::string reason_to_string(chess::GameResultReason r);
@@ -158,16 +131,10 @@ private:
 
     chess::Board board_{};
     std::vector<chess::Move> history_;
-
-    // recursive quiescence implementation used by Board::qsearch
-    int qsearch_impl(int alpha, int beta, int ply, evaluator::Evaluator* ev,
-                    const QOptions &opts, QStats &stats,
-                    const std::chrono::steady_clock::time_point &start);
-
 };
 
 // Normalized: -1 (white losing), 0 (draw), +1 (white winning).
-std::optional<float>terminal_value_white_pov(const Board& b) noexcept;
+std::optional<float> terminal_value_white_pov(const Board& b) noexcept;
 
 // Centipawn-scaled: returns ±mate_cp or 0 for draws.
 std::optional<int>

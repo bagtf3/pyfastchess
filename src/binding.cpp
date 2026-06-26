@@ -8,7 +8,6 @@
 #include <memory>
 #include "backend.hpp"
 #include "mcts.hpp"
-#include "evaluator.hpp"
 #include "cache.hpp"
 #include "singleton_registry.hpp"
 
@@ -53,33 +52,6 @@ std::vector<uint8_t> legal_move_mask_py(const backend::Board &b) {
     return mask;
 }
 
-static py::tuple board_qsearch_wrapper(backend::Board &b,
-                                       int alpha,
-                                       int beta,
-                                       evaluator::Evaluator &ev,
-                                       py::object qopts_py = py::none()) {
-    backend::QOptions opts;
-    if (!qopts_py.is_none() && py::isinstance<py::dict>(qopts_py)) {
-        py::dict d = qopts_py.cast<py::dict>();
-        if (d.contains("max_qply"))     opts.max_qply      = d["max_qply"].cast<int>();
-        if (d.contains("max_qcaptures"))opts.max_qcaptures = d["max_qcaptures"].cast<int>();
-        if (d.contains("qdelta"))       opts.qdelta        = d["qdelta"].cast<int>();
-        if (d.contains("time_limit_ms"))opts.time_limit_ms = d["time_limit_ms"].cast<int>();
-        if (d.contains("node_limit"))   opts.node_limit    = d["node_limit"].cast<uint64_t>();
-    }
-
-    auto res = b.qsearch(alpha, beta, &ev, opts);
-    int score = res.first;
-    backend::QStats st = res.second;
-
-    py::dict pd;
-    pd["qnodes"] = st.qnodes;
-    pd["max_qply_seen"] = st.max_qply_seen;
-    pd["captures_considered"] = st.captures_considered;
-    pd["time_used_ms"] = st.time_used_ms;
-
-    return py::make_tuple(score, pd);
-}
 
 class MCTSForest {
 public:
@@ -282,23 +254,8 @@ PYBIND11_MODULE(_core, m) {
           .def("piece_type_at", &backend::Board::piece_type_at)
           .def("piece_color_at", &backend::Board::piece_color_at)
           .def("attackers_u64", &backend::Board::attackers_u64, py::arg("color"), py::arg("square_index"))
-          .def("attackers_list", &backend::Board::attackers_list, py::arg("color"), py::arg("square_index"))
-          .def("qsearch", &board_qsearch_wrapper,
-               py::arg("alpha"), py::arg("beta"), py::arg("evaluator"), py::arg("qopts") = py::none(),
-               "Run native qsearch: returns (score_cp, qstats_dict)")
-          
-          .def("ordered_moves", [](backend::Board &b, py::object tt_best_py = py::none()) {
-               std::optional<std::string> tt;
-               if (!tt_best_py.is_none()) tt = tt_best_py.cast<std::string>();
-               auto vec = b.ordered_moves(tt);
-               py::list out;
-               for (const auto &p : vec) {
-                    out.append(py::make_tuple(p.first, p.second));
-               }
-               return out;
-          }, py::arg("tt_best") = py::none(),
-               "Return list of (score, uci_move) sorted descending. tt_best optional UCI string");
-          
+          .def("attackers_list", &backend::Board::attackers_list, py::arg("color"), py::arg("square_index"));
+
      m.def("terminal_value_white_pov",
           [](const backend::Board& b) -> py::object {
                auto v = terminal_value_white_pov(b);
@@ -603,84 +560,6 @@ PYBIND11_MODULE(_core, m) {
           .def("resolve_all_inflight", &MCTSForest::resolve_all_inflight,
                "Call resolve_inflight() on all registered trees.")
           .def("__len__", &MCTSForest::size);
-
-     py::class_<evaluator::Weights>(m, "EvalWeights")
-          .def(py::init<>())
-          .def_readwrite("psqt", &evaluator::Weights::psqt)
-          .def_readwrite("psqt_black", &evaluator::Weights::psqt_black) 
-          .def_readwrite("mobility_weights", &evaluator::Weights::mobility_weights)
-          .def_readwrite("tactical_weights", &evaluator::Weights::tactical_weights)
-          .def_readwrite("king_weights", &evaluator::Weights::king_weights)
-          .def_readwrite("stm_bias", &evaluator::Weights::stm_bias)
-          .def_readwrite("global_scale", &evaluator::Weights::global_scale);
-
-     py::class_<evaluator::Evaluator, std::shared_ptr<evaluator::Evaluator>>(m, "Evaluator")
-          .def(py::init<>())
-          .def("configure", [](evaluator::Evaluator &ev, py::object wobj) {
-               // Accept either EvalWeights instance or a tuple/dict from Python.
-               // If user passed EvalWeights already, cast directly:
-               if (py::isinstance<evaluator::Weights>(wobj)) {
-                    ev.configure(wobj.cast<evaluator::Weights>());
-                    return;
-               }
-               // Otherwise expect dict-ish with keys. Build a Weights struct.
-               evaluator::Weights w;
-               if (py::hasattr(wobj, "get")) {
-                    // assume dict-like mapping
-                    py::dict d = py::dict(wobj);
-                    if (d.contains("psqt")) {
-                         auto arr = d["psqt"].cast<py::array_t<int32_t>>();
-                         // accept shapes (1536,), (4,384), or (4,6,64)
-                         auto buf = arr.request();
-                         if (buf.ndim == 1 && buf.shape[0] == 1536) {
-                              w.psqt.assign((int32_t*)buf.ptr, (int32_t*)buf.ptr + 1536);
-                         } else if (buf.ndim == 2 && buf.shape[0] == 4 && buf.shape[1] == 384) {
-                              w.psqt.assign((int32_t*)buf.ptr, (int32_t*)buf.ptr + 4*384);
-                         } else if (buf.ndim == 3 && buf.shape[0]==4 && buf.shape[1]==6 && buf.shape[2]==64) {
-                              int32_t* p = (int32_t*)buf.ptr;
-                              w.psqt.assign(p, p + 4*6*64);
-                         } else {
-                              throw std::runtime_error("psqt array must be shape (1536,), (4,384) or (4,6,64)");
-                         }
-                    }
-                    if (d.contains("stm_bias")) w.stm_bias = d["stm_bias"].cast<int32_t>();
-                    if (d.contains("global_scale")) w.global_scale = d["global_scale"].cast<int32_t>();
-                    if (d.contains("mobility_weights")) {
-                         auto m = d["mobility_weights"].cast<std::vector<int32_t>>();
-                         if (m.size()==6) w.mobility_weights = m;
-                    }
-                    if (d.contains("tactical_weights")) {
-                         auto t = d["tactical_weights"].cast<std::vector<int32_t>>();
-                         if (t.size()==18) w.tactical_weights = t;
-                    }
-                    if (d.contains("king_weights")) {
-                         auto k = d["king_weights"].cast<std::vector<int32_t>>();
-                         if (k.size()==3) w.king_weights = k;
-                    }
-                    ev.configure(w);
-                    return;
-               }
-               throw std::runtime_error("configure expects EvalWeights instance or dict-like object");
-          }, py::arg("weights"))
-
-          .def("evaluate", [](evaluator::Evaluator &ev, const backend::Board &b){
-               return ev.evaluate(b);
-          }, py::arg("board"))
-
-          .def("evaluate_itemized", [](evaluator::Evaluator &ev, const backend::Board &b){
-               auto tup = ev.evaluate_itemized(b);
-               // return a dict for easy use in Python
-               py::dict d;
-               d["material"]  = std::get<0>(tup);
-               d["psqt"]      = std::get<1>(tup);
-               d["mobility"]  = std::get<2>(tup);
-               d["tactical"]  = std::get<3>(tup);
-               d["stm"]       = std::get<4>(tup);
-               d["total"]     = std::get<5>(tup);
-               return d;
-          }, py::arg("board"))
-
-          .def("get_weights", [](evaluator::Evaluator &ev){return ev.get_weights();});
 
           m.def("raw_cache_bulk_insert", [](py::iterable batch) {
                std::vector<std::tuple<uint64_t, WDL, std::vector<float>>> vec;

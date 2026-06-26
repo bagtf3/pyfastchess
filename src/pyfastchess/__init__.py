@@ -20,10 +20,6 @@ raw_cache_stats = _core.raw_cache_stats
 priors_cache_stats = _core.priors_cache_stats
 priors_cache_clear = _core.priors_cache_clear
 
-# Evaluator and weights
-Evaluator = _core.Evaluator
-EvalWeights = _core.EvalWeights
-
 # misc helpers
 terminal_value_white_pov = _core.terminal_value_white_pov
 build_sometimes_legal_mask = _core.build_sometimes_legal_mask
@@ -47,8 +43,6 @@ __all__ = [
     "raw_cache_stats",
     "priors_cache_stats",
     "priors_cache_clear",
-    "Evaluator",
-    "EvalWeights",
     "terminal_value_white_pov",
     "build_sometimes_legal_mask",
     "lc0_features_float",
