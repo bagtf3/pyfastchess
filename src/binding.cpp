@@ -81,6 +81,68 @@ static py::tuple board_qsearch_wrapper(backend::Board &b,
     return py::make_tuple(score, pd);
 }
 
+class MCTSForest {
+public:
+    void add_tree(py::object tree) {
+        trees_.push_back(std::move(tree));
+    }
+
+    void pop_tree(py::object tree) {
+        trees_.erase(
+            std::remove_if(trees_.begin(), trees_.end(),
+                [&tree](const py::object& o) { return o.is(tree); }),
+            trees_.end());
+    }
+
+    // Drain all pending nodes from all trees and encode into a single batch.
+    // Returns (keys_np[N] uint64, boards_np[N,64] int16).
+    // N=0 returns empty arrays — caller should check shape[0] before inferring.
+    py::tuple get_all_encoded() {
+        struct Entry { uint64_t key; const backend::Board* board; };
+        std::vector<Entry> entries;
+        entries.reserve(trees_.size() * 16);
+
+        for (auto& obj : trees_) {
+            MCTSTree& tree = obj.cast<MCTSTree&>();
+            std::vector<MCTSNode*> nodes = tree.pop_pending_to_inflight();
+            for (MCTSNode* n : nodes) {
+                if (!n) continue;
+                uint64_t z = n->zobrist;
+                if (z == 0) { z = n->board.hash(); n->zobrist = z; }
+                entries.push_back({z, &n->board});
+            }
+        }
+
+        const py::ssize_t N = static_cast<py::ssize_t>(entries.size());
+        py::array_t<uint64_t> keys_np({N});
+        py::array_t<int16_t>  boards_np({N, static_cast<py::ssize_t>(64)});
+
+        auto k = keys_np.mutable_unchecked<1>();
+        auto b = boards_np.mutable_unchecked<2>();
+
+        for (py::ssize_t i = 0; i < N; ++i) {
+            k(i) = entries[i].key;
+            auto tokens = backend::board_to_64_tokens(*entries[i].board);
+            for (py::ssize_t j = 0; j < 64; ++j)
+                b(i, j) = tokens[j];
+        }
+
+        return py::make_tuple(keys_np, boards_np);
+    }
+
+    void resolve_all_inflight() {
+        for (auto& obj : trees_) {
+            MCTSTree& tree = obj.cast<MCTSTree&>();
+            tree.resolve_inflight();
+        }
+    }
+
+    size_t size() const { return trees_.size(); }
+
+private:
+    std::vector<py::object> trees_;
+};
+
 PYBIND11_MODULE(_core, m) {
     m.doc() = "pyfastchess core bindings";
 
@@ -529,6 +591,18 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("total_puct", &CollectResults::total_puct)
           .def_readonly("total_penalty", &CollectResults::total_penalty);
 
+
+     py::class_<MCTSForest>(m, "MCTSForest")
+          .def(py::init<>())
+          .def("add_tree", &MCTSForest::add_tree, py::arg("tree"),
+               "Register a tree in the forest. Keeps a Python reference alive.")
+          .def("pop_tree", &MCTSForest::pop_tree, py::arg("tree"),
+               "Unregister a tree by identity.")
+          .def("get_all_encoded", &MCTSForest::get_all_encoded,
+               "Drain pending from all trees. Returns (keys_np[N] uint64, boards_np[N,64] int16).")
+          .def("resolve_all_inflight", &MCTSForest::resolve_all_inflight,
+               "Call resolve_inflight() on all registered trees.")
+          .def("__len__", &MCTSForest::size);
 
      py::class_<evaluator::Weights>(m, "EvalWeights")
           .def(py::init<>())

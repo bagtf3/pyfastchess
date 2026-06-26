@@ -7,6 +7,7 @@ _core = import_module("pyfastchess._core")
 Board = _core.Board
 MCTSNode = _core.MCTSNode
 MCTSTree = _core.MCTSTree
+MCTSForest = _core.MCTSForest
 
 # Raw policy cache API (bulk upload, clear, stats) — may raise if not built into the module
 raw_cache_bulk_insert = _core.raw_cache_bulk_insert
@@ -38,6 +39,7 @@ __all__ = [
     "Board",
     "MCTSNode",
     "MCTSTree",
+    "MCTSForest",
     "raw_cache_bulk_insert",
     "raw_cache_bulk_insert_np",
     "raw_cache_lookup",
