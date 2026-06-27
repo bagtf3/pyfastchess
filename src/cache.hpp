@@ -17,7 +17,7 @@ struct WDL {
 
 struct PriorEntry {
     std::string uci;
-    uint16_t move_idx = 0xFFFF;  // policy-space index (4288 domain); 0xFFFF = unset
+    uint16_t move_idx = 0xFFFF;  // policy-space index (1858 domain); 0xFFFF = unset
     float prior = 0.0f;          // fudged prior (post uniform_eps, floors, clip)
     float raw_prior = 0.0f;      // raw softmax prior (post softmax, pre fudging)
 };

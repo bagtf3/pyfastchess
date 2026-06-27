@@ -462,6 +462,16 @@ Board::moves_to_labels(const std::vector<std::string>& ucis) const {
     return {froms, tos, pcs, pros};
 }
 
+static const std::array<uint16_t, 4288> kRemap = [](){
+    std::array<uint16_t, 4288> r;
+    r.fill(0xFFFF);
+    auto mask = build_sometimes_legal_mask();
+    uint16_t counter = 0;
+    for (size_t i = 0; i < 4288; ++i)
+        if (mask[i]) r[i] = counter++;
+    return r;
+}();
+
 std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& ucis) const {
     std::vector<uint16_t> out;
     out.reserve(ucis.size());
@@ -517,7 +527,7 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
             flat = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
         }
 
-        out.push_back(static_cast<uint16_t>(flat));
+        out.push_back(kRemap[flat]);
     }
 
     return out;
@@ -580,7 +590,7 @@ LegalMaskandMap Board::legal_move_mask() const {
             idx = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
         }
 
-        out.uci_idx_pairs.emplace_back(std::move(uci), static_cast<uint16_t>(idx));
+        out.uci_idx_pairs.emplace_back(std::move(uci), kRemap[idx]);
     }
 
     return out;

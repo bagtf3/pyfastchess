@@ -25,7 +25,7 @@
 //
 // raw_policy_cache()  RawPolicyCache, 48k capacity, deque eviction.
 //                     Mailbox for NN inference results: Python writes raw outputs
-//                     (4288-float policy + WDL probs STM-POV) here after each batch;
+//                     (1858-float policy + WDL probs STM-POV) here after each batch;
 //                     C++ drains it during resolve_inflight / collect_one_leaf_tagged.
 //                     Entries are consumed once processed and not retained.
 //
@@ -33,7 +33,7 @@
 
 // ---------------- Raw entry + stats ----------------
 struct RawEntry {
-    // single full policy vector (4288) for new model
+    // single full policy vector (1858 sometimes-legal domain)
     std::vector<float> p_policy;
     bool has_policy = false;
 

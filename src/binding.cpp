@@ -592,8 +592,8 @@ PYBIND11_MODULE(_core, m) {
                     wdl.draw = wdl_t[1].cast<float>();
                     wdl.loss = wdl_t[2].cast<float>();
                     std::vector<float> policy = to_vec(t[2]);
-                    if (policy.size() != 4288) throw std::runtime_error(
-                              "raw_cache_bulk_insert: policy_vector must have length 4288");
+                    if (policy.size() != 1858) throw std::runtime_error(
+                              "raw_cache_bulk_insert: policy_vector must have length 1858");
                     vec.emplace_back(key, wdl, std::move(policy));
                }
 
@@ -603,7 +603,7 @@ PYBIND11_MODULE(_core, m) {
           // Fast batch insert from numpy arrays — zero Python loop.
           // keys:   (B,)    uint64
           // wdl:    (B, 3)  float32, STM-POV softmax probs [win, draw, loss]
-          // policy: (B, 4288) float32, raw policy logits
+          // policy: (B, 1858) float32, raw policy logits (1858 sometimes-legal domain)
           m.def("raw_cache_bulk_insert_np", [](
                py::array_t<uint64_t, py::array::c_style | py::array::forcecast> keys,
                py::array_t<float,    py::array::c_style | py::array::forcecast> wdl_batch,
@@ -618,8 +618,8 @@ PYBIND11_MODULE(_core, m) {
                     throw std::runtime_error("raw_cache_bulk_insert_np: batch size mismatch");
                if (w.shape(1) != 3)
                     throw std::runtime_error("raw_cache_bulk_insert_np: wdl must be shape (B, 3)");
-               if (p.shape(1) != 4288)
-                    throw std::runtime_error("raw_cache_bulk_insert_np: policy must be shape (B, 4288)");
+               if (p.shape(1) != 1858)
+                    throw std::runtime_error("raw_cache_bulk_insert_np: policy must be shape (B, 1858)");
 
                std::vector<std::tuple<uint64_t, WDL, std::vector<float>>> vec;
                vec.reserve(B);
@@ -627,11 +627,11 @@ PYBIND11_MODULE(_core, m) {
                for (size_t i = 0; i < B; ++i) {
                     WDL wdl{ w(i, 0), w(i, 1), w(i, 2) };
                     const float* pol = &p(i, 0);
-                    vec.emplace_back(k[i], wdl, std::vector<float>(pol, pol + 4288));
+                    vec.emplace_back(k[i], wdl, std::vector<float>(pol, pol + 1858));
                }
 
                raw_policy_cache().bulk_insert(std::move(vec));
-          }, "Fast batch insert: keys (B,) uint64, wdl (B,3) float32 STM-POV, policy (B,4288) float32 logits.");
+          }, "Fast batch insert: keys (B,) uint64, wdl (B,3) float32 STM-POV, policy (B,1858) float32 logits (1858 domain).");
 
           m.def("raw_cache_clear", []() {raw_policy_cache().clear();}, "Clear raw policy cache.");
           m.def("raw_cache_lookup", [](uint64_t key) -> py::object {

@@ -189,7 +189,7 @@ struct MCTSNode {
     // Canonical child entry: owner of optional child subtree, prior, and UCI string.
     // This is the single source-of-truth for both ordering and the prior values.
     struct ChildEntry {
-        uint16_t move_idx = 0xFFFF;         // policy-space index (4288 domain); 0xFFFF = unset
+        uint16_t move_idx = 0xFFFF;         // policy-space index (1858 domain); 0xFFFF = unset
         std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
         float prior = 0.0f;                 // fudged prior (post uniform_eps, floors, clip)
         float raw_prior = 0.0f;             // raw softmax prior (post softmax, pre fudging)
