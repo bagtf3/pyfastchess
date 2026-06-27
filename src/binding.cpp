@@ -43,10 +43,10 @@ static py::array_t<int16_t> board_to_64_tokens_py(const backend::Board& b) {
     return out;
 }
 
-// wrapper returning np.uint8 array of shape (4288,) -- computed on demand, debug only
+// wrapper returning np.uint8 array of shape (1858,) -- debug/inspection only
 std::vector<uint8_t> legal_move_mask_py(const backend::Board &b) {
     auto lm = b.legal_move_mask();
-    std::vector<uint8_t> mask(backend::TOTAL_MOVE_SPACE, 0);
+    std::vector<uint8_t> mask(1858, 0);
     for (const auto& p : lm.uci_idx_pairs)
         mask[p.second] = 1;
     return mask;
