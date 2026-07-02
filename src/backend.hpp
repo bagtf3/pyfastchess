@@ -31,6 +31,10 @@ std::vector<uint8_t> build_sometimes_legal_mask();
 // Plane 109 stores the raw halfmove clock — divide by 99.0 when converting to float32.
 std::vector<uint8_t> board_to_lc0_features(const Board& b);
 
+// Return the LC0 1858-dim policy index for a move on the given board.
+// Handles promo slot differences and castling index swaps relative to XC0.
+uint16_t uci_to_lc0_idx(const Board& b, const std::string& uci);
+
 static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
 static constexpr size_t NUM_UNDERPROMOS = 3;         // N, B, R underpromos
 static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67

@@ -968,4 +968,52 @@ std::vector<uint8_t> board_to_lc0_features(const Board& b) {
     return out;
 }
 
+// LC0 promo slot index for (from_file, to_file, lc0_type).
+// LC0 ordering: from_file outer, valid to_file inner, then q=0 / r=1 / b=2.
+static uint16_t lc0_promo_idx(int from_file, int to_file, int lc0_type) {
+    int pair_rank = 0;
+    for (int ff = 0; ff <= 7; ++ff) {
+        const int tf_min = std::max(0, ff - 1);
+        const int tf_max = std::min(7, ff + 1);
+        if (ff == from_file) {
+            for (int tf = tf_min; tf < to_file; ++tf)
+                ++pair_rank;
+            break;
+        }
+        pair_rank += (tf_max - tf_min + 1);
+    }
+    return static_cast<uint16_t>(1792 + pair_rank * 3 + lc0_type);
+}
+
+uint16_t uci_to_lc0_idx(const Board& b, const std::string& uci) {
+    const int from_file = uci[0] - 'a';
+    const int from_rank = uci[1] - '1';
+    const int to_file   = uci[2] - 'a';
+    const int to_rank   = uci[3] - '1';
+
+    const bool stm_white = (b.raw_board().sideToMove() == chess::Color::WHITE);
+    const int sf = stm_white ? from_rank : (7 - from_rank);
+    const int st = stm_white ? to_rank   : (7 - to_rank);
+    const int from_sq = sf * 8 + from_file;
+    const int to_sq   = st * 8 + to_file;
+
+    if (uci.size() > 4) {
+        const char pc = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
+        if (pc == 'q') return lc0_promo_idx(from_file, to_file, 0);
+        if (pc == 'r') return lc0_promo_idx(from_file, to_file, 1);
+        if (pc == 'b') return lc0_promo_idx(from_file, to_file, 2);
+        // knight promo: LC0 uses bare move slot
+        return kRemap[from_sq * 64 + to_sq];
+    }
+
+    // Castling: king on e1 (sq 4 STM-as-white) moving 2 squares.
+    // LC0 swaps KS castle (e1g1) -> e1h1 slot, QS castle (e1c1) -> e1a1 slot.
+    if (from_sq == 4 && (to_sq == 6 || to_sq == 2)) {
+        const int swapped_to = (to_sq == 6) ? 7 : 0;
+        return kRemap[4 * 64 + swapped_to];
+    }
+
+    return kRemap[from_sq * 64 + to_sq];
+}
+
 } // namespace backend

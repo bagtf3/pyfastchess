@@ -102,6 +102,46 @@ public:
         return py::make_tuple(keys_np, boards_np);
     }
 
+    // Drain all pending nodes and encode as LC0 features.
+    // Returns (keys_np[N] uint64, features_np[N,112,8,8] uint8).
+    py::tuple get_all_lc0_features() {
+        struct Entry { uint64_t key; const backend::Board* board; };
+        std::vector<Entry> entries;
+        entries.reserve(trees_.size() * 16);
+
+        for (auto& obj : trees_) {
+            MCTSTree& tree = obj.cast<MCTSTree&>();
+            std::vector<MCTSNode*> nodes = tree.pop_pending_to_inflight();
+            for (MCTSNode* n : nodes) {
+                if (!n) continue;
+                uint64_t z = n->zobrist;
+                if (z == 0) { z = n->board.hash(); n->zobrist = z; }
+                entries.push_back({z, &n->board});
+            }
+        }
+
+        const py::ssize_t N = static_cast<py::ssize_t>(entries.size());
+        py::array_t<uint64_t> keys_np({N});
+        py::array_t<uint8_t>  features_np({N,
+            static_cast<py::ssize_t>(112),
+            static_cast<py::ssize_t>(8),
+            static_cast<py::ssize_t>(8)});
+
+        auto k = keys_np.mutable_unchecked<1>();
+        auto f = features_np.mutable_unchecked<4>();
+
+        for (py::ssize_t i = 0; i < N; ++i) {
+            k(i) = entries[i].key;
+            auto feat = backend::board_to_lc0_features(*entries[i].board);
+            for (py::ssize_t p = 0; p < 112; ++p)
+                for (py::ssize_t r = 0; r < 8; ++r)
+                    for (py::ssize_t c = 0; c < 8; ++c)
+                        f(i, p, r, c) = feat[p * 64 + r * 8 + c];
+        }
+
+        return py::make_tuple(keys_np, features_np);
+    }
+
     void resolve_all_inflight() {
         for (auto& obj : trees_) {
             MCTSTree& tree = obj.cast<MCTSTree&>();
@@ -388,6 +428,9 @@ PYBIND11_MODULE(_core, m) {
           .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
           .def("qdelta_span", &MCTSTree::qdelta_span)
 
+          .def("set_lc0_policy", &MCTSTree::set_lc0_policy, py::arg("v"),
+               "When true, policy_pairs use LC0 1858 indices (promo/castling remapped).")
+
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
@@ -557,6 +600,8 @@ PYBIND11_MODULE(_core, m) {
                "Unregister a tree by identity.")
           .def("get_all_encoded", &MCTSForest::get_all_encoded,
                "Drain pending from all trees. Returns (keys_np[N] uint64, boards_np[N,64] int16).")
+          .def("get_all_lc0_features", &MCTSForest::get_all_lc0_features,
+               "Drain pending from all trees. Returns (keys_np[N] uint64, features_np[N,112,8,8] uint8).")
           .def("resolve_all_inflight", &MCTSForest::resolve_all_inflight,
                "Call resolve_inflight() on all registered trees.")
           .def("__len__", &MCTSForest::size);
