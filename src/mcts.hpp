@@ -353,8 +353,6 @@ public:
     void set_qdelta_span(float span);
     float qdelta_span() const;
 
-    void set_lc0_policy(bool v) { lc0_policy_ = v; }
-
     struct NNResult {
         float value = 0.0f;
         WDL wdl{};
@@ -384,9 +382,6 @@ private:
 
     // Whether to reuse existing subtree on advance_root
     bool reuse_tree_ = true;
-
-    // When true, policy_pairs store LC0 1858 indices instead of XC0 indices.
-    bool lc0_policy_ = false;
 
     // Value scale: multiplied into (win-loss) during backprop so Q stays in [-vscale, vscale].
     float vscale_ = 1.0f;

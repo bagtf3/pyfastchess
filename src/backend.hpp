@@ -40,10 +40,6 @@ std::vector<uint8_t> board_to_lc0_features(const Board& b);
 // counts (K), then castling state (0..15), side-to-move, and raw halfmove clock.
 std::vector<int16_t> board_to_history_tokens(const Board& b, int K);
 
-// Return the LC0 1858-dim policy index for a move on the given board.
-// Handles promo slot differences and castling index swaps relative to XC0.
-uint16_t uci_to_lc0_idx(const Board& b, const std::string& uci);
-
 static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
 static constexpr size_t NUM_UNDERPROMOS = 3;         // LC0 promo region: Q, R, B (knight = bare move)
 static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67

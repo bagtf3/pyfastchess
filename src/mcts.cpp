@@ -574,11 +574,6 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
         return;
     }
 
-    if (lc0_policy_) {
-        for (auto& p : lm.uci_idx_pairs)
-            p.second = backend::uci_to_lc0_idx(node->board, p.first);
-    }
-
     node->policy_pairs = std::move(lm.uci_idx_pairs);
 
     node->legal_moves.clear();

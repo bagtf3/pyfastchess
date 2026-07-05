@@ -484,9 +484,6 @@ PYBIND11_MODULE(_core, m) {
           .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
           .def("qdelta_span", &MCTSTree::qdelta_span)
 
-          .def("set_lc0_policy", &MCTSTree::set_lc0_policy, py::arg("v"),
-               "When true, policy_pairs use LC0 1858 indices (promo/castling remapped).")
-
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
