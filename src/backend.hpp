@@ -39,7 +39,7 @@ std::vector<uint8_t> board_to_lc0_features(const Board& b);
 uint16_t uci_to_lc0_idx(const Board& b, const std::string& uci);
 
 static constexpr size_t MOVE_TO_BASE = 64;           // base 64 dest squares
-static constexpr size_t NUM_UNDERPROMOS = 3;         // N, B, R underpromos
+static constexpr size_t NUM_UNDERPROMOS = 3;         // LC0 promo region: Q, R, B (knight = bare move)
 static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67
 static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 4288
 

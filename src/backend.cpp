@@ -466,6 +466,56 @@ Board::moves_to_labels(const std::vector<std::string>& ucis) const {
     return {froms, tos, pcs, pros};
 }
 
+// xc0 policy space is a flat 4288-slot intermediate: 64*64 board-move slots plus a
+// promotion tail, collapsed by kRemap to the 1858 sometimes-legal domain. The
+// layout mimics the 4288 policy scheme used by lc0 (Leela Chess Zero) so that xc0
+// and lc0 policy targets live in a shared domain -- credit to lc0 for the encoding.
+//
+// promo_pair_rank enumerates the valid promotion file-pairs (|from_file - to_file|
+// <= 1), from_file outer / to_file inner, giving pair_rank in 0..21. Promotion
+// slots are packed contiguously as 4096 + pair_rank*3 + type (q=0, r=1, b=2), so
+// after kRemap they occupy the tail of the 1858 domain (board moves fill the head).
+static int promo_pair_rank(int from_file, int to_file) {
+    int pair_rank = 0;
+    for (int ff = 0; ff <= 7; ++ff) {
+        const int tf_min = std::max(0, ff - 1);
+        const int tf_max = std::min(7, ff + 1);
+        if (ff == from_file) {
+            for (int tf = tf_min; tf < to_file; ++tf) ++pair_rank;
+            return pair_rank;
+        }
+        pair_rank += (tf_max - tf_min + 1);
+    }
+    return pair_rank;
+}
+
+// Map an STM-POV move to its flat slot in the xc0 4288 policy space. Knight
+// promotion and normal moves use the bare from*64+to board slot; queen/rook/bishop
+// promotions use the 4096 + pair_rank*3 + type promotion tail; castling maps to the
+// king-captures-rook board slot.
+//   from_sq, to_sq : STM-POV square indices (0..63), already flipped for black.
+//                    For castling, to_sq may be the king destination (classical UCI
+//                    e1g1) or the rook square (this lib's Move e1h1); the rook file
+//                    is derived from sign(to_file - from_file), so both forms work.
+//   promo          : lowercase promo char ('q','r','b','n') or 0/none.
+//   is_castling    : true for castling moves.
+static uint16_t move_to_flat_slot(int from_sq, int to_sq, char promo, bool is_castling) {
+    if (is_castling) {
+        const int from_file = from_sq % 8;
+        const int from_rank = from_sq / 8;
+        const int to_file   = to_sq % 8;
+        const int rook_file = (to_file > from_file) ? 7 : 0;  // KS h-file, QS a-file
+        return static_cast<uint16_t>(from_sq * 64 + (from_rank * 8 + rook_file));
+    }
+    if (promo == 'q' || promo == 'r' || promo == 'b') {
+        const int type = (promo == 'q') ? 0 : (promo == 'r') ? 1 : 2;
+        const int pr   = promo_pair_rank(from_sq % 8, to_sq % 8);
+        return static_cast<uint16_t>(4096 + pr * 3 + type);
+    }
+    // knight promo ('n') or normal move -> bare board slot
+    return static_cast<uint16_t>(from_sq * 64 + to_sq);
+}
+
 static const std::array<uint16_t, 4288> kRemap = [](){
     std::array<uint16_t, 4288> r;
     r.fill(0xFFFF);
@@ -508,30 +558,20 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
         const int st_file  = st_index % 8;
         const int st_rank  = st_index / 8; // 0..7
 
-        // detect underpromotion (n/b/r) from UCI (fifth char)
-        int underpromo_type = -1; // 0=N,1=B,2=R, -1 = not underpromo (includes queen)
-        if (u.size() > 4) {
-            char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(u[4])));
-            if (ch == 'n') underpromo_type = 0;
-            else if (ch == 'b') underpromo_type = 1;
-            else if (ch == 'r') underpromo_type = 2;
-            // 'q' and other -> not an underpromo (map to normal dest)
-        }
+        // See move_to_flat_slot: knight promo + normal moves use the bare from*64+to
+        // board slot; q/r/b promos use the promotion tail; castling maps to the
+        // king-captures-rook slot. Castling shows up here as a KING moving two files
+        // (move_to_labels returns king-destination coords).
+        char promo = 0;
+        if (u.size() > 4)
+            promo = static_cast<char>(std::tolower(static_cast<unsigned char>(u[4])));
 
-        uint32_t flat = 0;
-        if (underpromo_type >= 0) {
-            // unique 0..191 = from_file + 8*to_file + 64*underpromo_type
-            const int from_file = from_slot % 8;
-            const int to_file   = st_file;
-            const uint32_t unique = static_cast<uint32_t>(from_file + 8 * to_file + 64 * underpromo_type);
-            flat = 4096u + unique; // maps into 4096..4287
-        } else {
-            // standard mapping (includes queen promotions)
-            const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63
-            flat = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
-        }
+        const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63
+        const int from_file    = from_slot % 8;
+        const bool is_castling = (piece_type == 5) &&
+                                 (std::abs(st_file - from_file) == 2);
 
-        out.push_back(kRemap[flat]);
+        out.push_back(kRemap[move_to_flat_slot(from_slot, to_slot, promo, is_castling)]);
     }
 
     return out;
@@ -550,51 +590,30 @@ LegalMaskandMap Board::legal_move_mask() const {
 
     for (const auto &mv : ml) {
         chess::Square sf = mv.from();
-        chess::Square st = mv.to();
+        chess::Square st = mv.to();  // rook square for castling in this lib
 
-        // remap castling to canonical king destination
-        if (mv.typeOf() == chess::Move::CASTLING) {
-            const bool king_side = (mv.to() > mv.from());
-            st = chess::Square::castling_king_square(king_side, board_.sideToMove());
-        }
+        const bool is_castling = (mv.typeOf() == chess::Move::CASTLING);
 
-        // compute STM-POV flip first
+        // STM-POV flip first (rank-only ^56) so indices are in STM coordinates.
+        // No castling king-destination remap here: move_to_flat_slot derives the
+        // rook file itself, and mv.to() is already the rook square.
         if (!stm_white) {
             sf.flip();
             st.flip();
         }
 
         const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
+        const uint16_t to_slot   = static_cast<uint16_t>(st.index()); // 0..63
 
-        // convert move to UCI string (engine's POV)
+        // engine-POV UCI string (unaffected by the index remap)
         std::string uci = chess::uci::moveToUci(mv);
 
-        // get base file/rank of st (after flip)
-        const int st_index = st.index(); // 0..63
-        const int st_file  = st_index % 8;
-        const int st_rank  = st_index / 8; // 0..7
+        char promo = 0;
+        if (uci.size() > 4)
+            promo = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
 
-        // detect underpromotion char (n/b/r)
-        int underpromo_type = -1; // -1 -> not underpromo
-        if (uci.size() > 4) {
-            char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
-            if (ch == 'n') underpromo_type = 0;
-            else if (ch == 'b') underpromo_type = 1;
-            else if (ch == 'r') underpromo_type = 2;
-        }
-
-        uint32_t idx = 0;
-        if (underpromo_type >= 0) {
-            const int from_file = from_slot % 8;
-            const int to_file   = st_file;
-            const uint32_t unique = static_cast<uint32_t>(from_file + 8 * to_file + 64 * underpromo_type); // 0..191
-            idx = 4096u + unique; // 4096..4287
-        } else {
-            const uint16_t to_slot = static_cast<uint16_t>(st_file + st_rank * 8); // 0..63 (queen promos included)
-            idx = static_cast<uint32_t>(from_slot) * 64u + static_cast<uint32_t>(to_slot); // 0..4095
-        }
-
-        out.uci_idx_pairs.emplace_back(std::move(uci), kRemap[idx]);
+        const uint16_t flat = move_to_flat_slot(from_slot, to_slot, promo, is_castling);
+        out.uci_idx_pairs.emplace_back(std::move(uci), kRemap[flat]);
     }
 
     return out;
@@ -622,14 +641,16 @@ std::vector<uint8_t> build_sometimes_legal_mask() {
         }
     }
 
-    // Underpromo region [4096, 4288): pawn on rank 6 STM-POV reaches rank 7 via
-    // straight push (df=0) or diagonal capture (|df|=1). Only file pair matters.
+    // Promotion tail [4096, 4288): knight promotion is the bare from->to move
+    // (already set in the main region), so only queen/rook/bishop live here. Packed
+    // contiguously as 4096 + pair_rank*3 + type (q=0, r=1, b=2) over the 22 valid
+    // promotion file-pairs (|to_file - from_file| <= 1), 66 slots.
     for (int from_file = 0; from_file < 8; ++from_file) {
         for (int to_file = 0; to_file < 8; ++to_file) {
             if (std::abs(to_file - from_file) <= 1) {
-                for (int promo_type = 0; promo_type < 3; ++promo_type) {
-                    mask[4096 + from_file + 8 * to_file + 64 * promo_type] = 1;
-                }
+                const int pr = promo_pair_rank(from_file, to_file);
+                for (int promo_type = 0; promo_type < 3; ++promo_type)
+                    mask[4096 + pr * 3 + promo_type] = 1;
             }
         }
     }
