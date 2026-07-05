@@ -86,16 +86,34 @@ arrays are imported; lc0 tables are used only as the test oracle.
    STM coords). This is the one permanent divergence; keep it as a single documented
    special case.
 
-5. **Delete the bridge**: once native functions emit lc0 indices, `uci_to_lc0_idx` and
-   `lc0_promo_idx` become the identity/native path. Remove them (or reduce to the shared
-   promo-index helper the native path calls). Update `binding.cpp` and `backend.hpp`
-   exports accordingly, and any chessbot import of the bridge (see follow-up).
+5. **`move_to_labels`** (`backend.cpp:402`): source of from/to indices + the collapsed
+   promo_idx (`:438-447`, currently `q/none->0, n->1, b->2, r->3`) and the castling
+   king-dest remap (`:409-432`). Reconcile the promo scheme with the new convention and
+   keep the castling remap feeding the lc0 king-rook swap. This is the shared upstream
+   both `moves_to_indices` and `legal_move_mask` call.
 
-6. **`build_prior` / any other 4288 or 1858 consumer in the backend**: audit for the
-   old promo assumption (n/b/r region, queen-as-bare) and update to the shared helper.
-   Grep `backend.cpp` / `binding.cpp` for `4096`, `4288`, `1858`, `promo`, `underpromo`.
+6. **Prior-building path in `mcts.cpp` (the real "build priors")**: `build_priors`
+   (`mcts.cpp:832`) is a pure consumer — it reads `policy_vec[p.second]` where
+   `p.second` is the 1858 `move_idx`. No logic change, but it depends on the index
+   convention. The index is set in `expand..._nolock` (`mcts.cpp:570-597`): natively from
+   `legal_move_mask()`, and — when the `lc0_policy_` flag is on — overridden via
+   `uci_to_lc0_idx` (`mcts.cpp:577-580`). Once native == lc0, **that override branch is
+   dead**: remove it, and remove the `lc0_policy_` / `policy_1858` flag + its binding
+   (`binding.cpp:436`). This is the `policy_1858` shim from the 1858 migration.
 
-7. **Rebuild the `.pyd`** into the `chess` env after the C++ changes.
+7. **Delete the bridge**: with native == lc0 and the mcts override gone, `uci_to_lc0_idx`
+   (`backend.cpp:992`) and `lc0_promo_idx` (`:977`) are redundant. Remove them or reduce
+   `lc0_promo_idx` to the shared promo-index helper the native path calls. Update
+   `backend.hpp` (`:37-39`) and `binding.cpp` exports.
+
+8. **`binding.cpp` docstrings/labels**: `moves_to_indices` (`:293`), `move_to_labels`
+   (`:286`), `moves_to_labels` (`:290`) still describe the old collapsed promo scheme
+   (`0=no/queen, 1=N, 2=B, 3=R`). Update to the lc0 convention. `legal_move_mask_py`
+   (`:47`) already returns 1858 — keep.
+
+9. **Final audit**: grep `backend.cpp` / `binding.cpp` / `mcts.cpp` for `4096`, `4288`,
+   `1858`, `1792`, `promo`, `underpromo`, `lc0_idx`, `lc0_policy` and confirm every hit
+   is on the new convention. Then **rebuild the `.pyd`** into the `chess` env.
 
 ## Testing (add under pyfastchess tests / a scratch validator)
 
