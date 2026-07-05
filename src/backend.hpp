@@ -28,6 +28,9 @@ std::vector<uint8_t> build_sometimes_legal_mask();
 // Piece planes within a frame: [0..5] = STM P/N/B/R/Q/K, [6..11] = OPP P/N/B/R/Q/K.
 // STM-as-white orientation; ranks flipped for black to move.
 // Suffix planes (104..111): us_ooo, us_oo, them_ooo, them_oo, stm, rule50_raw, zeros, ones.
+// Matches lc0 input_format 1 (classical): full 0/1 castling planes and a side-to-move
+// plane at 108; en passant is not a suffix plane -- it is implicit in the history piece
+// planes (recoverable via ep_from_history_planes).
 // Plane 109 stores the raw halfmove clock — divide by 99.0 when converting to float32.
 std::vector<uint8_t> board_to_lc0_features(const Board& b);
 
@@ -82,6 +85,7 @@ public:
     int halfmove_clock() const;
     int fullmove_number() const;
     bool is_repetition(int count) const;
+    int count_repetitions() const;
     bool would_be_repetition(const std::string& uci, int count = 3) const;
 
     bool is_capture(const std::string& uci) const;

@@ -2426,6 +2426,23 @@ class Board {
         return false;
     }
 
+    // Number of PRIOR occurrences of the current position within the halfmove
+    // window (same scan/cost as isRepetition, no early-out at a threshold).
+    // 0 = first time, 1 = twofold, 2 = threefold. Capped at 3: once three prior
+    // occurrences are seen it returns 3 immediately rather than counting further.
+    [[nodiscard]] int countRepetitions() const noexcept {
+        int c = 0;
+        const auto size = static_cast<int>(prev_states_.size());
+
+        for (int i = size - 2; i >= 0 && i >= size - hfm_ - 1; i -= 2) {
+            if (prev_states_[i].hash == key_) {
+                if (++c == 3) return 3;
+            }
+        }
+
+        return c;
+    }
+
     /**
      * @brief Checks if the current position is a draw by 50 move rule.
      * Keep in mind that by the rules of chess, if the position has 50 half

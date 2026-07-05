@@ -266,6 +266,10 @@ bool Board::is_repetition(int count) const {
     return board_.isRepetition(count);
 }
 
+int Board::count_repetitions() const {
+    return board_.countRepetitions();
+}
+
 bool Board::in_check() const {
     return board_.inCheck();
 }
@@ -960,7 +964,7 @@ std::vector<uint8_t> board_to_lc0_features(const Board& b) {
     fill_plane(105, cr.has(stm_col, CRSide::KING_SIDE)  ? 1 : 0);  // us_oo
     fill_plane(106, cr.has(opp_col, CRSide::QUEEN_SIDE) ? 1 : 0);  // them_ooo
     fill_plane(107, cr.has(opp_col, CRSide::KING_SIDE)  ? 1 : 0);  // them_oo
-    fill_plane(108, stm_is_white ? 0 : 1);                          // stm
+    fill_plane(108, stm_is_white ? 0 : 1);                          // stm (lc0 input_format 1)
     fill_plane(109, static_cast<uint8_t>(rb.halfMoveClock()));       // rule50 raw
     // plane 110 = zeros (already 0)
     fill_plane(111, 1);                                              // ones

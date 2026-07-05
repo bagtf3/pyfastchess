@@ -213,6 +213,10 @@ PYBIND11_MODULE(_core, m) {
           .def("is_repetition", &backend::Board::is_repetition, py::arg("count") = 2,
                "Return True if this position is a repetition (default: 2 for threefold).")
 
+          .def("count_repetitions", &backend::Board::count_repetitions,
+               "Number of prior occurrences of the current position (0=first, "
+               "1=twofold, 2=threefold), capped at 3.")
+
           .def("in_check", &backend::Board::in_check,
                "Return True if the side to move is in check.")
 
