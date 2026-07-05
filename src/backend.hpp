@@ -34,6 +34,12 @@ std::vector<uint8_t> build_sometimes_legal_mask();
 // Plane 109 stores the raw halfmove clock — divide by 99.0 when converting to float32.
 std::vector<uint8_t> board_to_lc0_features(const Board& b);
 
+// Compact token-based history encoder. Returns a flat int16 buffer of length
+// K*64 + K + 3: K frames of 64 tokens (frame 0 = current, rest = history, all in
+// current-STM orientation, missing frames padded), then per-frame repetition
+// counts (K), then castling state (0..15), side-to-move, and raw halfmove clock.
+std::vector<int16_t> board_to_history_tokens(const Board& b, int K);
+
 // Return the LC0 1858-dim policy index for a move on the given board.
 // Handles promo slot differences and castling index swaps relative to XC0.
 uint16_t uci_to_lc0_idx(const Board& b, const std::string& uci);

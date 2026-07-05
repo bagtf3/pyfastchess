@@ -993,6 +993,112 @@ std::vector<uint8_t> board_to_lc0_features(const Board& b) {
     return out;
 }
 
+// Slim history-token vocab (bare king, no castling folded into the token). Distinct
+// from the 64-token vocab above, which folds castling/EP into wider king/EP tokens.
+//   0        empty
+//   1..6     us   pawn,knight,bishop,rook,queen,king
+//   7..12    them pawn,knight,bishop,rook,queen,king
+//   13       en passant square
+//   14       pad (frame predates available history)
+static constexpr int16_t HT_THEM_BASE = 6;   // them piece = us piece id + 6
+static constexpr int16_t HT_EP  = 13;
+static constexpr int16_t HT_PAD = 14;
+
+// Write one frame's 64 tokens for board rb into out[0..63], with orientation and
+// ownership FROZEN to the current STM (us_col + flip passed in, not recomputed), so
+// history frames stay spatially aligned with the current position. Bare king; EP is
+// an in-band token on its (flipped) square.
+static void write_frame_tokens(const chess::Board& rb, chess::Color us_col,
+                               bool flip, int16_t* out) {
+    using Color = chess::Color;
+    using PieceType = chess::PieceType;
+    using Square = chess::Square;
+
+    std::fill(out, out + 64, static_cast<int16_t>(0));   // empty
+
+    static const PieceType PT[6] = {
+        PieceType::PAWN, PieceType::KNIGHT, PieceType::BISHOP,
+        PieceType::ROOK, PieceType::QUEEN, PieceType::KING
+    };
+    for (int p = 0; p < 6; ++p) {
+        for (Color col : { Color::WHITE, Color::BLACK }) {
+            const int base = (col == us_col) ? 0 : HT_THEM_BASE;
+            const int16_t token = static_cast<int16_t>(base + p + 1);  // 1..6 / 7..12
+            uint64_t bb = rb.pieces(PT[p], col).getBits();
+            while (bb) {
+                int sq = ctzll_u64(bb);
+                bb &= bb - 1ULL;
+                out[flip ? (sq ^ 56) : sq] = token;
+            }
+        }
+    }
+
+    const Square ep = rb.enpassantSq();
+    if (ep != Square::NO_SQ) {
+        int idx = ep.index();
+        if (flip) idx ^= 56;
+        out[idx] = HT_EP;
+    }
+}
+
+// Compact token-based history encoder. Returns a flat int16 buffer:
+//   [0 .. K*64)          K frames of 64 tokens (frame 0 = current, 1.. = history),
+//                        all in current-STM orientation; missing frames = HT_PAD.
+//   [K*64 .. K*64+K)     per-frame repetition count (0/1/2) within the current
+//                        irreversible block; 0 for frames outside the block or padded.
+//   [K*64+K]             castling state 0..15 (us_OO|us_OOO<<1|them_OO<<2|them_OOO<<3)
+//   [K*64+K+1]           side to move (0=white, 1=black)
+//   [K*64+K+2]           halfmove clock (raw; the model scales by /99)
+//
+// Repetitions are only counted where they can exist: the current irreversible block
+// must hold >= 2 reversible plies (H >= 2), and only frames strictly inside the
+// window (f < H) can have a prior occurrence -- frame H sits right after the
+// irreversible move (its own hmc 0) and is always 0. This skips guaranteed-zero
+// count_repetitions() calls without dropping any real repetition.
+std::vector<int16_t> board_to_history_tokens(const Board& b, int K) {
+    std::vector<int16_t> out(static_cast<size_t>(K) * 64 + K + 3, 0);
+
+    const chess::Board& cur = b.raw_board();
+    const bool stm_is_white  = (cur.sideToMove() == chess::Color::WHITE);
+    const bool flip          = !stm_is_white;
+    const chess::Color us_col  = cur.sideToMove();
+    const chess::Color opp_col = stm_is_white ? chess::Color::BLACK : chess::Color::WHITE;
+    const int H = static_cast<int>(cur.halfMoveClock());
+
+    int16_t* rep = out.data() + static_cast<size_t>(K) * 64;
+
+    Board tmp = b;
+    bool alive = true;
+    for (int f = 0; f < K; ++f) {
+        if (f > 0 && (!alive || !tmp.unmake())) alive = false;
+        int16_t* frame = out.data() + static_cast<size_t>(f) * 64;
+        if (alive) {
+            write_frame_tokens(tmp.raw_board(), us_col, flip, frame);
+            rep[f] = (H >= 2 && f < H)
+                ? static_cast<int16_t>(std::min(tmp.count_repetitions(), 2))
+                : 0;
+        } else {
+            std::fill(frame, frame + 64, HT_PAD);
+            rep[f] = 0;
+        }
+    }
+
+    using CRSide = chess::Board::CastlingRights::Side;
+    const auto crr = cur.castlingRights();
+    int cast = 0;
+    cast |= crr.has(us_col,  CRSide::KING_SIDE)  ? 1 : 0;   // us   kingside
+    cast |= crr.has(us_col,  CRSide::QUEEN_SIDE) ? 2 : 0;   // us   queenside
+    cast |= crr.has(opp_col, CRSide::KING_SIDE)  ? 4 : 0;   // them kingside
+    cast |= crr.has(opp_col, CRSide::QUEEN_SIDE) ? 8 : 0;   // them queenside
+
+    int16_t* meta = rep + K;
+    meta[0] = static_cast<int16_t>(cast);
+    meta[1] = static_cast<int16_t>(stm_is_white ? 0 : 1);
+    meta[2] = static_cast<int16_t>(H);
+
+    return out;
+}
+
 // LC0 promo slot index for (from_file, to_file, lc0_type).
 // LC0 ordering: from_file outer, valid to_file inner, then q=0 / r=1 / b=2.
 static uint16_t lc0_promo_idx(int from_file, int to_file, int lc0_type) {

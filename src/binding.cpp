@@ -43,6 +43,14 @@ static py::array_t<int16_t> board_to_64_tokens_py(const backend::Board& b) {
     return out;
 }
 
+// wrapper: board_to_history_tokens -> returns np.int16 array (K*64 + K + 3,)
+static py::array_t<int16_t> history_tokens_py(const backend::Board& b, int K) {
+    auto v = backend::board_to_history_tokens(b, K); // std::vector<int16_t>
+    py::array_t<int16_t> out({ static_cast<py::ssize_t>(v.size()) });
+    std::memcpy(out.mutable_data(), v.data(), v.size() * sizeof(int16_t));
+    return out;
+}
+
 // wrapper returning np.uint8 array of shape (1858,) -- debug/inspection only
 std::vector<uint8_t> legal_move_mask_py(const backend::Board &b) {
     auto lm = b.legal_move_mask();
@@ -140,6 +148,42 @@ public:
         }
 
         return py::make_tuple(keys_np, features_np);
+    }
+
+    // Drain all pending nodes and encode as compact history tokens.
+    // Returns (keys_np[N] uint64, tokens_np[N, K*64+K+3] int16).
+    py::tuple get_all_history_tokens(int K) {
+        struct Entry { uint64_t key; const backend::Board* board; };
+        std::vector<Entry> entries;
+        entries.reserve(trees_.size() * 16);
+
+        for (auto& obj : trees_) {
+            MCTSTree& tree = obj.cast<MCTSTree&>();
+            std::vector<MCTSNode*> nodes = tree.pop_pending_to_inflight();
+            for (MCTSNode* n : nodes) {
+                if (!n) continue;
+                uint64_t z = n->zobrist;
+                if (z == 0) { z = n->board.hash(); n->zobrist = z; }
+                entries.push_back({z, &n->board});
+            }
+        }
+
+        const py::ssize_t N = static_cast<py::ssize_t>(entries.size());
+        const py::ssize_t W = static_cast<py::ssize_t>(K) * 64 + K + 3;
+        py::array_t<uint64_t> keys_np({N});
+        py::array_t<int16_t>  tokens_np({N, W});
+
+        auto k = keys_np.mutable_unchecked<1>();
+        auto t = tokens_np.mutable_unchecked<2>();
+
+        for (py::ssize_t i = 0; i < N; ++i) {
+            k(i) = entries[i].key;
+            auto tok = backend::board_to_history_tokens(*entries[i].board, K);
+            for (py::ssize_t j = 0; j < W; ++j)
+                t(i, j) = tok[j];
+        }
+
+        return py::make_tuple(keys_np, tokens_np);
     }
 
     void resolve_all_inflight() {
@@ -272,6 +316,12 @@ PYBIND11_MODULE(_core, m) {
           .def("encode_64_tokens", &board_to_64_tokens_py,
                "Return a (64,) int16 NumPy array of token ids (STM-made-white canonical).\n"
                "This is the 1D token encoding alternative to stacked_planes and takes no arguments.")
+
+          .def("history_tokens", &history_tokens_py, py::arg("K") = 6,
+               "Return a (K*64 + K + 3,) int16 array: K frames of 64 slim tokens\n"
+               "(frame 0 = current, rest = history, current-STM orientation, bare king,\n"
+               "in-band EP, missing frames padded), then per-frame repetition counts (K),\n"
+               "castling state (0..15), side-to-move (0/1), and raw halfmove clock.")
 
           .def("lc0_features", &board_lc0_features_py,
                "Return (112, 8, 8) uint8 array of LC0 input features (STM-as-white).\n"
@@ -606,6 +656,9 @@ PYBIND11_MODULE(_core, m) {
                "Drain pending from all trees. Returns (keys_np[N] uint64, boards_np[N,64] int16).")
           .def("get_all_lc0_features", &MCTSForest::get_all_lc0_features,
                "Drain pending from all trees. Returns (keys_np[N] uint64, features_np[N,112,8,8] uint8).")
+          .def("get_all_history_tokens", &MCTSForest::get_all_history_tokens, py::arg("K") = 6,
+               "Drain pending from all trees. Returns (keys_np[N] uint64, "
+               "tokens_np[N, K*64+K+3] int16).")
           .def("resolve_all_inflight", &MCTSForest::resolve_all_inflight,
                "Call resolve_inflight() on all registered trees.")
           .def("__len__", &MCTSForest::size);
