@@ -233,11 +233,15 @@ bool Board::is_pawn_move(const std::string& uci) const {
 }
 
 bool Board::would_be_repetition(const std::string& uci, int count) const {
+    // count = PRIOR occurrences, same convention as is_repetition() (2 = threefold).
+    // Default was previously 3, which required 3 PRIOR occurrences = 4 total --
+    // stricter than an actual threefold repetition. Now defaults to 2, matching
+    // is_repetition()'s own default.
     chess::Move mv = chess::uci::uciToMove(board_, uci);
     if (mv == chess::Move::NO_MOVE) return false;
     chess::Board tmp = board_;      // cheap copy, keeps this method const
     tmp.makeMove(mv);
-    return tmp.isRepetition(count); // at least count times
+    return tmp.isRepetition(count);
 }
 
 std::string Board::side_to_move() const {
@@ -1044,17 +1048,26 @@ static void write_frame_tokens(const chess::Board& rb, chess::Color us_col,
 // Compact token-based history encoder. Returns a flat int16 buffer:
 //   [0 .. K*64)          K frames of 64 tokens (frame 0 = current, 1.. = history),
 //                        all in current-STM orientation; missing frames = HT_PAD.
-//   [K*64 .. K*64+K)     per-frame repetition count (0/1/2) within the current
-//                        irreversible block; 0 for frames outside the block or padded.
+//   [K*64 .. K*64+K)     per-frame repetition flag (0/1): 1 if that frame's position
+//                        has occurred at least once before, within the current
+//                        irreversible block; 0 for frames outside the block, padded,
+//                        or with no prior occurrence.
 //   [K*64+K]             castling state 0..15 (us_OO|us_OOO<<1|them_OO<<2|them_OOO<<3)
 //   [K*64+K+1]           side to move (0=white, 1=black)
 //   [K*64+K+2]           halfmove clock (raw; the model scales by /99)
 //
-// Repetitions are only counted where they can exist: the current irreversible block
-// must hold >= 2 reversible plies (H >= 2), and only frames strictly inside the
-// window (f < H) can have a prior occurrence -- frame H sits right after the
-// irreversible move (its own hmc 0) and is always 0. This skips guaranteed-zero
-// count_repetitions() calls without dropping any real repetition.
+// Boolean, not a count: a position recurring a SECOND prior time (i.e. occurring a
+// 3rd time total) is a threefold-repetition draw and is terminal -- in real
+// selfplay/tournament play it is short-circuited by is_terminal()/game-over
+// adjudication before ever reaching an NN encode, so the network never needs to
+// distinguish "twofold" from "threefold" here. This also matches LC0's own
+// per-frame repetition plane convention (isRepetition(1)).
+//
+// Still scoped to the current game/position via the halfmove-clock gate: the
+// current irreversible block must hold >= 2 reversible plies (H >= 2), and only
+// frames strictly inside the window (f < H) can have a prior occurrence -- frame H
+// sits right after the irreversible move (its own hmc 0) and is always 0. This
+// skips guaranteed-false is_repetition() calls without dropping any real repeat.
 std::vector<int16_t> board_to_history_tokens(const Board& b, int K) {
     std::vector<int16_t> out(static_cast<size_t>(K) * 64 + K + 3, 0);
 
@@ -1075,7 +1088,7 @@ std::vector<int16_t> board_to_history_tokens(const Board& b, int K) {
         if (alive) {
             write_frame_tokens(tmp.raw_board(), us_col, flip, frame);
             rep[f] = (H >= 2 && f < H)
-                ? static_cast<int16_t>(std::min(tmp.count_repetitions(), 2))
+                ? static_cast<int16_t>(tmp.is_repetition(1) ? 1 : 0)
                 : 0;
         } else {
             std::fill(frame, frame + 64, HT_PAD);

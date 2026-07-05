@@ -90,9 +90,11 @@ public:
 
     int halfmove_clock() const;
     int fullmove_number() const;
-    bool is_repetition(int count) const;
+    bool is_repetition(int count) const;   // count = PRIOR occurrences (2 = threefold)
     int count_repetitions() const;
-    bool would_be_repetition(const std::string& uci, int count = 3) const;
+    // count = PRIOR occurrences after making uci, same convention as is_repetition()
+    // (default 2 = would create a genuine threefold-repetition draw).
+    bool would_be_repetition(const std::string& uci, int count = 2) const;
 
     bool is_capture(const std::string& uci) const;
     bool gives_double_attack(const std::string& uci, bool include_king = false) const;

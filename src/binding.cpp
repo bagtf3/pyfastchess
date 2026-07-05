@@ -236,8 +236,10 @@ PYBIND11_MODULE(_core, m) {
                "True if the move is made by a pawn.")
           
           .def("would_be_repetition", &backend::Board::would_be_repetition,
-               py::arg("uci"), py::arg("count") = 3,
-               "True if making this move would create a position repeated ≥ count times.")
+               py::arg("uci"), py::arg("count") = 2,
+               "True if making this move would create a position with >= count PRIOR "
+               "occurrences (same convention as is_repetition(); default 2 = would "
+               "create a genuine threefold-repetition draw).")
 
           .def("side_to_move", &backend::Board::side_to_move,
                "Return 'w' or 'b' for the side to move.")
@@ -320,7 +322,7 @@ PYBIND11_MODULE(_core, m) {
           .def("history_tokens", &history_tokens_py, py::arg("K") = 6,
                "Return a (K*64 + K + 3,) int16 array: K frames of 64 slim tokens\n"
                "(frame 0 = current, rest = history, current-STM orientation, bare king,\n"
-               "in-band EP, missing frames padded), then per-frame repetition counts (K),\n"
+               "in-band EP, missing frames padded), then per-frame repetition flags 0/1 (K),\n"
                "castling state (0..15), side-to-move (0/1), and raw halfmove clock.")
 
           .def("lc0_features", &board_lc0_features_py,
