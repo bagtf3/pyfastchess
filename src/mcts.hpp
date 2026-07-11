@@ -30,14 +30,13 @@ inline const std::string& lookup_uci(
 }
 
 // Telemetry/return types used by collect_one_leaf_tagged / collect_many_leaves
-enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2 };
+enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2, BLOCKED = 3 };
 
 struct CollectCounts {
     CollectTag tag = CollectTag::NEW_LEAF;
     MCTSNode* leaf = nullptr;       // the leaf node reached
     uint32_t count_must_visit = 0;  // times a node was forced to be selected
-    uint32_t count_with_priors = 0; // times puct (with priors) selection was used during this descent
-    uint32_t count_priorless = 0;   // times uniform selection was taken during this descent
+    uint32_t count_blocked = 0;     // 1 if this descent was blocked (no priors at selection point)
     uint32_t count_skipped = 0;     // number of children skipped due to early trimming
     uint32_t count_pruned = 0;      // number of children pruned due to visit counts
     uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
@@ -50,8 +49,7 @@ struct CollectResults {
     size_t count_cached = 0;
 
     uint64_t total_must_visit = 0;
-    uint64_t total_with_priors = 0;
-    uint64_t total_priorless = 0;
+    uint64_t total_blocked = 0;
 
     uint64_t total_skipped = 0;
     uint64_t total_pruned = 0;

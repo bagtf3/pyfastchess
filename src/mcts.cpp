@@ -100,19 +100,6 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         }
     }
 
-    // no priors available — randomish via round-robin on legal_moves, no puct
-    if (!children_have_priors) {
-        thread_local uint64_t rr_counter = 0;
-        const size_t idx = static_cast<size_t>((rr_counter++) % n_child);
-
-        ++cc->count_priorless;      
-
-        ChildEntry& ce = ordered_children[idx];
-        return get_or_create_child(ce);
-    }
-
-    ++cc->count_with_priors;
-
     const int parent_vis = std::max(1, this->visit_count());
     const int cap = 2 + parent_vis;
     const size_t cap_sz = std::min(n_child, static_cast<size_t>(cap));
@@ -260,14 +247,24 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     // descend while expanded and has children (now uses ordered_children)
     while (node->is_expanded && !node->ordered_children.empty()) {
         // If this node is expanded but still missing real priors, it may be an
-        // orphan from an epoch bump. Requeue to rescue. (basically neever happens)
+        // orphan from an epoch bump. Requeue to rescue. (basically never happens)
         if (!node->children_have_priors && node->queued_epoch != cur_epoch) {
             if (!node->is_pending && !node->is_inflight){
                 queue_pending(node);
             }
         }
 
-        // pass &cc so select_child_lazy_ptr increments count_priorless / count_puct
+        // No priors yet — undo path visits and stop; caller will break collection
+        if (!node->children_have_priors) {
+            for (MCTSNode* n : last_path_) n->add_visit(-1);
+            last_path_.clear();
+            cc.count_blocked = 1;
+            cc.tag = CollectTag::BLOCKED;
+            cc.leaf = node;
+            return cc;
+        }
+
+        // pass &cc so select_child_lazy_ptr increments count_puct
         MCTSNode* child = node->select_child_lazy_ptr(
             this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_, this->fpu_reduction_);
 
@@ -374,8 +371,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t terminal_count = 0;
 
     uint64_t total_must_visit = 0;
-    uint64_t total_with_priors = 0;
-    uint64_t total_priorless = 0;
+    uint64_t total_blocked = 0;
 
     uint64_t total_skipped = 0;
     uint64_t total_pruned = 0;
@@ -395,9 +391,8 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         ++attempts;
 
         // roll up per-descent counters into batch totals
-        total_must_visit += cc.count_must_visit;    
-        total_with_priors += cc.count_with_priors;
-        total_priorless += cc.count_priorless;
+        total_must_visit += cc.count_must_visit;
+        total_blocked += cc.count_blocked;
 
         total_skipped += cc.count_skipped;
         total_pruned += cc.count_pruned;
@@ -419,6 +414,8 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
             ++cached_count;
         } else if (tag == CollectTag::TERMINAL) {
             ++terminal_count;
+        } else if (tag == CollectTag::BLOCKED) {
+            break;
         }
     }
 
@@ -429,8 +426,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     res.count_terminal = terminal_count;
 
     res.total_must_visit = total_must_visit;
-    res.total_with_priors = total_with_priors;
-    res.total_priorless = total_priorless;
+    res.total_blocked = total_blocked;
 
     res.total_skipped = total_skipped;
     res.total_pruned = total_pruned;
