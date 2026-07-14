@@ -484,6 +484,13 @@ PYBIND11_MODULE(_core, m) {
           .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
           .def("qdelta_span", &MCTSTree::qdelta_span)
 
+          .def("set_allow_sharpening", &MCTSTree::set_allow_sharpening, py::arg("v"))
+          .def("allow_sharpening", &MCTSTree::allow_sharpening)
+          .def("set_sharpening_factor", &MCTSTree::set_sharpening_factor, py::arg("v"))
+          .def("sharpening_factor", &MCTSTree::sharpening_factor)
+          .def("set_sharpening_step", &MCTSTree::set_sharpening_step, py::arg("v"))
+          .def("sharpening_step", &MCTSTree::sharpening_step)
+
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
@@ -621,11 +628,11 @@ PYBIND11_MODULE(_core, m) {
           .def("vscale", &MCTSTree::vscale)
 
           .def("set_contempt", &MCTSTree::set_contempt,
-               py::arg("flip_q"), py::arg("fight_c"), py::arg("save_c"),
-               "Set contempt params: Q_eff = Q - fight_c*p_draw if Q>flip_q, else Q + save_c*p_draw.")
-          .def("contempt_flip_q",  &MCTSTree::contempt_flip_q)
+               py::arg("zero_q"), py::arg("full_q"), py::arg("fight_c"),
+               "Smooth contempt: factor ramps linearly from 0 at zero_q to fight_c at full_q, flat above. Q_eff = Q - factor*p_draw.")
+          .def("contempt_zero_q",  &MCTSTree::contempt_zero_q)
+          .def("contempt_full_q",  &MCTSTree::contempt_full_q)
           .def("contempt_fight_c", &MCTSTree::contempt_fight_c)
-          .def("contempt_save_c",  &MCTSTree::contempt_save_c)
 
           .def_property_readonly("epoch", &MCTSTree::epoch);
 

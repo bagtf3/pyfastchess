@@ -95,7 +95,11 @@ struct MCTSNode {
     std::string uci;
 
     // visits (atomic so selection can bump without lock)
-    std::atomic<int> N{0}; 
+    std::atomic<int> N{0};
+
+    // policy sharpening: next visit count at which to blend pi into cache priors
+    // 0 means unset; interpreted as sharpening_step_ on first trigger
+    int next_sharpening = 0;
 
     // WDL accumulators and derived Q — all white-POV
     float p_win  = 0.0f;      // cumulative sum of win  probs backpropped through this node
@@ -315,10 +319,10 @@ public:
     void set_vscale(float v);
     float vscale() const;
 
-    void set_contempt(float flip_q, float fight_c, float save_c);
-    float contempt_flip_q() const;
+    void set_contempt(float zero_q, float full_q, float fight_c);
+    float contempt_zero_q() const;
+    float contempt_full_q() const;
     float contempt_fight_c() const;
-    float contempt_save_c() const;
 
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
@@ -350,6 +354,13 @@ public:
     float qema_span() const;
     void set_qdelta_span(float span);
     float qdelta_span() const;
+
+    void set_allow_sharpening(bool v);
+    bool allow_sharpening() const;
+    void set_sharpening_factor(float v);
+    float sharpening_factor() const;
+    void set_sharpening_step(int v);
+    int sharpening_step() const;
 
     struct NNResult {
         float value = 0.0f;
@@ -384,10 +395,15 @@ private:
     // Value scale: multiplied into (win-loss) during backprop so Q stays in [-vscale, vscale].
     float vscale_ = 1.0f;
 
-    // Contempt: Q_eff = Q ± contempt_*_c * p_draw, applied per-node after Q update.
-    float contempt_flip_q_ = 0.0f;   // threshold (white-POV Q); above: fight, below: save
-    float contempt_fight_c_ = 0.0f;  // draw penalty when Q > flip_q  (0 = disabled)
-    float contempt_save_c_  = 0.0f;  // draw bonus  when Q < flip_q  (0 = disabled)
+    // Contempt: smooth draw penalty ramping from zero_q to full_q then flat at fight_c.
+    float contempt_zero_q_  = 0.0f;  // Q below this: no penalty
+    float contempt_full_q_  = 0.5f;  // Q above this: full fight_c penalty
+    float contempt_fight_c_ = 0.0f;  // max draw penalty (0 = disabled)
+
+    // Policy sharpening: EMA-blend visit distribution into cached priors
+    bool  allow_sharpening_   = false;
+    float sharpening_factor_  = 0.1f;
+    int   sharpening_step_    = 200;
 
     // Qema / Qdelta_sign EMA span params (span = N → alpha = 2/(N+1))
     float qema_a_    = 2.0f / 41.0f;
@@ -415,6 +431,10 @@ private:
     // Re-sort a node's children by visit count once it crosses visit_resort_threshold_
     void maybe_resort_by_visits(MCTSNode* node);
     static constexpr int visit_resort_threshold_ = 250;
+
+    // Policy sharpening helpers
+    void maybe_sharpen_node(MCTSNode* node);
+    void sharpen_root_on_advance(MCTSNode* old_root);
 
     CollectCounts collect_one_leaf_tagged();
 

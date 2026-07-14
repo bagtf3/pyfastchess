@@ -241,6 +241,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     last_path_.push_back(node);
     node->add_visit();
     maybe_resort_by_visits(node);
+    maybe_sharpen_node(node);
 
     uint32_t cur_epoch = tree_epoch_;
 
@@ -279,6 +280,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         // increment visit for this node immediately (psuedo virtual loss)
         node->add_visit();
         maybe_resort_by_visits(node);
+        maybe_sharpen_node(node);
     }
 
     // set leaf pointer for the caller
@@ -520,10 +522,11 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
             n->Q_eff = n->Q;
         } else if (nv > 0) {
             const float pd = n->p_draw / static_cast<float>(nv);
-            if (n->Q > contempt_flip_q_)
-                n->Q_eff = n->Q - contempt_fight_c_ * pd;
-            else
-                n->Q_eff = n->Q + contempt_save_c_ * pd;
+            const float span = contempt_full_q_ - contempt_zero_q_;
+            const float t = (span > 0.0f)
+                ? std::min(1.0f, std::max(0.0f, (n->Q - contempt_zero_q_) / span))
+                : (n->Q >= contempt_full_q_ ? 1.0f : 0.0f);
+            n->Q_eff = n->Q - contempt_fight_c_ * t * pd;
         } else {
             n->Q_eff = n->Q;
         }
@@ -634,6 +637,11 @@ void MCTSTree::apply_root_noise_nolock(float eps, float alpha) {
     MCTSNode* r = root_.get();
     if (!r) return;
 
+    // Scale eps by ply: full 0-30, half 31-60, none 61+
+    const size_t ply = r->board.history_size();
+    if (ply > 60) return;
+    if (ply > 30) eps *= 0.5f;
+
     if (!r->is_expanded) {
         expand_with_uniform_priors_nolock(r);
     }
@@ -710,15 +718,15 @@ bool MCTSTree::reuse_tree() const { return reuse_tree_; }
 void MCTSTree::set_vscale(float v) { vscale_ = v; }
 float MCTSTree::vscale() const { return vscale_; }
 
-void MCTSTree::set_contempt(float flip_q, float fight_c, float save_c) {
+void MCTSTree::set_contempt(float zero_q, float full_q, float fight_c) {
     std::lock_guard<std::mutex> g(tree_mutex_);
-    contempt_flip_q_  = flip_q;
+    contempt_zero_q_  = zero_q;
+    contempt_full_q_  = full_q;
     contempt_fight_c_ = fight_c;
-    contempt_save_c_  = save_c;
 }
-float MCTSTree::contempt_flip_q() const { return contempt_flip_q_; }
+float MCTSTree::contempt_zero_q()  const { return contempt_zero_q_; }
+float MCTSTree::contempt_full_q()  const { return contempt_full_q_; }
 float MCTSTree::contempt_fight_c() const { return contempt_fight_c_; }
-float MCTSTree::contempt_save_c()  const { return contempt_save_c_; }
 
 
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
@@ -981,6 +989,8 @@ bool MCTSTree::advance_root(const std::string& mv) {
     std::lock_guard<std::mutex> g(tree_mutex_);
     last_path_.clear();
     noise_added_ = false;
+
+    if (root_) sharpen_root_on_advance(root_.get());
 
     auto old_root = std::move(root_);
     if (!old_root) return false;
@@ -1393,6 +1403,147 @@ void MCTSTree::set_qdelta_span(float span) {
 float MCTSTree::qdelta_span() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     return (2.0f / qdelta_a_) - 1.0f;
+}
+
+void MCTSTree::set_allow_sharpening(bool v)    { allow_sharpening_  = v; }
+bool MCTSTree::allow_sharpening() const        { return allow_sharpening_; }
+void MCTSTree::set_sharpening_factor(float v)  { sharpening_factor_ = v; }
+float MCTSTree::sharpening_factor() const      { return sharpening_factor_; }
+void MCTSTree::set_sharpening_step(int v)      { sharpening_step_   = v; }
+int MCTSTree::sharpening_step() const          { return sharpening_step_; }
+
+// EMA-blend the current visit distribution into the cached priors for `node`.
+// Called from selection after each visit increment. Only fires at scheduled
+// visit counts (sharpening_step_, 2x, 4x, ...). Updates cache only — never
+// touches node->ordered_children priors.
+void MCTSTree::maybe_sharpen_node(MCTSNode* node) {
+    if (!allow_sharpening_ || !node->children_have_priors || node->zobrist == 0)
+        return;
+
+    int nv = node->visit_count();
+    int threshold = (node->next_sharpening > 0) ? node->next_sharpening : sharpening_step_;
+    if (nv != threshold) return;
+
+    int total = 0;
+    for (const auto& ce : node->ordered_children)
+        if (ce.child) total += ce.child->visit_count();
+    if (total == 0) return;
+
+    const float inv = 1.0f / static_cast<float>(total);
+    std::unordered_map<uint16_t, float> pi;
+    pi.reserve(node->ordered_children.size());
+    for (const auto& ce : node->ordered_children) {
+        int cv = ce.child ? ce.child->visit_count() : 0;
+        pi[ce.move_idx] = static_cast<float>(cv) * inv;
+    }
+
+    auto blend = [&](std::vector<PriorEntry>& priors) {
+        for (auto& pe : priors) {
+            auto it = pi.find(pe.move_idx);
+            float pv = (it != pi.end()) ? it->second : 0.0f;
+            pe.prior = (1.0f - sharpening_factor_) * pe.prior + sharpening_factor_ * pv;
+        }
+    };
+
+    CacheEntry entry;
+    bool hit = priors_cache().lookup(node->zobrist, entry);
+
+    auto sort_priors = [](std::vector<PriorEntry>& p) {
+        std::stable_sort(p.begin(), p.end(),
+            [](const PriorEntry& a, const PriorEntry& b){ return a.prior > b.prior; });
+    };
+
+    if (hit) {
+        if (nv > entry.visits) {
+            blend(entry.priors);
+            sort_priors(entry.priors);
+            entry.visits = nv;
+            priors_cache().insert(node->zobrist, std::move(entry));
+        }
+    } else {
+        CacheEntry ne;
+        ne.wdl   = node->value;
+        ne.value = node->value.win - node->value.loss;
+        ne.priors.reserve(node->ordered_children.size());
+        for (const auto& ce : node->ordered_children) {
+            const std::string& uci = lookup_uci(node->policy_pairs, ce.move_idx);
+            ne.priors.push_back({uci, ce.move_idx, ce.prior, ce.raw_prior});
+        }
+        // catch-up: one blend per doubling from sharpening_step_ through nv
+        for (int t = sharpening_step_; t <= nv; t *= 2)
+            blend(ne.priors);
+        sort_priors(ne.priors);
+        ne.visits = nv;
+        priors_cache().insert(node->zobrist, std::move(ne));
+    }
+
+    node->next_sharpening = threshold * 2;
+}
+
+// At advance_root, apply a final catch-up blend for old_root so the cache
+// reflects its full visit distribution if this position is seen again.
+void MCTSTree::sharpen_root_on_advance(MCTSNode* old_root) {
+    if (!allow_sharpening_ || !old_root->children_have_priors) return;
+
+    int root_n = old_root->visit_count();
+    if (root_n < sharpening_step_) return;
+
+    int total = 0;
+    for (const auto& ce : old_root->ordered_children)
+        if (ce.child) total += ce.child->visit_count();
+    if (total == 0) return;
+
+    const float inv = 1.0f / static_cast<float>(total);
+    std::unordered_map<uint16_t, float> pi;
+    pi.reserve(old_root->ordered_children.size());
+    for (const auto& ce : old_root->ordered_children) {
+        int cv = ce.child ? ce.child->visit_count() : 0;
+        pi[ce.move_idx] = static_cast<float>(cv) * inv;
+    }
+
+    auto blend = [&](std::vector<PriorEntry>& priors) {
+        for (auto& pe : priors) {
+            auto it = pi.find(pe.move_idx);
+            float pv = (it != pi.end()) ? it->second : 0.0f;
+            pe.prior = (1.0f - sharpening_factor_) * pe.prior + sharpening_factor_ * pv;
+        }
+    };
+
+    uint64_t key = (old_root->zobrist != 0) ? old_root->zobrist : old_root->board.hash();
+    CacheEntry entry;
+    bool hit = priors_cache().lookup(key, entry);
+
+    auto sort_priors = [](std::vector<PriorEntry>& p) {
+        std::stable_sort(p.begin(), p.end(),
+            [](const PriorEntry& a, const PriorEntry& b){ return a.prior > b.prior; });
+    };
+
+    if (hit && entry.visits > 0) {
+        if (root_n <= entry.visits) return;
+        // one blend per doubling of entry.visits up through root_n
+        for (int t = entry.visits; t * 2 <= root_n; t *= 2)
+            blend(entry.priors);
+        sort_priors(entry.priors);
+        entry.visits = root_n;
+        priors_cache().insert(key, std::move(entry));
+    } else {
+        // cache miss, or apply_result wrote it with visits=0 (treat like miss for iter count)
+        if (!hit) {
+            // build from raw_prior to avoid Dirichlet noise on root's fudged priors
+            entry.wdl   = old_root->value;
+            entry.value = old_root->value.win - old_root->value.loss;
+            entry.priors.reserve(old_root->ordered_children.size());
+            for (const auto& ce : old_root->ordered_children) {
+                const std::string& uci = lookup_uci(old_root->policy_pairs, ce.move_idx);
+                entry.priors.push_back({uci, ce.move_idx, ce.raw_prior, ce.raw_prior});
+            }
+        }
+        for (int t = sharpening_step_; t <= root_n; t *= 2)
+            blend(entry.priors);
+        sort_priors(entry.priors);
+        entry.visits = root_n;
+        priors_cache().insert(key, std::move(entry));
+    }
 }
 
 MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
