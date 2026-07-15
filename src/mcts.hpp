@@ -97,10 +97,6 @@ struct MCTSNode {
     // visits (atomic so selection can bump without lock)
     std::atomic<int> N{0};
 
-    // policy sharpening: next visit count at which to blend pi into cache priors
-    // 0 means unset; interpreted as sharpening_step_ on first trigger
-    int next_sharpening = 0;
-
     // WDL accumulators and derived Q — all white-POV
     float p_win  = 0.0f;      // cumulative sum of win  probs backpropped through this node
     float p_draw = 0.0f;      // cumulative sum of draw probs backpropped through this node
@@ -355,13 +351,6 @@ public:
     void set_qdelta_span(float span);
     float qdelta_span() const;
 
-    void set_allow_sharpening(bool v);
-    bool allow_sharpening() const;
-    void set_sharpening_factor(float v);
-    float sharpening_factor() const;
-    void set_sharpening_step(int v);
-    int sharpening_step() const;
-
     struct NNResult {
         float value = 0.0f;
         WDL wdl{};
@@ -400,11 +389,6 @@ private:
     float contempt_full_q_  = 0.5f;  // Q above this: full fight_c penalty
     float contempt_fight_c_ = 0.0f;  // max draw penalty (0 = disabled)
 
-    // Policy sharpening: EMA-blend visit distribution into cached priors
-    bool  allow_sharpening_   = false;
-    float sharpening_factor_  = 0.1f;
-    int   sharpening_step_    = 200;
-
     // Qema / Qdelta_sign EMA span params (span = N → alpha = 2/(N+1))
     float qema_a_    = 2.0f / 41.0f;
     float qema_d_    = 1.0f - 2.0f / 41.0f;
@@ -431,10 +415,6 @@ private:
     // Re-sort a node's children by visit count once it crosses visit_resort_threshold_
     void maybe_resort_by_visits(MCTSNode* node);
     static constexpr int visit_resort_threshold_ = 250;
-
-    // Policy sharpening helpers
-    void maybe_sharpen_node(MCTSNode* node);
-    void sharpen_root_on_advance(MCTSNode* old_root);
 
     CollectCounts collect_one_leaf_tagged();
 

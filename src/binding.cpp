@@ -484,13 +484,6 @@ PYBIND11_MODULE(_core, m) {
           .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
           .def("qdelta_span", &MCTSTree::qdelta_span)
 
-          .def("set_allow_sharpening", &MCTSTree::set_allow_sharpening, py::arg("v"))
-          .def("allow_sharpening", &MCTSTree::allow_sharpening)
-          .def("set_sharpening_factor", &MCTSTree::set_sharpening_factor, py::arg("v"))
-          .def("sharpening_factor", &MCTSTree::sharpening_factor)
-          .def("set_sharpening_step", &MCTSTree::set_sharpening_step, py::arg("v"))
-          .def("sharpening_step", &MCTSTree::sharpening_step)
-
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'
           
