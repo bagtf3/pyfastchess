@@ -12,7 +12,6 @@
 #include "cache.hpp"
 #include "singleton_registry.hpp"
 
-
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
@@ -342,7 +341,8 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         WDL wdl_white_pov = re->wdl;
         if (node->get_stm_pov() < 0.0f) std::swap(wdl_white_pov.win, wdl_white_pov.loss);
 
-        std::vector<PriorEntry> built_priors = build_priors(node, re);
+        const float q_stm_fast = re->wdl.win - re->wdl.loss;  // re->wdl is STM-POV
+        std::vector<PriorEntry> built_priors = build_priors(node, re, q_stm_fast);
         apply_result(node, built_priors, wdl_white_pov, /*cache=*/true);
 
         node->is_pending = false;
@@ -726,6 +726,11 @@ float MCTSTree::contempt_zero_q()  const { return contempt_zero_q_; }
 float MCTSTree::contempt_full_q()  const { return contempt_full_q_; }
 float MCTSTree::contempt_fight_c() const { return contempt_fight_c_; }
 
+void MCTSTree::set_tempscale_entropy_target(float v) { tempscale_entropy_target_ = v; }
+float MCTSTree::tempscale_entropy_target() const { return tempscale_entropy_target_; }
+void MCTSTree::set_tempscale_trigger_q(float v) { tempscale_trigger_q_ = v; }
+float MCTSTree::tempscale_trigger_q() const { return tempscale_trigger_q_; }
+
 
 std::vector<MCTSNode*> MCTSTree::pop_pending_to_inflight() {
     uint32_t cur_epoch = tree_epoch_;
@@ -814,7 +819,8 @@ void MCTSTree::resolve_inflight() {
         // STM flip: raw cache holds STM-POV; flip to white-POV for black nodes
         WDL wdl_white_pov = re->wdl;
         if (node->get_stm_pov() < 0.0f) std::swap(wdl_white_pov.win, wdl_white_pov.loss);
-        std::vector<PriorEntry> built_priors = build_priors(node, re);
+        const float q_stm_inf = re->wdl.win - re->wdl.loss;  // re->wdl is STM-POV
+        std::vector<PriorEntry> built_priors = build_priors(node, re, q_stm_inf);
 
         apply_result(node, built_priors, wdl_white_pov, /*cache=*/true);
 
@@ -826,7 +832,7 @@ void MCTSTree::resolve_inflight() {
 }
 
 std::vector<PriorEntry>
-MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
+MCTSTree::build_priors(MCTSNode* node, const RawEntry* re, float q_stm) const
 {
     if (!node) {
         return {};
@@ -916,6 +922,76 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re) const
         } else {
             const float u = 1.0f / k;
             for (auto& mp : built_priors) mp.prior = u;
+        }
+
+        // Prior temperature scaling: sharpen high-entropy distributions toward target
+        if (tempscale_entropy_target_ > 0.0f && k >= 5.0f && q_stm >= tempscale_trigger_q_) {
+            float H = 0.0f;
+            for (const auto& mp : built_priors)
+                if (mp.prior > 0.0f) H -= mp.prior * std::log(mp.prior);
+            const float log_k = std::log(k);
+            const float ne = H / log_k;
+
+            if (ne > tempscale_entropy_target_) {
+                const float u_ts = 1.0f / k;
+                const float one_minus_eps = 1.0f - uniform_eps_;
+                const size_t sz = built_priors.size();
+
+                std::vector<float> cand(sz);
+                float lo = 0.3f, hi = 1.0f, best = 0.75f, best_dist = 1e30f;
+
+                for (int iter = 0; iter < 5; ++iter) {
+                    const float mid = (lo + hi) * 0.5f;
+                    const float inv_mid = 1.0f / mid;
+
+                    float sum_p = 0.0f;
+                    for (size_t j = 0; j < sz; ++j) {
+                        cand[j] = std::pow(built_priors[j].raw_prior, inv_mid);
+                        sum_p += cand[j];
+                    }
+                    const float inv_sum = (sum_p > 0.0f) ? 1.0f / sum_p : u_ts;
+                    float s2 = 0.0f;
+                    for (size_t j = 0; j < sz; ++j) {
+                        float p = one_minus_eps * (cand[j] * inv_sum) + uniform_eps_ * u_ts;
+                        p = std::min(p, prior_clip_max_);
+                        cand[j] = p;
+                        s2 += p;
+                    }
+                    const float inv_s2 = (s2 > 0.0f) ? 1.0f / s2 : u_ts;
+                    float H_mid = 0.0f;
+                    for (size_t j = 0; j < sz; ++j) {
+                        cand[j] *= inv_s2;
+                        if (cand[j] > 0.0f) H_mid -= cand[j] * std::log(cand[j]);
+                    }
+                    const float ne_mid = H_mid / log_k;
+
+                    if (ne_mid < ne) {
+                        const float dist = std::abs(ne_mid - tempscale_entropy_target_);
+                        if (dist < best_dist) { best = mid; best_dist = dist; }
+                        if (dist < 0.05f) break;
+                    }
+                    if (ne_mid < tempscale_entropy_target_) lo = mid;
+                    else hi = mid;
+                }
+
+                // apply best T: same pipeline
+                float sum_b = 0.0f;
+                const float inv_best = 1.0f / best;
+                for (auto& mp : built_priors) {
+                    mp.prior = std::pow(mp.raw_prior, inv_best);
+                    sum_b += mp.prior;
+                }
+                const float inv_sum_b = (sum_b > 0.0f) ? 1.0f / sum_b : u_ts;
+                float s_final = 0.0f;
+                for (auto& mp : built_priors) {
+                    mp.prior = one_minus_eps * (mp.prior * inv_sum_b) + uniform_eps_ * u_ts;
+                    mp.prior = std::min(mp.prior, prior_clip_max_);
+                    s_final += mp.prior;
+                }
+                const float inv_f = (s_final > 0.0f) ? 1.0f / s_final : u_ts;
+                for (auto& mp : built_priors)
+                    mp.prior *= inv_f;
+            }
         }
     }
 

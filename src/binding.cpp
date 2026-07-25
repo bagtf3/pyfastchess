@@ -627,6 +627,11 @@ PYBIND11_MODULE(_core, m) {
           .def("contempt_full_q",  &MCTSTree::contempt_full_q)
           .def("contempt_fight_c", &MCTSTree::contempt_fight_c)
 
+          .def("set_tempscale_entropy_target", &MCTSTree::set_tempscale_entropy_target, py::arg("v"))
+          .def("tempscale_entropy_target",     &MCTSTree::tempscale_entropy_target)
+          .def("set_tempscale_trigger_q",      &MCTSTree::set_tempscale_trigger_q, py::arg("v"))
+          .def("tempscale_trigger_q",          &MCTSTree::tempscale_trigger_q)
+
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
      py::class_<CollectResults>(m, "CollectResults")

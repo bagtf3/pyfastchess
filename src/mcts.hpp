@@ -320,6 +320,11 @@ public:
     float contempt_full_q() const;
     float contempt_fight_c() const;
 
+    void set_tempscale_entropy_target(float v);
+    float tempscale_entropy_target() const;
+    void set_tempscale_trigger_q(float v);
+    float tempscale_trigger_q() const;
+
     std::vector<ChildDetail> root_child_details();
     std::vector<std::pair<std::string, int>> root_child_visits() const;
     std::pair<float,int> depth_stats() const;
@@ -389,6 +394,10 @@ private:
     float contempt_full_q_  = 0.5f;  // Q above this: full fight_c penalty
     float contempt_fight_c_ = 0.0f;  // max draw penalty (0 = disabled)
 
+    // Prior temperature scaling: binary search to target normed entropy.
+    float tempscale_entropy_target_ = 0.0f;  // 0 = disabled
+    float tempscale_trigger_q_      = -2.0f; // STM-POV Q floor; -2 = always; 0.5 = winning only
+
     // Qema / Qdelta_sign EMA span params (span = N → alpha = 2/(N+1))
     float qema_a_    = 2.0f / 41.0f;
     float qema_d_    = 1.0f - 2.0f / 41.0f;
@@ -407,7 +416,7 @@ private:
     void filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch);
 
     std::vector<PriorEntry>
-    build_priors(MCTSNode* node, const RawEntry* re = nullptr) const;
+    build_priors(MCTSNode* node, const RawEntry* re, float q_stm = 0.0f) const;
 
     // Noise internals (no lock, caller must ensure safety)
     void apply_root_noise_nolock(float eps, float alpha);
