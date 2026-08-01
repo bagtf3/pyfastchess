@@ -7,7 +7,6 @@
 #include <random>
 #include <iomanip>
 #include <cstdio>
-#include <chrono>
 #include "mcts.hpp"
 #include "backend.hpp"
 #include "cache.hpp"
@@ -16,6 +15,7 @@
 static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
+
 
 
 MCTSNode::MCTSNode(
@@ -156,14 +156,9 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
             prune_below = static_cast<float>(max_visits) - budget_slack;
 
             if (static_cast<float>(unseen_visits) < prune_below) {
-                // unseen_visits break: child i not evaluated, plus all children after i
-                // FIX: include child i in the count (cap_sz - i, not cap_sz - i - 1)
-                size_t unseen_pruned = cap_sz - i;
-                cc->count_pruned += unseen_pruned;
-                cc->unseen_pruned = unseen_pruned;  // TEMP: track separately
-                cc->unseen_fired = true;            // TEMP: flag that unseen fired
+                // child i is not evaluated either, so it counts as pruned
+                cc->count_pruned += cap_sz - i;
                 break;
-
             }
             if (n < prune_below) {
                 ++cc->count_pruned;
@@ -410,14 +405,6 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         total_puct += cc.count_puct;
         total_penalty += cc.count_penalty;
 
-        // TEMP: accumulate pruning stats
-        this->pruning_stats_.total_skipped += cc.count_skipped;
-        this->pruning_stats_.total_single_pruned += cc.count_pruned - cc.unseen_pruned;
-        this->pruning_stats_.total_unseen_pruned += cc.unseen_pruned;
-        if (cc.unseen_fired) {
-            this->pruning_stats_.unseen_fires += 1;
-        }
-
         // leaf can be null if we hit an unexpected stop condition
         MCTSNode* node = cc.leaf;
         CollectTag tag = cc.tag;
@@ -451,9 +438,6 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
     res.total_puct = total_puct;
     res.total_penalty = total_penalty;
-
-    // TEMP: log pruning stats every 30 seconds
-    log_pruning_stats_if_due();
 
     return res;
 }
@@ -1528,38 +1512,5 @@ MCTSTree::NNResult MCTSTree::emulate_nn_result() const {
     return result;
 }
 
-void MCTSTree::log_pruning_stats_if_due() {
-    // TEMP: Pruning stats logging — call every 30 seconds
-    // Remove this entire function when done debugging
-
-    auto now = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
-    if (pruning_stats_.last_log_time == 0) {
-        pruning_stats_.last_log_time = now;
-        return;
-    }
-
-    if (now - pruning_stats_.last_log_time < 30) {
-        return;
-    }
-
-    pruning_stats_.last_log_time = now;
-
-    uint64_t total_pruned = pruning_stats_.total_single_pruned + pruning_stats_.total_unseen_pruned;
-    float avg_per_unseen = (pruning_stats_.unseen_fires > 0)
-        ? static_cast<float>(pruning_stats_.total_unseen_pruned) / pruning_stats_.unseen_fires
-        : 0.0f;
-
-    std::fprintf(stderr,
-        "[TEMP PRUNING STATS] skipped=%llu single_pruned=%llu unseen_pruned=%llu "
-        "total_pruned=%llu unseen_fires=%llu avg_per_unseen=%.2f\n",
-        (unsigned long long)pruning_stats_.total_skipped,
-        (unsigned long long)pruning_stats_.total_single_pruned,
-        (unsigned long long)pruning_stats_.total_unseen_pruned,
-        (unsigned long long)total_pruned,
-        (unsigned long long)pruning_stats_.unseen_fires,
-        avg_per_unseen);
-}
 
 

@@ -41,8 +41,6 @@ struct CollectCounts {
     uint32_t count_pruned = 0;      // number of children pruned due to visit counts
     uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
     uint32_t count_penalty = 0;     // times performance (soft skip) penalty was applied
-    uint32_t unseen_pruned = 0;     // TEMP: count of children pruned via unseen_visits break (subset of count_pruned)
-    bool unseen_fired = false;      // TEMP: did unseen_visits break fire on this descent?
 };
 
 struct CollectResults {
@@ -432,15 +430,5 @@ private:
 
     mutable std::mutex tree_mutex_;
 
-    // TEMP: Pruning stats logging (remove after debugging)
-    struct PruningStats {
-        uint64_t total_skipped = 0;
-        uint64_t total_single_pruned = 0;     // individual move pruning via n < prune_below
-        uint64_t total_unseen_pruned = 0;     // children beyond the unseen_visits break
-        uint64_t unseen_fires = 0;            // count of times unseen_visits check fired
-        uint64_t last_log_time = 0;
-    };
-    mutable PruningStats pruning_stats_;
-    void log_pruning_stats_if_due();  // call every 30s
 };
 
