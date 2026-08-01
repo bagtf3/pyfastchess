@@ -573,11 +573,6 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
 
     node->policy_pairs = std::move(lm.uci_idx_pairs);
 
-    node->legal_moves.clear();
-    node->legal_moves.reserve(n);
-    for (const auto& p : node->policy_pairs)
-        node->legal_moves.push_back(p.first);
-
     const float u = 1.0f / static_cast<float>(n);
     node->ordered_children.reserve(n);
     for (const auto& p : node->policy_pairs) {
@@ -604,15 +599,12 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
 
     // Always called on a node with no children (priors cache fast-path).
     // Incoming priors are already sorted by prior desc (stored that way in CacheEntry).
-    // Reconstruct policy_pairs and legal_moves from cache data (no extra movegen).
+    // Reconstruct policy_pairs from cache data (no extra movegen).
     const size_t n = priors.size();
     node->policy_pairs.clear();
     node->policy_pairs.reserve(n);
-    node->legal_moves.clear();
-    node->legal_moves.reserve(n);
     for (const auto& pp : priors) {
         node->policy_pairs.emplace_back(pp.uci, pp.move_idx);
-        node->legal_moves.push_back(pp.uci);
     }
 
     node->ordered_children.reserve(n);

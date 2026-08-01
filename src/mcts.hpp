@@ -207,7 +207,6 @@ struct MCTSNode {
     // --- State ---
     backend::Board board;   // exact position at this node
     uint64_t zobrist = 0;   // computed lazily when the node is first selected
-    std::vector<std::string> legal_moves;  // pass-through: UCIs from policy_pairs in movegen order
     std::vector<std::pair<std::string, uint16_t>> policy_pairs;  // (uci, policy_idx), movegen order
 
     bool is_expanded = false;

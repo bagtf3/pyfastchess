@@ -34,11 +34,9 @@ const CacheEntry* Cache::lookup_ptr(uint64_t key) {
 
     ++hits_;
 
-    // touch via iterator to avoid second hash lookup
-    auto list_it = it->second.second;
-    order_.erase(list_it);
-    order_.push_back(key);
-    it->second.second = std::prev(order_.end());
+    // move to MRU end in place — splice relinks the existing list node,
+    // no alloc/free, and the stored iterator stays valid (same node).
+    order_.splice(order_.end(), order_, it->second.second);
 
     // return pointer to stored entry (safe while holding lock in caller?
     //  NOTE: caller should not hold pointer across unlocked region)
@@ -76,12 +74,10 @@ void Cache::clear() {
 }
 
 void Cache::touch(ListIt it) {
-    // caller must hold mutex_
-    uint64_t key = *it;
-    order_.erase(it);
-    order_.push_back(key);
-    // update iterator stored in map_
-    map_[key].second = std::prev(order_.end());
+    // caller must hold mutex_.
+    // Splice relinks the existing list node in place — no alloc/free,
+    // no second hash lookup, and the iterator stored in map_ stays valid.
+    order_.splice(order_.end(), order_, it);
 }
 
 size_t Cache::size() const {
