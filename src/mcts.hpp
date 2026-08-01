@@ -412,6 +412,8 @@ private:
 
     void expand_with_uniform_priors_nolock(MCTSNode* node);
     void expand_with_uniform_priors(MCTSNode* node);
+    // Expand from an already-generated movelist (skips a redundant movegen).
+    void expand_with_uniform_priors(MCTSNode* node, const chess::Movelist& ml);
     void expand_with_priors(MCTSNode* node, const std::vector<PriorEntry>& priors);
     
     void filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch);
@@ -428,17 +430,17 @@ private:
 
     CollectCounts collect_one_leaf_tagged();
 
-    // TEMP: pruning instrumentation. Remove with log_pruning_stats_if_due().
+    mutable std::mutex tree_mutex_;
+
+    // TEMP: Pruning stats logging (remove after debugging)
     struct PruningStats {
         uint64_t total_skipped = 0;
-        uint64_t total_single_pruned = 0;
-        uint64_t total_unseen_pruned = 0;
-        uint64_t unseen_fires = 0;
-        long long last_log_time = 0;
+        uint64_t total_single_pruned = 0;     // individual move pruning via n < prune_below
+        uint64_t total_unseen_pruned = 0;     // children beyond the unseen_visits break
+        uint64_t unseen_fires = 0;            // count of times unseen_visits check fired
+        uint64_t last_log_time = 0;
     };
-    PruningStats pruning_stats_;
-    void log_pruning_stats_if_due();
-
-    mutable std::mutex tree_mutex_;
+    mutable PruningStats pruning_stats_;
+    void log_pruning_stats_if_due();  // call every 30s
 };
 

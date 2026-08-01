@@ -566,15 +566,19 @@ std::vector<uint16_t> Board::moves_to_indices(const std::vector<std::string>& uc
 }
 
 
-LegalMaskandMap Board::legal_move_mask() const {
-    LegalMaskandMap out;
+// stm is the mated side, so the opponent wins. white-POV.
+float Board::mate_value_white_pov() const noexcept {
+    return (board_.sideToMove() == chess::Color::WHITE) ? -1.0f : 1.0f;
+}
 
-    chess::Movelist ml;
-    chess::movegen::legalmoves(ml, board_);
+
+std::vector<std::pair<std::string, uint16_t>>
+Board::pairs_from_moves(const chess::Movelist& ml) const {
+    std::vector<std::pair<std::string, uint16_t>> out;
 
     const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
 
-    out.uci_idx_pairs.reserve(ml.size());
+    out.reserve(ml.size());
 
     for (const auto &mv : ml) {
         chess::Square sf = mv.from();
@@ -608,10 +612,51 @@ LegalMaskandMap Board::legal_move_mask() const {
             promo = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
 
         const uint16_t flat = move_to_flat_slot(from_slot, to_slot, promo);
-        out.uci_idx_pairs.emplace_back(std::move(uci), kRemap[flat]);
+        out.emplace_back(std::move(uci), kRemap[flat]);
     }
 
     return out;
+}
+
+
+LegalMaskandMap Board::legal_move_mask() const {
+    chess::Movelist ml;
+    chess::movegen::legalmoves(ml, board_);
+
+    LegalMaskandMap out;
+    out.uci_idx_pairs = pairs_from_moves(ml);
+    return out;
+}
+
+
+TerminalOrMoves Board::terminal_or_legal_moves() const noexcept {
+    TerminalOrMoves out;
+
+    // Single movegen hoisted to the top; the checks below then mirror
+    // chess::Board::isGameOver() exactly, in its original order.
+    chess::movegen::legalmoves(out.moves, board_);
+    const bool no_moves = out.moves.empty();
+
+    // Mate outranks the fifty-move rule -- same rule isGameOver() encodes by
+    // routing through getHalfMoveDrawType().
+    if (board_.isHalfMoveDraw()) {
+        out.terminal_value =
+            (no_moves && board_.inCheck()) ? mate_value_white_pov() : 0.0f;
+        return out;
+    }
+
+    if (board_.isInsufficientMaterial() || board_.isRepetition()) {
+        out.terminal_value = 0.0f;
+        return out;
+    }
+
+    if (no_moves) {
+        out.terminal_value =
+            board_.inCheck() ? mate_value_white_pov() : 0.0f;  // mate or stalemate
+        return out;
+    }
+
+    return out;  // game continues; caller expands from out.moves
 }
 
 

@@ -45,6 +45,15 @@ static constexpr size_t NUM_UNDERPROMOS = 3;         // LC0 promo region: Q, R, 
 static constexpr size_t MOVE_TO_WIDTH = MOVE_TO_BASE + NUM_UNDERPROMOS; // 67
 static constexpr size_t TOTAL_MOVE_SPACE = 64 * MOVE_TO_WIDTH; // 4288
 
+// Result of the fused terminal-check + movegen. One movegen serves both.
+// terminal_value set  -> game over, moves is meaningless.
+// terminal_value unset -> game continues, moves holds the raw legal moves so the
+// caller can expand without generating them a second time.
+struct TerminalOrMoves {
+    std::optional<float> terminal_value;   // white-POV: -1, 0, +1
+    chess::Movelist moves;
+};
+
 struct LegalMaskandMap {
     // compact per-move list: pair<uci_string, stm_pov_idx>
     std::vector<std::pair<std::string, uint16_t>> uci_idx_pairs;
@@ -123,6 +132,15 @@ public:
 
     LegalMaskandMap legal_move_mask() const;
 
+    // Single movegen serving both terminal detection and expansion.
+    // Semantics are identical to isGameOver() -> terminal_value_white_pov().
+    TerminalOrMoves terminal_or_legal_moves() const noexcept;
+
+    // Format an already-generated movelist into (uci, policy_idx) pairs.
+    // Same output as legal_move_mask().uci_idx_pairs, without the movegen.
+    std::vector<std::pair<std::string, uint16_t>>
+    pairs_from_moves(const chess::Movelist& ml) const;
+
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
     int piece_at(int square) const;
     // convenience: same but returns 0..6 (0 = none, 1..6 pawn..king) and separate color function
@@ -137,6 +155,7 @@ public:
     const chess::Board& raw_board() const { return board_; }
 
 private:
+    float mate_value_white_pov() const noexcept;
     static std::string color_to_char(chess::Color c);
     static std::string reason_to_string(chess::GameResultReason r);
     static std::string result_to_string(chess::GameResult g);

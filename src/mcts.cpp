@@ -298,11 +298,14 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         return cc;
     }
 
-    // Fresh terminal? catches repetition draws and similar
-    if (auto tv = backend::terminal_value_white_pov(node->board)) {
+    // Fresh terminal? catches repetition draws and similar.
+    // One movegen here; on a priors-cache miss the movelist is reused for
+    // expansion below instead of generating a second time.
+    backend::TerminalOrMoves tom = node->board.terminal_or_legal_moves();
+    if (tom.terminal_value) {
         node->is_terminal = true;
         node->is_expanded = true;
-        const float tv_f = *tv;
+        const float tv_f = *tom.terminal_value;
         if (tv_f > 0.0f)       node->value = WDL{1.0f, 0.0f, 0.0f};
         else if (tv_f < 0.0f)  node->value = WDL{0.0f, 0.0f, 1.0f};
         else                   node->value = WDL{0.0f, 1.0f, 0.0f};
@@ -338,8 +341,8 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         return cc;
     }
 
-    // if here we need to expand.
-    expand_with_uniform_priors(node);
+    // if here we need to expand. reuse the movelist from the terminal check.
+    expand_with_uniform_priors(node, tom.moves);
 
     // Raw cache fast-path (preds already exist; resolve immediately).
     const RawEntry* re = raw_policy_cache().lookup(key);
@@ -577,19 +580,17 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
     }
 }
 
-void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
-    if (!node) return;
-
+static void fill_uniform_children(MCTSNode* node,
+                                  std::vector<std::pair<std::string, uint16_t>> pairs) {
     node->ordered_children.clear();
 
-    backend::LegalMaskandMap lm = node->board.legal_move_mask();
-    const size_t n = lm.uci_idx_pairs.size();
+    const size_t n = pairs.size();
     if (n == 0) {
         node->is_expanded = false;
         return;
     }
 
-    node->policy_pairs = std::move(lm.uci_idx_pairs);
+    node->policy_pairs = std::move(pairs);
 
     const float u = 1.0f / static_cast<float>(n);
     node->ordered_children.reserve(n);
@@ -605,10 +606,21 @@ void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
     node->children_have_priors = false;
 }
 
+void MCTSTree::expand_with_uniform_priors_nolock(MCTSNode* node) {
+    if (!node) return;
+    fill_uniform_children(node, node->board.legal_move_mask().uci_idx_pairs);
+}
+
 void MCTSTree::expand_with_uniform_priors(MCTSNode* node) {
     if (!node) return;
     //std::lock_guard<std::mutex> g(tree_mutex_);
     expand_with_uniform_priors_nolock(node);
+}
+
+void MCTSTree::expand_with_uniform_priors(MCTSNode* node,
+                                          const chess::Movelist& ml) {
+    if (!node) return;
+    fill_uniform_children(node, node->board.pairs_from_moves(ml));
 }
 
 void MCTSTree::expand_with_priors(MCTSNode* node,
