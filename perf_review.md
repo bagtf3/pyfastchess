@@ -208,7 +208,7 @@ every C++ delta was diluted below the noise floor and a one-sample run
 "showed" +1.6% that was pure jitter. Any bench for changes this small must be
 checked for self-cost first.
 
-Still open, in the original sequencing: §1.2, §1.4, §1.5, §1.6, §1.7, and all
+Still open, in the original sequencing: §1.2, §1.4, §1.7, and all
 of Parts 3-6. §5.5 is in progress separately.
 
 ---
@@ -304,12 +304,6 @@ Removes the lazy branch from the hot path entirely.
 More broadly: `side_to_move()` returning `std::string` is a bad API that leaks
 into `robust_selection_criteria` (`mcts.cpp:1317`) and the bindings. Add a
 `bool white_to_move()` and keep the string version only for Python.
-
-### 1.6 `update_visit_share` calls `std::pow` per node per descent
-`mcts.cpp:41-55`. `k` is almost always 0 or 1. Special-case:
-`k==0 → no-op; k==1 → visit_share *= vs_decay;` and only fall back to `pow`
-for `k>1`. ~50-100 cycles saved per node per descent, and descents are
-`lps × depth`.
 
 ### 1.8 Two full movegens per leaf — do one — DONE (`dd92c44`)
 `isGameOver()` runs a complete movegen internally (`vendor/chess.hpp:2519-2520`):
@@ -848,8 +842,8 @@ worth doing for §6.2, just not as a §1.8 prerequisite.
 |---|---|---|---|
 | 0 | Bench harness + determinism baseline | none | **DONE** — profiling run still not done |
 | 1a | §1.1, §1.3, §1.8 | low | **DONE** — see Status table |
-| 1b | §1.5, §1.6 hot-path scalars | low | next |
-| 1c | §6.1, §6.3 guards, then §1.2 packed move | low | pending |
+| 1b | §1.5 eager stm_pov | low | **DONE** (`5544453`) — flat, +0.6% inside noise |
+| 1c | §6.1, §6.3 guards, then §1.2 packed move | low | next |
 | 1d | §1.7 encoder memcpy, then §1.4 compiler flags | low | §1.4 last, it breaks determinism baselines |
 | 2 | §3.1 history trim, §3.3 measure teardown | low | ~1-2%; tidy, not fast |
 | 3 | §2.1-2.2 pruning | — | **DONE** (pulled forward). §2.6, §2.7 pending |
