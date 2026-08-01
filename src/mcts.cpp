@@ -282,8 +282,10 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         maybe_resort_by_visits(node);
     }
 
-    // set leaf pointer for the caller
+    // set leaf pointer for the caller. last_path_ holds root..leaf, so depth is
+    // one less than its size.
     cc.leaf = node;
+    cc.depth = static_cast<uint32_t>(last_path_.size() - 1);
 
     // IMPORTANT terminal checks must go first to catch draws (3fold, 50move)
     // Known terminal — node->value is already WDL, pass directly
@@ -384,6 +386,8 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     uint64_t total_puct = 0;
     uint64_t total_penalty = 0;
 
+    uint64_t total_depth = 0;
+
     size_t attempts = 0;
     const size_t try_break = 1000;
 
@@ -404,6 +408,8 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
         total_puct += cc.count_puct;
         total_penalty += cc.count_penalty;
+
+        total_depth += cc.depth;
 
         // leaf can be null if we hit an unexpected stop condition
         MCTSNode* node = cc.leaf;
@@ -438,6 +444,8 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
     res.total_puct = total_puct;
     res.total_penalty = total_penalty;
+
+    res.total_depth = total_depth;
 
     return res;
 }
@@ -642,7 +650,7 @@ void MCTSTree::apply_root_noise_nolock(float eps, float alpha) {
     if (!r) return;
 
     // Scale eps by ply: full 0-30, half 31-60, none 61+
-    const size_t ply = r->board.history_size();
+    const size_t ply = r->board.game_ply();
     if (ply > 60) return;
     if (ply > 30) eps *= 0.5f;
 
@@ -1108,7 +1116,11 @@ bool MCTSTree::advance_root(const std::string& mv) {
     }
 
     // No reuse: create a fresh root (old tree will be discarded).
+    // Trim here and only here: the whole subtree copies from this board, so one
+    // trim per move bounds every node without touching child creation.
     backend::Board nb = old_root->board;
+    nb.prepare_for_push(std::max<size_t>(
+        static_cast<size_t>(nb.halfmove_clock()) + 2, backend::HISTORY_FLOOR));
     if (!nb.push_uci(mv)) {
         root_ = std::move(old_root);
         return false;

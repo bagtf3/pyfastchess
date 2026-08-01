@@ -277,6 +277,9 @@ PYBIND11_MODULE(_core, m) {
                "('none','none') if the game is not over.")
           .def("is_terminal", &backend::Board::is_terminal, "Return True if the game is over")
           .def("history_size", &backend::Board::history_size)
+          .def("game_ply", &backend::Board::game_ply)
+          .def("prepare_for_push", &backend::Board::prepare_for_push, py::arg("keep_min"),
+               "Drop unreachable position history. Exposed for tests.")
           .def("history_uci",  &backend::Board::history_uci)
           .def("clear_history", &backend::Board::clear_history)
 
@@ -409,7 +412,10 @@ PYBIND11_MODULE(_core, m) {
                return py::make_tuple(n.value.win, n.value.draw, n.value.loss);
           })
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
-                                   py::return_value_policy::copy)
+                                   py::return_value_policy::copy,
+               "Position at this node. Its move history is TRIMMED to what "
+               "repetition detection and the encoders need, so history_uci() "
+               "and history_size() are truncated here. Use game_ply() for ply.")
           .def_property_readonly("zobrist", [](const MCTSNode& n){ return n.zobrist; })
           .def_property_readonly("legal_moves", [](const MCTSNode& n){
                std::vector<std::string> moves;
@@ -647,7 +653,9 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("total_pruned", &CollectResults::total_pruned)
 
           .def_readonly("total_puct", &CollectResults::total_puct)
-          .def_readonly("total_penalty", &CollectResults::total_penalty);
+          .def_readonly("total_penalty", &CollectResults::total_penalty)
+
+          .def_readonly("total_depth", &CollectResults::total_depth);
 
 
      py::class_<MCTSForest>(m, "MCTSForest")

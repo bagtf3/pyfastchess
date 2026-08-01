@@ -41,6 +41,7 @@ struct CollectCounts {
     uint32_t count_pruned = 0;      // number of children pruned due to visit counts
     uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
     uint32_t count_penalty = 0;     // times performance (soft skip) penalty was applied
+    uint32_t depth = 0;             // plies from root to the leaf (0 for a blocked descent)
 };
 
 struct CollectResults {
@@ -56,6 +57,8 @@ struct CollectResults {
 
     uint64_t total_puct = 0;
     uint64_t total_penalty = 0;
+
+    uint64_t total_depth = 0;   // summed leaf depth over non-blocked descents
 };
 
 // ChildDetail — used for introspection / Python bindings

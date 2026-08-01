@@ -97,6 +97,7 @@ bool Board::push_uci(const std::string& uci) {
     }
     board_.makeMove(m);
     history_.push_back(m);
+    ++ply_;
     return true;
 }
 
@@ -105,7 +106,20 @@ bool Board::unmake() {
     const chess::Move m = history_.back();
     history_.pop_back();
     board_.unmakeMove(m);
+    if (ply_) --ply_;
     return true;
+}
+
+void Board::prepare_for_push(size_t keep_min) {
+    const size_t n = board_.prevStatesSize();
+    if (n <= keep_min) return;
+    // even, or isRepetition's i -= 2 scan flips to the wrong side to move
+    const size_t drop = (n - keep_min) & ~size_t(1);
+    if (!drop) return;
+    board_.trimFront(drop);
+    const size_t hdrop = std::min(drop, history_.size());
+    history_.erase(history_.begin(),
+                   history_.begin() + static_cast<std::ptrdiff_t>(hdrop));
 }
 
 std::uint64_t Board::hash() const {

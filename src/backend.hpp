@@ -115,6 +115,15 @@ public:
     std::vector<std::string> history_uci() const;
     void clear_history();
 
+    // Plies pushed onto this board. Survives prepare_for_push, unlike
+    // history_size(), so it stays valid on trimmed search-tree boards.
+    size_t game_ply() const { return ply_; }
+
+    // Drop unreachable position history before the single push this board will
+    // ever see. keep_min must cover the repetition scan window and whatever the
+    // encoders unmake: max(halfmove_clock() + 2, HISTORY_FLOOR).
+    void prepare_for_push(size_t keep_min);
+
     std::string san(const std::string& uci) const;
     int material_count() const;
     int piece_count() const;
@@ -164,7 +173,12 @@ private:
 
     chess::Board board_{};
     std::vector<chess::Move> history_;
+    size_t ply_ = 0;
 };
+
+// Deepest frame count any encoder unmakes back through (the 8-frame lc0 stack
+// at backend.cpp:1010 does 7 unmakes), plus one.
+constexpr size_t HISTORY_FLOOR = 9;
 
 // Normalized: -1 (white losing), 0 (draw), +1 (white winning).
 std::optional<float> terminal_value_white_pov(const Board& b) noexcept;

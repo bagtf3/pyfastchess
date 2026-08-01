@@ -2404,6 +2404,26 @@ class Board {
         return ss;
     }
 
+    // LOCAL ADDITION (not upstream): bounded position history.
+    // isRepetition/countRepetitions only scan back hfm_ plies and encoders only
+    // unmake a fixed number of frames, so the front of prev_states_ is dead
+    // weight on a search tree that copies a board per node.
+    // The scan visits indices of fixed parity relative to size, so callers must
+    // drop an EVEN count or it flips to the wrong side to move.
+    [[nodiscard]] std::size_t prevStatesSize() const noexcept { return prev_states_.size(); }
+
+    void reservePrevStates(std::size_t n) { prev_states_.reserve(n); }
+
+    void trimFront(std::size_t n) noexcept {
+        if (n == 0) return;
+        if (n >= prev_states_.size()) {
+            prev_states_.clear();
+            return;
+        }
+        prev_states_.erase(prev_states_.begin(),
+                           prev_states_.begin() + static_cast<std::ptrdiff_t>(n));
+    }
+
     /**
      * @brief Checks if the current position is a repetition, set this to 1 if
      * you are writing a chess engine.
