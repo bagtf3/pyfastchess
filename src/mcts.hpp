@@ -214,6 +214,7 @@ struct MCTSNode {
 
     bool is_expanded = false;
     bool children_have_priors = false;
+    uint8_t resort_stage = 0;   // how many visit-resort thresholds this node has crossed
     WDL value{};             // NN leaf WDL (white-POV); set on expansion, never updated by backprop
     int cache_misses = 0;
     uint32_t queued_epoch = 0;
@@ -425,9 +426,12 @@ private:
     // Noise internals (no lock, caller must ensure safety)
     void apply_root_noise_nolock(float eps, float alpha);
 
-    // Re-sort a node's children by visit count once it crosses visit_resort_threshold_
+    // Re-sort a node's children by visit count as it crosses each threshold.
+    // Tiered so long searches (validation runs at high sim budgets) keep the
+    // ordering fresh instead of freezing it at the 250-visit picture.
     void maybe_resort_by_visits(MCTSNode* node);
-    static constexpr int visit_resort_threshold_ = 250;
+    static constexpr int visit_resort_thresholds_[] = {250, 1500, 5000};
+    static constexpr uint8_t n_visit_resorts_ = 3;
 
     CollectCounts collect_one_leaf_tagged();
 

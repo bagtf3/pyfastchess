@@ -703,7 +703,11 @@ void MCTSTree::apply_root_noise_nolock(float eps, float alpha) {
 
 void MCTSTree::maybe_resort_by_visits(MCTSNode* node) {
     if (!node->children_have_priors) return;
-    if (node->visit_count() != visit_resort_threshold_) return;
+    if (node->resort_stage >= n_visit_resorts_) return;
+    // >= not ==: a BLOCKED descent decrements every node on the path, so visit
+    // counts do not step monotonically and an equality test can be missed
+    if (node->visit_count() < visit_resort_thresholds_[node->resort_stage]) return;
+    ++node->resort_stage;
     std::stable_sort(node->ordered_children.begin(), node->ordered_children.end(),
                      [](const MCTSNode::ChildEntry& a, const MCTSNode::ChildEntry& b) {
                          int na = a.child ? a.child->visit_count() : 0;
