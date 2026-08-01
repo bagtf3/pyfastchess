@@ -772,7 +772,7 @@ terminal_value_white_pov(const Board& b) noexcept {
     if (reason == "none") return std::nullopt;
     if (reason == "checkmate") {
         // winner is the side who just delivered mate; stm is now the loser
-        const bool stm_white  = (b.side_to_move() == "w");
+        const bool stm_white  = b.white_to_move();
         const bool white_wins = !stm_white;
         return white_wins ? 1.0f : -1.0f;   // white-POV
     }
@@ -846,7 +846,7 @@ static void make_frame_14_bitboards(const backend::Board& b, uint8_t out[8*8*14]
     }
 
     // side-to-move plane (index 12) — preserve previous layout (full plane)
-    const bool wtm = (b.side_to_move() == "w");
+    const bool wtm = b.white_to_move();
     uint8_t stm_val = wtm ? 1 : 0;
     for (int cell = 0; cell < 64; ++cell) out[cell * 14 + 12] = stm_val;
 

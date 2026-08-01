@@ -244,6 +244,9 @@ PYBIND11_MODULE(_core, m) {
           .def("side_to_move", &backend::Board::side_to_move,
                "Return 'w' or 'b' for the side to move.")
 
+          .def("white_to_move", &backend::Board::white_to_move,
+               "True if white is to move. Prefer this over side_to_move() == 'w'.")
+
           .def("enpassant_sq", &backend::Board::enpassant_sq,
                "Return the en passant target square like 'e3' or '-'.")
 

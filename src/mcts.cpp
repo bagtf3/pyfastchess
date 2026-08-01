@@ -26,7 +26,7 @@ MCTSNode::MCTSNode(
     : parent(parent_), uci(std::move(uci_from_parent)), board(b)
 {
     zobrist = 0ULL;
-    stm_pov = 0.0f;
+    stm_pov = b.white_to_move() ? 1.0f : -1.0f;
 
     // set span (guard against junk)
     if (visit_share_span_ < 1) visit_share_span_ = 1;
@@ -1336,7 +1336,7 @@ std::pair<
     }
 
     const MCTSNode* r = root_.get();
-    const float flip = (r && r->board.side_to_move() == "w") ? 1.0f : -1.0f;
+    const float flip = (r && r->board.white_to_move()) ? 1.0f : -1.0f;
 
     auto minmax01 = [](const std::vector<float>& v) {
         std::vector<float> out;

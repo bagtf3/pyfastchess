@@ -123,11 +123,7 @@ struct MCTSNode {
     // +1.0 if side-to-move is white, -1.0 if side-to-move is black.
     // Stored once to avoid recomputing on hot paths.
     float stm_pov = 0.0f;
-    float get_stm_pov() {
-        if (stm_pov != 0.0f) return stm_pov;
-        stm_pov = (board.side_to_move() == "w") ? 1.0f : -1.0f;
-        return stm_pov;
-    }
+    float get_stm_pov() const noexcept { return stm_pov; }
 
     // state indicators
     bool is_pending = false;

@@ -89,6 +89,11 @@ public:
     std::uint64_t hash() const;
     std::uint64_t zobrist_full() const;
 
+    // Prefer this internally. side_to_move() builds a std::string just to
+    // report one bit, and it was being called on hot paths to do it.
+    bool white_to_move() const noexcept {
+        return board_.sideToMove() == chess::Color::WHITE;
+    }
     std::string side_to_move() const;
     std::string enpassant_sq() const;
     std::string castling_rights() const;
