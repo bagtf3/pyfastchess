@@ -721,6 +721,12 @@ std::string Board::piece_color_at(int square) const {
     return (p.color() == chess::Color::WHITE) ? std::string("w") : std::string("b");
 }
 
+bool Board::any_queens() const {
+    uint64_t wq = board_.pieces(chess::PieceType::QUEEN, chess::Color::WHITE).getBits();
+    uint64_t bq = board_.pieces(chess::PieceType::QUEEN, chess::Color::BLACK).getBits();
+    return (wq | bq) != 0;
+}
+
 // convert chess::Bitboard -> uint64_t using the library accessor
 static inline uint64_t bitboard_to_u64(const chess::Bitboard &bb) {
     return bb.getBits();   // chess::Bitboard::getBits() returns std::uint64_t

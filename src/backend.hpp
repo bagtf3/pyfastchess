@@ -146,6 +146,8 @@ public:
     // convenience: same but returns 0..6 (0 = none, 1..6 pawn..king) and separate color function
     int piece_type_at(int square) const;           // 0..6
     std::string piece_color_at(int square) const;  // "w", "b", or ""
+    // fast bitboard check: true if either side has a queen
+    bool any_queens() const;
     /// Return attackers of given color on `square`:
     /// - attackers_u64("w", sq) -> uint64_t bitboard of origin squares (LSB = a1)
     /// - attackers_list("w", sq) -> std::vector<int> list of origin square indices 0..63

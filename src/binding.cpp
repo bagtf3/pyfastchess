@@ -349,6 +349,7 @@ PYBIND11_MODULE(_core, m) {
           .def("piece_at", &backend::Board::piece_at, py::arg("square_index"))
           .def("piece_type_at", &backend::Board::piece_type_at)
           .def("piece_color_at", &backend::Board::piece_color_at)
+          .def("any_queens", &backend::Board::any_queens)
           .def("attackers_u64", &backend::Board::attackers_u64, py::arg("color"), py::arg("square_index"))
           .def("attackers_list", &backend::Board::attackers_list, py::arg("color"), py::arg("square_index"));
 
