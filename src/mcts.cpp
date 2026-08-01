@@ -109,7 +109,7 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     const float pov_sign = this->get_stm_pov();
     const float parent_q = pov_sign * this->Q_eff;
 
-    bool do_prune = (pruning_factor > 0.0f) && (cap_sz == n_child);
+    bool do_prune = (pruning_factor > 0.0f) && (cap_sz == n_child) && (parent == nullptr);
 
     // remaining sim budget with a small floor for safety
     const float remaining = do_prune ? std::max(10.0f, sim_budget - parentN) : 0.0f;
@@ -143,15 +143,17 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         if (ch) have_seen_any = true;
         tested += 1;
 
+        // track the true max unconditionally; only gate the prune decision
+        if (n_int > max_visits) {
+            max_visits = n_int;
+            max_visits_idx = static_cast<int>(i);
+        }
+
         // pruning pass based on visit target and max visits encountered
         // setting a floor to make sure we dont restrict selection too much
         if (do_prune && have_seen_any && tested > 4) {
-            if (n_int > max_visits){
-                 max_visits = n_int;
-                 max_visits_idx = static_cast<int>(i);
-                 prune_below = static_cast<float>(max_visits) - budget_slack;
-            }
-            
+            prune_below = static_cast<float>(max_visits) - budget_slack;
+
             if (static_cast<float>(unseen_visits) < prune_below) {
                 // account for unseen children as pruned and exit
                 cc->count_pruned += static_cast<size_t>(cap_sz - i - 1);
