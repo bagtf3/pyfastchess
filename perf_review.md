@@ -180,22 +180,38 @@ On `opus_read_only`, all measured with the Part 0 harness (25 fixtures,
 | `01f617b` | §2.1, §2.2 | root-only pruning, `max_visits` tracked unconditionally |
 | `dd92c44` | §1.8 | fused terminal check + movegen, one movegen per leaf |
 | `e4e2241` | — | off-by-one in the unseen-prune *count* (telemetry only) |
+| `4925497` | §3.1 | leaf-depth telemetry; per-node board history trimmed in `advance_root` |
+| `e130db9` | — | visit resort tiered at 250/1500/5000 |
+| `5544453` | §1.5 | eager `stm_pov`, `white_to_move()` replaces the string compares |
+| `a90512f` | — | §1.6 tried and dropped: the `pow` special-case benched flat |
+| `b84de79` | §6.1, §6.3 | failed selection is BLOCKED, not a re-expand; missing `clear()` |
+| `75c9e43` | §1.2 | **packed move on `ChildEntry`, `policy_pairs` deleted** |
+| `feacdee` | §4.2, §4.3 | raw-cache eviction fix; stranded inflight nodes requeued |
 
-Cumulative vs `dev` @ `ef9ae97`:
+Cumulative vs `dev` @ `ef9ae97`, 25 fixtures / 2000 sims / 6 sweeps:
 
-| metric | OG dev | +pruning | +movegen | total |
-|---|---|---|---|---|
-| us/sim | 22.65 +/- 0.66 | 22.39 +/- 0.56 | 21.90 +/- 0.54 | **-3.3%** |
-| sims/s | 44172 | 44685 | 45692 | **+3.4%** |
-| rebuild us/sim | 18.38 +/- 0.64 | 17.38 +/- 0.50 | 17.13 +/- 0.59 | **-6.8%** |
-| puct/sim | 54.37 | 54.89 | 54.89 | behaviour canary |
-| pruned/sim | 10.77 | 12.35 | 13.06 | behaviour canary |
+| metric | OG dev | +pruning +movegen | +§1.5 | **+§1.2 packed** | total |
+|---|---|---|---|---|---|
+| us/sim | 22.65 +/- 0.66 | 21.90 +/- 0.54 | 21.59 +/- 0.63 | **8.44 +/- 0.44** | **-62.7%** |
+| sims/s | 44172 | 45692 | 46356 | **118707** | **+168.7%** |
+| rebuild us/sim | 18.38 +/- 0.64 | 17.13 +/- 0.59 | 16.51 +/- 0.60 | **7.05 +/- 0.52** | **-61.6%** |
+| puct/sim | 54.37 | 54.89 | 54.77 | 54.77 | behaviour canary |
+| pruned/sim | 10.77 | 13.06 | 13.07 | 13.07 | behaviour canary |
 
-**Read the caveat before quoting these.** No individual step clears 2 sigma at
-6 sweeps; the cumulative OG->current is borderline (t ~ 2.15, p ~ 0.06). The
-direction is consistent across every step and each mechanism is understood,
-but -3.3% is "probably real", not "measured". Raise sweeps if a firm number
-is needed.
+**Everything before §1.2 was noise; §1.2 is not.** No step through §1.5 clears
+2 sigma at 6 sweeps — the cumulative OG->§1.5 is borderline (t ~ 2.15, p ~ 0.06),
+"probably real" rather than measured. §1.2 clears 2 sigma by roughly 20x and
+reproduced within 1.8% on an independently rebuilt binary.
+
+§1.2's win turned out to be one thing the plan had filed under §1.8: `moveToUci`
+builds a **`std::stringstream` per move** (`vendor/chess.hpp:4706`), and
+`pairs_from_moves` called it for every legal move on every cache-miss expansion.
+The bench runs 0.988 new leaves per sim, so that was ~35 stringstream
+constructions **per simulation**. Everything else in §1.2 — the vector, the
+O(n^2) `lookup_uci`, the per-node string — is minor beside it.
+
+Equivalence for §1.2, §1.5, §4.2 and §4.3 was checked by comparing all 150
+stored root visit vectors against the previous build: bit-identical every time.
 
 The canaries behave correctly: `puct/sim` moves once, at the pruning change
 (which is *supposed* to alter search), then holds exactly flat across §1.8
@@ -208,8 +224,31 @@ every C++ delta was diluted below the noise floor and a one-sample run
 "showed" +1.6% that was pure jitter. Any bench for changes this small must be
 checked for self-cost first.
 
-Still open, in the original sequencing: §1.2, §1.4, §1.7, and all
-of Parts 3-6. §5.5 is in progress separately.
+**Where the bottleneck moved.** Production telemetry after §1.2: `duty` 66.8%
+-> 77.5%, `gap` 0.025s -> 0.017s, i.e. the GPU now idles far less during the
+collect phase. But `ideal preds/s` (throughput while actively predicting, a
+pure GPU number) fell 18715 -> 16710 in the same window, which ate most of the
+gain: realized preds/s only moved 12508 -> 12954. **The rig is now GPU-bound.**
+With duty at 77.5% there is ~22% of cycle left for C++ to give back, so the
+remaining Part 1/2 micro-optimisations cannot buy much. The live levers are
+§5.1 (overlap collect with inference) with §4.4 as its prerequisite, and the
+inference-side items in §5.3.
+
+Obsoleted by work that landed, no action needed: **§6.2** (the two
+`policy_pairs` orderings — the field no longer exists), **§2.6** (MateLock UCI
+string — now a single `atomic<uint16_t>`), **§6.5** (`maybe_resort_by_visits`
+exact-equality — now `>=` with a per-node stage counter).
+
+Dropped after measurement: **§1.6** (`pow` special-case, benched flat),
+**§1.7** (encoder memcpy, ~1% and moot once TRT/ONNX is embedded), **§2.5**
+(batched visits, conflicts with tree purity).
+
+Still open: §1.4, §2.4, §2.7, §3.2, §3.3, §4.1, §4.4, §5.1, §5.2, §5.3,
+§6.4, §6.6, §6.7, and the rest of §5.5.
+
+**Unexplained.** `tests/repro_segfault_endgame.py` still segfaults on an
+endgame FEN at ~50+ sims, in pure pyfastchess. §6.1 was a candidate cause and
+did not fix it.
 
 ---
 
@@ -224,7 +263,7 @@ allocation and ~30 string copies each time, ×80 games ×3 workers.
 
 Delete the member and both population loops. Pure subtraction.
 
-### 1.2 `policy_pairs` is redundant with `ordered_children` — fold it in
+### 1.2 `policy_pairs` is redundant with `ordered_children` — DONE (`75c9e43`)
 `mcts.hpp:211`. `policy_pairs` is `vector<pair<string,uint16_t>>`; `move_idx`
 already lives in `ChildEntry`. The only unique content is the UCI string.
 
@@ -293,7 +332,7 @@ determinism baseline in Part 0 is captured, or the baseline gets recaptured.
 Confirm the target machine has AVX2 (it is running TRT, so almost certainly
 yes) and consider `/arch:AVX512` only after measuring.
 
-### 1.5 `get_stm_pov()` does a string compare
+### 1.5 `get_stm_pov()` does a string compare — DONE (`5544453`)
 `mcts.hpp:123-127` lazily computes `stm_pov` via `board.side_to_move()`, which
 constructs and returns a `std::string` (`backend.cpp:247-249`). Called on every
 node once, and branch-checked on every `select_child_lazy_ptr` call.
@@ -358,7 +397,7 @@ library handles this via the `isHalfMoveDraw()` / `getHalfMoveDrawType()` pair
 Test position: mate delivered on the move that reaches halfmove clock 100 — must
 score as checkmate, not a draw.
 
-### 1.7 Encoder bindings copy element-by-element
+### 1.7 Encoder bindings copy element-by-element — DROPPED
 `binding.cpp:179-184` (history tokens — the encoder actually in production)
 writes 393 elements per position through `mutable_unchecked<2>`. `binding.cpp:141-148`
 (lc0) writes **7168** elements per position through a 4-deep index. Both are
@@ -501,7 +540,7 @@ much cheaper each) rather than from doing fewer, less accurate evals. Revisit
 only if §2.4 lands and PUCT is still the measured bottleneck — and then only
 behind a strength A/B, not a speed one.
 
-### 2.6 MateLock: store an index, not a UCI string
+### 2.6 MateLock: store an index, not a UCI string — OBSOLETE (done in `75c9e43`)
 `mcts.hpp:134-184` implements must-visit as a 16-byte char buffer guarded by a
 3-state atomic CAS with a `std::this_thread::yield()` spin loop; the consumer
 then does a linear `strcmp` scan over `policy_pairs` (`mcts.cpp:92-94`) to
@@ -670,7 +709,7 @@ the numpy buffer, builds priors, and applies the result. That deletes:
 
 Keep `raw_cache_*` around for the debug/inspection bindings.
 
-### 4.2 `RawPolicyCache` eviction can drop a live entry
+### 4.2 `RawPolicyCache` eviction can drop a live entry — DONE (`feacdee`)
 `singleton_registry.cpp:25-50`. On a duplicate key, `bulk_insert` overwrites the
 map entry but **also pushes the key onto `order_` again**, so `order_` grows
 past `map_.size()`. `evict_if_needed_unlocked` pops the oldest key and erases
@@ -680,7 +719,7 @@ Coupled with §4.3, that means an inflight node can silently lose its result.
 Also `evict_if_needed_unlocked()` is called inside the per-item loop rather than
 once at the end. Both go away if §4.1 lands.
 
-### 4.3 `cache_misses` is a dead field guarding a real failure mode
+### 4.3 `cache_misses` is a dead field guarding a real failure mode — DONE (`feacdee`)
 `mcts.cpp:807-817`. On a raw-cache miss, `resolve_inflight` does
 `node->cache_misses += 1; ++i;` and moves on. **Nothing ever reads
 `cache_misses`.** The node stays inflight forever: `queue_pending` won't requeue
@@ -771,7 +810,7 @@ the looper.
 
 These are not speedups, but they are latent behaviour hazards.
 
-### 6.1 `select_child` returning `nullptr` silently re-expands and can dangle
+### 6.1 `select_child` returning `nullptr` silently re-expands — DONE (`b84de79`)
 `collect_one_leaf_tagged:270` does `if (!child) break;` and then falls through to
 `expand_with_uniform_priors(node)` (`:335`), which **clears
 `ordered_children`** (`mcts.cpp:565`) — destroying an already-instantiated
@@ -783,7 +822,7 @@ into it. That is a use-after-free path.
 memory corruption, not a wrong move. Guard: if the node is already
 `is_expanded`, never re-expand — treat it as BLOCKED instead.
 
-### 6.2 Two different ordering conventions for `policy_pairs`
+### 6.2 Two different ordering conventions for `policy_pairs` — OBSOLETE (`75c9e43`)
 `expand_with_uniform_priors` builds `policy_pairs` in **movegen order**
 (`mcts.cpp:574`); `expand_with_priors` builds it in **prior-sorted order** from
 the cache (`mcts.cpp:613-616`). `apply_result`'s comment claims movegen order
@@ -799,7 +838,7 @@ or any new caller, silently assigns priors to the wrong moves. Make the
 invariant explicit (assert `move_idx` match) or index by `move_idx`. Folding
 `policy_pairs` into `ChildEntry` (§1.2) makes this structurally impossible.
 
-### 6.3 `expand_with_priors` does not clear `ordered_children`
+### 6.3 `expand_with_priors` does not clear `ordered_children` — DONE (`b84de79`)
 `mcts.cpp:618` reserves and `emplace_back`s without a preceding `clear()`, unlike
 its sibling at `mcts.cpp:565`. The comment says it is only ever called on a node
 with no children. Add the `clear()` — it costs nothing when the vector is empty.
@@ -810,7 +849,7 @@ with no children. Add the `clear()` — it costs nothing when the vector is empt
 machine. The rescue path at `collect_one_leaf_tagged:250-254` is the caller that
 can trigger it.
 
-### 6.5 `maybe_resort_by_visits` fires on exact equality
+### 6.5 `maybe_resort_by_visits` fires on exact equality — OBSOLETE (`e130db9`)
 `mcts.cpp:692`: `if (node->visit_count() != visit_resort_threshold_) return;`.
 Correct only because N increments by exactly 1 from one thread. It also fires
 repeatedly if a BLOCKED descent decrements N back below 250 (`mcts.cpp:258`).
@@ -843,15 +882,20 @@ worth doing for §6.2, just not as a §1.8 prerequisite.
 | 0 | Bench harness + determinism baseline | none | **DONE** — profiling run still not done |
 | 1a | §1.1, §1.3, §1.8 | low | **DONE** — see Status table |
 | 1b | §1.5 eager stm_pov | low | **DONE** (`5544453`) — flat, +0.6% inside noise |
-| 1c | §6.1, §6.3 guards, then §1.2 packed move | low | next |
-| 1d | §1.7 encoder memcpy, then §1.4 compiler flags | low | §1.4 last, it breaks determinism baselines |
-| 2 | §3.1 history trim, §3.3 measure teardown | low | ~1-2%; tidy, not fast |
-| 3 | §2.1-2.2 pruning | — | **DONE** (pulled forward). §2.6, §2.7 pending |
-| 4 | §2.4 SoA child arrays | medium | the PUCT-loop win |
-| 5 | §4.1 batch apply (kills raw cache), §4.4 GIL release | medium | alloc + copy elimination |
-| 6 | §5.1 collect/infer overlap | medium | 20-40% wall clock |
+| 1c | §6.1, §6.3 guards, then §1.2 packed move | low | **DONE** (`b84de79`, `75c9e43`) — §1.2 is +169% sims/s |
+| 1d | §1.4 compiler flags | low | pending; do last, it breaks determinism baselines |
+| 2 | §3.1 history trim | low | **DONE** (`4925497`) — flat, kept for the bounded cost model |
+| 2b | §3.3 measure teardown, §3.2 no board per node | low / large | pending |
+| 3 | §2.1-2.2 pruning | — | **DONE** (`01f617b`). §2.7 pending, §2.6 obsolete |
+| 3b | §4.2, §4.3 cache correctness | low | **DONE** (`feacdee`) |
+| 4 | §2.4 SoA child arrays | medium | was "the PUCT-loop win"; now a bigger share of a much smaller total |
+| **5** | **§2.7 single-thread audit -> §4.4 GIL release -> §5.1 overlap** | medium | **the remaining real win: the rig is GPU-bound at 77.5% duty** |
+| 5b | §4.1 batch apply (kills raw cache), §5.3 policy upcast | medium | alloc + copy elimination |
+| 6 | §6.4, §6.6, §6.7 correctness leftovers | low | pending |
+| — | §1.6 pow special-case | — | **dropped**: benched flat (`a90512f`) |
+| — | §1.7 encoder memcpy | — | **dropped**: ~1%, moot once TRT/ONNX is embedded |
 | — | §2.5 batched visits per scan | — | **dropped**: conflicts with tree purity |
-| — | §5.5 minor python cleanups | — | in progress separately |
+| — | §5.5 minor python cleanups | — | partly done (any_queens, telemetry sums) |
 
 Each item lands as its own commit and its own bench run, so the A/B is always
 one change wide. The Part 0 harness stores every run, so `OG` and the last
