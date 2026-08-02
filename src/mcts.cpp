@@ -269,7 +269,20 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         MCTSNode* child = node->select_child_lazy_ptr(
             this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_, this->fpu_reduction_);
 
-        if (!child) break;
+        // Selection failed on a node that is expanded and has children, so it
+        // does not need expanding. Breaking here would fall through to
+        // expand_*, which clears ordered_children and destroys the instantiated
+        // subtree while pending_/inflight_ still hold raw pointers into it.
+        // Causes seen: every child scoring NaN (NaN comparisons are false, so
+        // best_idx never gets set) and push_uci failing in get_or_create_child.
+        if (!child) {
+            for (MCTSNode* n : last_path_) n->add_visit(-1);
+            last_path_.clear();
+            cc.count_blocked = 1;
+            cc.tag = CollectTag::BLOCKED;
+            cc.leaf = node;
+            return cc;
+        }
 
         // update visit_share EMA
         int tick = node->visit_count() - 1;
@@ -629,6 +642,10 @@ void MCTSTree::expand_with_priors(MCTSNode* node,
         node->policy_pairs.emplace_back(pp.uci, pp.move_idx);
     }
 
+    // clear() to match expand_with_uniform_priors. Free when already empty,
+    // which the comment above says is always -- so this only matters if that
+    // ever stops being true.
+    node->ordered_children.clear();
     node->ordered_children.reserve(n);
     for (const auto& pp : priors) {
         MCTSNode::ChildEntry ce;
