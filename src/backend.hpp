@@ -155,6 +155,21 @@ public:
     std::vector<std::pair<std::string, uint16_t>>
     pairs_from_moves(const chess::Movelist& ml) const;
 
+    // Same, but carrying the packed 16-bit chess::Move instead of a UCI string.
+    // The packed move is the complete move identity and feeds makeMove with no
+    // parsing, so the search never needs the string form.
+    std::vector<std::pair<uint16_t, uint16_t>>
+    packed_pairs_from_moves(const chess::Movelist& ml) const;
+
+    // Play an already-packed move. No uciToMove parse, no legal-move search.
+    bool push_packed(uint16_t packed);
+
+    // Packed move <-> UCI, for the Python boundary only. uci_from_packed
+    // reproduces exactly what pairs_from_moves would have stored, including
+    // king-destination castling (moveToUci handles that when chess960 = false).
+    static std::string uci_from_packed(uint16_t packed);
+    uint16_t packed_from_uci(const std::string& uci) const;
+
     // returns 0 if empty, 1..6 for white pawn..king, -1..-6 for black pawn..king
     int piece_at(int square) const;
     // convenience: same but returns 0..6 (0 = none, 1..6 pawn..king) and separate color function

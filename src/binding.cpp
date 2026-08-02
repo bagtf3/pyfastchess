@@ -393,7 +393,7 @@ PYBIND11_MODULE(_core, m) {
           .def("__repr__", [](const MCTSNode& n) {
                std::ostringstream oss;
                oss << "<MCTSNode uci="
-                    << (n.uci.empty() ? "\"<root>\"" : n.uci)
+                    << (n.packed_from_parent ? n.uci_str() : std::string("\"<root>\""))
                     << " N=" << n.visit_count()
                     << " Q=" << n.Q
                     << " expanded=" << (n.is_expanded ? "1" : "0")
@@ -408,7 +408,7 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("W",      [](const MCTSNode& n){ return n.W; })
           .def_property_readonly("Q",      [](const MCTSNode& n){ return n.Q; })
           .def_property_readonly("Q_eff",  [](const MCTSNode& n){ return n.Q_eff; })
-          .def_property_readonly("uci",    [](const MCTSNode& n){ return n.uci; })
+          .def_property_readonly("uci",    [](const MCTSNode& n){ return n.uci_str(); })
           .def_property_readonly("is_expanded", [](const MCTSNode& n){ return n.is_expanded; })
           .def_property_readonly("is_terminal",   [](const MCTSNode& n){ return n.is_terminal; })
           .def_property_readonly("value", [](const MCTSNode& n){
@@ -422,14 +422,16 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("zobrist", [](const MCTSNode& n){ return n.zobrist; })
           .def_property_readonly("legal_moves", [](const MCTSNode& n){
                std::vector<std::string> moves;
-               moves.reserve(n.policy_pairs.size());
-               for (const auto& p : n.policy_pairs) moves.push_back(p.first);
+               moves.reserve(n.ordered_children.size());
+               for (const auto& ce : n.ordered_children)
+                    moves.push_back(backend::Board::uci_from_packed(ce.packed_move));
                return moves;
           })
 
           .def("get_prior", [](const MCTSNode& n, const std::string& uci){
+               const uint16_t want = n.board.packed_from_uci(uci);
                for (const auto &ce : n.ordered_children) {
-                    if (lookup_uci(n.policy_pairs, ce.move_idx) == uci) return ce.prior;
+                    if (ce.packed_move == want) return ce.prior;
                }
                return 0.0f;
           }, py::arg("move_uci"))
@@ -437,7 +439,7 @@ PYBIND11_MODULE(_core, m) {
           .def("priors", [](const MCTSNode& n){
                py::dict out;
                for (const auto &ce : n.ordered_children) {
-                    out[py::str(lookup_uci(n.policy_pairs, ce.move_idx))] = ce.prior;
+                    out[py::str(backend::Board::uci_from_packed(ce.packed_move))] = ce.prior;
                }
                return out;
           });
@@ -560,10 +562,11 @@ PYBIND11_MODULE(_core, m) {
                     std::vector<PriorEntry> entries;
                     entries.reserve(move_priors.size());
                     for (const auto& p : move_priors) {
+                        const uint16_t packed = node->board.packed_from_uci(p.first);
                         uint16_t midx = 0xFFFF;
-                        for (const auto& pp : node->policy_pairs)
-                            if (pp.first == p.first) { midx = pp.second; break; }
-                        entries.push_back({p.first, midx, p.second, 0.0f});
+                        for (const auto& ce : node->ordered_children)
+                            if (ce.packed_move == packed) { midx = ce.move_idx; break; }
+                        entries.push_back({packed, midx, p.second, 0.0f});
                     }
                     t.apply_result(node, entries, wdl, cache);
                },

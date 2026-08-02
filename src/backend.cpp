@@ -586,6 +586,48 @@ float Board::mate_value_white_pov() const noexcept {
 }
 
 
+// Policy-space (1858) index for one move. Shared by the string and the packed
+// variant below so the two can never drift apart.
+static uint16_t policy_idx_for_move(const chess::Move& mv, bool stm_white) {
+    chess::Square sf = mv.from();
+    chess::Square st = mv.to();  // rook square for castling in this lib
+
+    const bool is_castling = (mv.typeOf() == chess::Move::CASTLING);
+
+    if (!stm_white) {
+        sf.flip();
+        st.flip();
+    }
+
+    const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
+
+    // For castling mv.to() is the rook square; compute king destination instead
+    // (±2 files from king) to match the xc0 native king-destination convention.
+    uint16_t to_slot;
+    if (is_castling) {
+        const int kf = from_slot % 8;
+        const int kr = from_slot / 8;
+        const int rf = st.index() % 8;
+        to_slot = static_cast<uint16_t>(kr * 8 + (rf > kf ? kf + 2 : kf - 2));
+    } else {
+        to_slot = static_cast<uint16_t>(st.index());
+    }
+
+    // moveToUci appends promotionType(), which is already lowercase, so reading
+    // the piece type directly gives the same char the old uci[4] read did.
+    char promo = 0;
+    if (mv.typeOf() == chess::Move::PROMOTION) {
+        switch (mv.promotionType().internal()) {
+            case chess::PieceType::underlying::KNIGHT: promo = 'n'; break;
+            case chess::PieceType::underlying::BISHOP: promo = 'b'; break;
+            case chess::PieceType::underlying::ROOK:   promo = 'r'; break;
+            default:                                   promo = 'q'; break;
+        }
+    }
+
+    return kRemap[move_to_flat_slot(from_slot, to_slot, promo)];
+}
+
 std::vector<std::pair<std::string, uint16_t>>
 Board::pairs_from_moves(const chess::Movelist& ml) const {
     std::vector<std::pair<std::string, uint16_t>> out;
@@ -595,41 +637,44 @@ Board::pairs_from_moves(const chess::Movelist& ml) const {
     out.reserve(ml.size());
 
     for (const auto &mv : ml) {
-        chess::Square sf = mv.from();
-        chess::Square st = mv.to();  // rook square for castling in this lib
-
-        const bool is_castling = (mv.typeOf() == chess::Move::CASTLING);
-
-        if (!stm_white) {
-            sf.flip();
-            st.flip();
-        }
-
-        const uint16_t from_slot = static_cast<uint16_t>(sf.index()); // 0..63
-
-        // For castling mv.to() is the rook square; compute king destination instead
-        // (±2 files from king) to match the xc0 native king-destination convention.
-        uint16_t to_slot;
-        if (is_castling) {
-            const int kf = from_slot % 8;
-            const int kr = from_slot / 8;
-            const int rf = st.index() % 8;
-            to_slot = static_cast<uint16_t>(kr * 8 + (rf > kf ? kf + 2 : kf - 2));
-        } else {
-            to_slot = static_cast<uint16_t>(st.index());
-        }
-
-        std::string uci = chess::uci::moveToUci(mv);
-
-        char promo = 0;
-        if (uci.size() > 4)
-            promo = static_cast<char>(std::tolower(static_cast<unsigned char>(uci[4])));
-
-        const uint16_t flat = move_to_flat_slot(from_slot, to_slot, promo);
-        out.emplace_back(std::move(uci), kRemap[flat]);
+        out.emplace_back(chess::uci::moveToUci(mv), policy_idx_for_move(mv, stm_white));
     }
 
     return out;
+}
+
+std::vector<std::pair<uint16_t, uint16_t>>
+Board::packed_pairs_from_moves(const chess::Movelist& ml) const {
+    std::vector<std::pair<uint16_t, uint16_t>> out;
+
+    const bool stm_white = (board_.sideToMove() == chess::Color::WHITE);
+
+    out.reserve(ml.size());
+
+    for (const auto &mv : ml) {
+        out.emplace_back(mv.move(), policy_idx_for_move(mv, stm_white));
+    }
+
+    return out;
+}
+
+bool Board::push_packed(uint16_t packed) {
+    if (packed == chess::Move::NO_MOVE) return false;
+    const chess::Move m(packed);
+    board_.makeMove(m);
+    history_.push_back(m);
+    ++ply_;
+    return true;
+}
+
+std::string Board::uci_from_packed(uint16_t packed) {
+    return chess::uci::moveToUci(chess::Move(packed));
+}
+
+uint16_t Board::packed_from_uci(const std::string& uci) const {
+    const chess::Move m = chess::uci::uciToMove(board_, uci);
+    return (m == chess::Move::NO_MOVE) ? chess::Move::NO_MOVE
+                                       : static_cast<uint16_t>(m.move());
 }
 
 

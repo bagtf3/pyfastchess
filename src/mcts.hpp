@@ -20,15 +20,6 @@
 // forward decl so CollectCounts can hold a MCTSNode*
 struct MCTSNode;
 
-inline const std::string& lookup_uci(
-    const std::vector<std::pair<std::string, uint16_t>>& pairs, uint16_t move_idx)
-{
-    for (const auto& p : pairs)
-        if (p.second == move_idx) return p.first;
-    static const std::string empty;
-    return empty;
-}
-
 // Telemetry/return types used by collect_one_leaf_tagged / collect_many_leaves
 enum class CollectTag { NEW_LEAF = 0, CACHED = 1, TERMINAL = 2, BLOCKED = 3 };
 
@@ -94,8 +85,14 @@ struct MCTSNode {
     // tree links
     MCTSNode* parent = nullptr;
 
-    // Move info (uci from parent->this). Root has uci="".
-    std::string uci;
+    // Move from parent->this as a packed 16-bit chess::Move. Root has NO_MOVE.
+    // Kept packed: it feeds makeMove directly and only becomes a string at the
+    // Python boundary, via uci_str().
+    uint16_t packed_from_parent = 0;
+    std::string uci_str() const {
+        return packed_from_parent ? backend::Board::uci_from_packed(packed_from_parent)
+                                  : std::string();
+    }
 
     // visits (atomic so selection can bump without lock)
     std::atomic<int> N{0};
@@ -131,55 +128,21 @@ struct MCTSNode {
     bool  is_terminal = false;
 
     mutable std::atomic<int> performance_penalty{0};
-    std::atomic<uint8_t> must_visit_state{0};  // 0 empty, 2 writing, 1 ready
-    char must_visit_uci[16] = {0};
+    // Must-visit move as a packed chess::Move; 0 = none. One atomic word, so
+    // the old write-in-progress state machine and its spin loop are gone.
+    std::atomic<uint16_t> must_visit_packed{0};
 
-    void set_must_visit_uci(const std::string& mv) noexcept {
-        uint8_t expected = 0;
-        if (!must_visit_state.compare_exchange_strong(
-                expected, 2, std::memory_order_acq_rel,
-                std::memory_order_relaxed)) {
-            return;
-        }
-
-        const size_t n = std::min(mv.size(), sizeof(must_visit_uci) - 1);
-        if (n > 0) {
-            std::memcpy(must_visit_uci, mv.data(), n);
-        }
-        must_visit_uci[n] = '\0';
-        must_visit_state.store(1, std::memory_order_release);
+    // First writer wins, matching the old CAS-from-empty behaviour.
+    void set_must_visit_packed(uint16_t packed) noexcept {
+        uint16_t expected = 0;
+        must_visit_packed.compare_exchange_strong(
+            expected, packed, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
-    bool take_must_visit_uci(char out_uci[16]) noexcept {
-        for (int spins = 0; spins < 8; ++spins) {
-            uint8_t state = must_visit_state.load(std::memory_order_acquire);
-
-            if (state == 0) {
-                return false;
-            }
-            // if we catch a write, try again a few times
-            if (state == 2) {
-                std::this_thread::yield();
-                continue;
-            }
-
-            if (state != 1) {
-                return false;
-            }
-
-            uint8_t expected = 1;
-            if (!must_visit_state.compare_exchange_strong(
-                    expected, 0, std::memory_order_acq_rel,
-                    std::memory_order_relaxed)) {
-                continue;
-            }
-
-            std::memcpy(out_uci, must_visit_uci, 16);
-            out_uci[15] = '\0';
-            return true;
-        }
-
-        return false;
+    // Consumes it: returns false and leaves 0 behind if there was nothing set.
+    bool take_must_visit_packed(uint16_t& out) noexcept {
+        out = must_visit_packed.exchange(0, std::memory_order_acq_rel);
+        return out != 0;
     }
 
     // --- Priors / children ---
@@ -187,13 +150,14 @@ struct MCTSNode {
     // This is the single source-of-truth for both ordering and the prior values.
     struct ChildEntry {
         uint16_t move_idx = 0xFFFF;         // policy-space index (1858 domain); 0xFFFF = unset
+        uint16_t packed_move = 0;           // chess-space; feeds makeMove with no parsing
         std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
         float prior = 0.0f;                 // fudged prior (post uniform_eps, floors, clip)
         float raw_prior = 0.0f;             // raw softmax prior (post softmax, pre fudging)
 
         ChildEntry() = default;
-        ChildEntry(uint16_t idx, float p = 0.0f, float rp = 0.0f)
-            : move_idx(idx), child(nullptr), prior(p), raw_prior(rp) {}
+        ChildEntry(uint16_t idx, uint16_t packed, float p = 0.0f, float rp = 0.0f)
+            : move_idx(idx), packed_move(packed), child(nullptr), prior(p), raw_prior(rp) {}
     };
 
     // Authoritative, ordered list of children.
@@ -206,7 +170,6 @@ struct MCTSNode {
     // --- State ---
     backend::Board board;   // exact position at this node
     uint64_t zobrist = 0;   // computed lazily when the node is first selected
-    std::vector<std::pair<std::string, uint16_t>> policy_pairs;  // (uci, policy_idx), movegen order
 
     bool is_expanded = false;
     bool children_have_priors = false;
@@ -225,7 +188,7 @@ struct MCTSNode {
     // Constructors
     MCTSNode(const backend::Board& b,
          MCTSNode* parent_ = nullptr,
-         std::string uci_from_parent = "",
+         uint16_t packed_from_parent_ = 0,
          int visit_share_span_ = 400);
     
     // Pick best child by PUCT; lazily instantiate if missing; return child ptr.
