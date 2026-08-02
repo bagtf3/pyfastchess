@@ -834,8 +834,20 @@ void MCTSTree::resolve_inflight() {
 
         const RawEntry* re = raw_policy_cache().lookup(z);
         if (!re || !re->has_wdl) {
-            // keep it inflight; move on
+            // The result never landed, or was evicted before we consumed it.
+            // Retry a few times, then requeue for a fresh NN eval -- leaving it
+            // inflight forever strands the whole subtree as BLOCKED, since
+            // nothing else ever puts an inflight node back in the queue.
             node->cache_misses += 1;
+            if (node->cache_misses >= kMaxCacheMisses) {
+                node->cache_misses = 0;
+                node->is_inflight = false;
+                queue_pending(node);
+                inflight_nodes_[i] = inflight_nodes_.back();
+                inflight_nodes_.pop_back();
+                ++requeued_after_miss;
+                continue;
+            }
             ++i;
             continue;
         }

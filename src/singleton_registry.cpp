@@ -35,18 +35,21 @@ void RawPolicyCache::bulk_insert(
 
         auto it = map_.find(key);
         if (it != map_.end()) {
+            // Overwrite in place. Do NOT push onto order_ again: the key is
+            // already there, and a second slot would later evict this newer,
+            // possibly still-unconsumed entry when the first slot pops.
             it->second.p_policy = std::move(pol);
             it->second.has_policy = true;
             it->second.wdl = wdl;
             it->second.has_wdl = true;
-            order_.push_back(key);
         } else {
             RawEntry re(wdl, std::move(pol));
             map_.emplace(key, std::move(re));
             order_.push_back(key);
         }
-        evict_if_needed_unlocked();
     }
+    // once per batch, not once per item
+    evict_if_needed_unlocked();
 }
 
 const RawEntry* RawPolicyCache::lookup(uint64_t key) const {

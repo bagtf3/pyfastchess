@@ -240,6 +240,11 @@ public:
     uint64_t queue_pending(MCTSNode* n);
     void resolve_inflight();
 
+    // Raw-cache misses tolerated on an inflight node before it goes back in the
+    // queue for a fresh eval instead of being stranded.
+    static constexpr int kMaxCacheMisses = 3;
+    uint64_t requeued_after_miss = 0;
+
     std::vector<MCTSNode*> pop_pending_to_inflight();
 
     struct WorkItem {

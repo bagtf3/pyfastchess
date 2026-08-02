@@ -597,6 +597,9 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("pending_nodes_", &MCTSTree::pending_nodes_)
 
           .def("root_child_visits", &MCTSTree::root_child_visits)
+          .def_property_readonly("requeued_after_miss",
+               [](const MCTSTree& t){ return t.requeued_after_miss; },
+               "Inflight nodes requeued after repeated raw-cache misses.")
           .def("root", [](MCTSTree& t){
                return t.root(); }, py::return_value_policy::reference_internal)
 
