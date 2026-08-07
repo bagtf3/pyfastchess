@@ -143,8 +143,8 @@ selfplay throughput (wrong instrument for detecting a 2% search change —
 GPU and scheduling noise swamp it).
 
 **Found immediately:** a hard segfault in pure pyfastchess, no chessbot code
-involved — see `tests/repro_segfault_endgame.py`. Endgame FEN, ~50+ sims.
-Worth fixing before trusting any measurement on endgame-heavy fixture sets.
+involved, on an endgame FEN at ~50+ sims. Resolved as bad input, not an engine
+bug — see the note at the end of the status section below.
 
 Original spec, for reference — build `tests/bench_search.py` (or a small C++
 target) that:
@@ -246,9 +246,18 @@ Dropped after measurement: **§1.6** (`pow` special-case, benched flat),
 Still open: §1.4, §2.4, §2.7, §3.2, §3.3, §4.1, §4.4, §5.1, §5.2, §5.3,
 §6.4, §6.6, §6.7, and the rest of §5.5.
 
-**Unexplained.** `tests/repro_segfault_endgame.py` still segfaults on an
-endgame FEN at ~50+ sims, in pure pyfastchess. §6.1 was a candidate cause and
-did not fix it.
+**Resolved.** The endgame repro's FEN was illegal — `OPPOSITE_CHECK`, white to
+move with black already in check. Movegen emits the king capture, and
+`chess.hpp` cannot represent the kingless position that follows, so movegen and
+the terminal check access-violate on it. Not fixable at the library level
+(it does not support fewer than two kings); the test has been removed. §6.1 was
+never a candidate — it was the wrong bug.
+
+That repro was also a red herring for production: no chessbot generator emits
+an illegal position (7500 sampled across `piece_odds`, `piece_training`,
+`random_backrow`, `random_piece_training_fen`, `random_init` — all legal). The
+real production segfault was a null deref in `best()` on an unvisited root,
+regressed in `75c9e43` and fixed in `ca30e23`.
 
 ---
 
