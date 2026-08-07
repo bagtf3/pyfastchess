@@ -1177,22 +1177,26 @@ std::pair<std::string, const MCTSNode*> MCTSTree::best() const {
     if (!r || r->ordered_children.empty()) return {"", nullptr};
 
     uint16_t best_idx = 0xFFFF;
+    uint16_t best_packed = 0;
     const MCTSNode* best_ch = nullptr;
     int best_N = -1;
 
-    // iterate ordered_children, skipping nullptr placeholders
+    // An uninstantiated child scores N=0, which still beats the -1 seed, so
+    // best_ch is nullptr whenever nothing under the root has been visited yet.
+    // Take the move off the ChildEntry -- never dereference best_ch here.
     for (const auto& ce : r->ordered_children) {
         const MCTSNode* ch = ce.child.get();
         int N = ch ? ch->visit_count() : 0;
         if (N > best_N) {
             best_N = N;
             best_idx = ce.move_idx;
+            best_packed = ce.packed_move;
             best_ch = ch;
         }
     }
 
     if (best_idx == 0xFFFF) return {"", nullptr};
-    return { backend::Board::uci_from_packed(best_ch->packed_from_parent), best_ch };
+    return { backend::Board::uci_from_packed(best_packed), best_ch };
 }
 
 std::vector<ChildDetail> MCTSTree::root_child_details() {
