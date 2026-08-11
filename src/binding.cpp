@@ -495,6 +495,12 @@ PYBIND11_MODULE(_core, m) {
           .def("qema_span", &MCTSTree::qema_span)
           .def("set_qdelta_span", &MCTSTree::set_qdelta_span, py::arg("span"))
           .def("qdelta_span", &MCTSTree::qdelta_span)
+          .def("set_root_chunk_size", &MCTSTree::set_root_chunk_size,
+               py::arg("root_chunk_size"))
+          .def("root_chunk_size", &MCTSTree::root_chunk_size)
+          .def("set_chunk_warmup_visits", &MCTSTree::set_chunk_warmup_visits,
+               py::arg("chunk_warmup_visits"))
+          .def("chunk_warmup_visits", &MCTSTree::chunk_warmup_visits)
 
           .def("collect_one_leaf", &MCTSTree::collect_one_leaf,
                py::return_value_policy::reference_internal)  // <- ties node lifetime to 'self'

@@ -226,14 +226,27 @@ MCTSTree::MCTSTree(const backend::Board& root_board,
 }
 
 // Internal variant of collect_one_leaf that reports reason
-CollectCounts MCTSTree::collect_one_leaf_tagged() {
+CollectCounts MCTSTree::collect_one_leaf_tagged(int budget) {
+    // A live pass always continues, even if the warmup gate would now say no:
+    // abandoning frames mid-pass would strand their reservations and inflate N
+    // permanently. (Root N cannot actually fall back below the gate mid-pass,
+    // but that relies on a monotonicity argument -- this makes it structural.)
+    if (chunk_stack_.empty() && (!chunking_active() || budget < 2))
+        return descend_and_resolve(root_.get());
+    return collect_one_leaf_chunked(budget);
+}
+
+// The ordinary 1-by-1 descent. `start` is root_ on the unchunked path; on the
+// chunked path it is the alloc == 1 node the cascade bottomed out at, so the
+// frame nodes above it are NOT in last_path_ and must not be decremented here.
+CollectCounts MCTSTree::descend_and_resolve(MCTSNode* start) {
     CollectCounts cc;              // per-descent counters (starts zero)
 
     last_path_.clear();
     if (last_path_.capacity() < 64) last_path_.reserve(64);
 
-    // push root and mark a visit atomically
-    MCTSNode* node = root_.get();
+    // push start and mark a visit atomically
+    MCTSNode* node = start;
     last_path_.push_back(node);
     node->add_visit();
     maybe_resort_by_visits(node);
@@ -250,10 +263,9 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
             }
         }
 
-        // No priors yet — undo path visits and stop; caller will break collection
+        // No priors yet — hold path visits and stop; caller will break collection
         if (!node->children_have_priors) {
-            for (MCTSNode* n : last_path_) n->add_visit(-1);
-            last_path_.clear();
+            queue_blocked_path();
             cc.count_blocked = 1;
             cc.tag = CollectTag::BLOCKED;
             cc.leaf = node;
@@ -271,8 +283,7 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
         // Causes seen: every child scoring NaN (NaN comparisons are false, so
         // best_idx never gets set) and push_uci failing in get_or_create_child.
         if (!child) {
-            for (MCTSNode* n : last_path_) n->add_visit(-1);
-            last_path_.clear();
+            queue_blocked_path();
             cc.count_blocked = 1;
             cc.tag = CollectTag::BLOCKED;
             cc.leaf = node;
@@ -371,6 +382,181 @@ CollectCounts MCTSTree::collect_one_leaf_tagged() {
     return cc;
 }
 
+// A descent resolved. Every frame on the stack was traversed by it, so all of
+// them tick; frames whose reservation is fully spent retire from the top.
+void MCTSTree::chunk_consume(int v) {
+    for (auto& f : chunk_stack_) f.resolved += v;
+    while (!chunk_stack_.empty() &&
+           chunk_stack_.back().resolved >= chunk_stack_.back().alloc)
+        chunk_stack_.pop_back();
+}
+
+// Hand back k visits that were reserved but cannot be delivered. Every frame
+// reserved them, so every frame gives them back -- otherwise an ancestor waits
+// forever for descents that will never arrive.
+//
+// Called when a cascade lands on a child that can only absorb a single visit
+// (k = round - 1): an ordinary surplus, released on the spot.
+void MCTSTree::chunk_giveback(int k) {
+    if (k <= 0) return;
+    for (auto& f : chunk_stack_) {
+        f.node->add_visit(-k);
+        f.alloc      -= k;
+        f.dispatched -= k;
+    }
+    while (!chunk_stack_.empty() &&
+           chunk_stack_.back().resolved >= chunk_stack_.back().alloc)
+        chunk_stack_.pop_back();
+}
+
+// Same, for the one visit a BLOCKED descent took at each frame. The visit goes
+// on the queue instead of coming straight off, but alloc/dispatched still
+// shrink now or `resolved` could never reach `alloc` and the frame would never
+// retire. descend_and_resolve has already queued last_path_, which starts below
+// the deepest frame, so the two sets are disjoint -- do not double-count.
+void MCTSTree::chunk_queue_blocked() {
+    for (auto& f : chunk_stack_) {
+        blocked_queue_.push_back(f.node);
+        f.alloc      -= 1;
+        f.dispatched -= 1;
+    }
+    while (!chunk_stack_.empty() &&
+           chunk_stack_.back().resolved >= chunk_stack_.back().alloc)
+        chunk_stack_.pop_back();
+}
+
+// A blocked descent keeps the visits it took; they go on the queue instead of
+// being undone. For the rest of the call every node on the dead path carries an
+// extra visit, so PUCT's u term steers the next descent elsewhere.
+void MCTSTree::queue_blocked_path() {
+    blocked_queue_.insert(blocked_queue_.end(),
+                          last_path_.begin(), last_path_.end());
+    last_path_.clear();
+}
+
+// Give the whole queue back. Must run before anything frees nodes, and before
+// the caller reads visit counts for a move decision.
+void MCTSTree::release_blocked_queue() {
+    for (MCTSNode* n : blocked_queue_) n->add_visit(-1);
+    blocked_queue_.clear();
+}
+
+// Count blocks per node within one collect_many_leaves call. Linear scan: a
+// call sees a handful of distinct blocked nodes at most, so this beats hashing.
+int MCTSTree::note_blocked(MCTSNode* n) {
+    for (auto& e : chunk_blocked_) {
+        if (e.first == n) return ++e.second;
+    }
+    chunk_blocked_.emplace_back(n, 1);
+    return 1;
+}
+
+// Tear the pass down and hand every node back exactly what it reserved and
+// never delivered. Used when PUCT fails at a frame (all-NaN scores, push_uci
+// failure) and as a safety net if a batch ever exits mid-pass.
+void MCTSTree::chunk_abort_pass() {
+    for (auto& f : chunk_stack_) {
+        const int outstanding = f.dispatched - f.resolved;
+        if (outstanding > 0) f.node->add_visit(-outstanding);
+    }
+    chunk_stack_.clear();
+}
+
+// One leaf, but the PUCT decisions above it are reused across the w descents
+// that share a reservation. The resume is the whole point: descents after the
+// first start at the deepest live frame, not at the root.
+CollectCounts MCTSTree::collect_one_leaf_chunked(int budget) {
+    CollectCounts acc;   // cascade-level counters, folded into the leaf's cc
+
+    if (chunk_stack_.empty()) {
+        // warmup gate says the root is warm, but it can still be an unexpanded
+        // or prior-less leaf in its own right -- fall through to 1-by-1
+        if (!chunk_descendable(root_.get()))
+            return descend_and_resolve(root_.get());
+
+        // Size the pass to what the caller still wants. A pass yields at most
+        // `chunk` new leaves, so a pass no larger than the remaining budget
+        // can never deliver past target -- no overshoot, and no reservation
+        // to hand back at the end of a batch. root_chunk_size_ is a power of
+        // two, so halving keeps it one.
+        int chunk = root_chunk_size_;
+        while (chunk > budget) chunk >>= 1;
+        if (chunk < 2) return descend_and_resolve(root_.get());
+
+        // root frame dispatches its whole chunk in one round; every frame
+        // below halves, so the cascade is log2(chunk) deep
+        chunk_stack_.push_back(ChunkFrame{root_.get(), chunk, chunk, 0, 0});
+    }
+
+    while (true) {
+        ChunkFrame& f = chunk_stack_.back();
+        MCTSNode* fnode = f.node;
+        const int r = f.round;
+
+        // reserve before the round's PUCT, matching the unchunked
+        // add_visit()-then-select ordering, so round 2 sees a larger parentN
+        fnode->add_visit(r);
+        f.dispatched += r;
+        maybe_resort_by_visits(fnode);
+
+        MCTSNode* child = fnode->select_child_lazy_ptr(
+            this->c_puct_, &acc, this->sim_budget_, this->pruning_factor_,
+            this->fpu_reduction_);
+
+        if (!child) {
+            chunk_abort_pass();
+            acc.count_blocked = 1;
+            acc.tag = CollectTag::BLOCKED;
+            acc.leaf = fnode;
+            return acc;
+        }
+
+        child->update_visit_share(fnode->visit_count() - 1, true);
+
+        // A child that is unexpanded, prior-less or terminal cannot be chunked
+        // into: it absorbs exactly one visit. PUCT creates such children
+        // lazily, so this happens mid-cascade even on a warm tree. Give the
+        // surplus back rather than pushing a frame that can only abort.
+        if (r > 1 && !chunk_descendable(child)) {
+            chunk_giveback(r - 1);
+        } else if (r > 1) {
+            // `f` is invalidated by push_back; fnode/r were copied above
+            chunk_stack_.push_back(ChunkFrame{child, r, r / 2, 0, 0});
+            continue;
+        }
+
+        {
+            // depth is measured from `start`, so add the frames above it to
+            // keep total_depth comparable with the unchunked path
+            const uint32_t depth_offset =
+                static_cast<uint32_t>(chunk_stack_.size());
+
+            CollectCounts cc = descend_and_resolve(child);
+            cc.count_puct       += acc.count_puct;
+            cc.count_must_visit += acc.count_must_visit;
+            cc.count_skipped    += acc.count_skipped;
+            cc.count_pruned     += acc.count_pruned;
+            cc.count_penalty    += acc.count_penalty;
+
+            if (cc.tag == CollectTag::BLOCKED) {
+                if (cc.leaf && note_blocked(cc.leaf) >= 2) {
+                    // Same node blocked twice this call, despite the queued
+                    // visits pushing PUCT away from it. The subtree is stalled
+                    // on the NN: stop burning attempts, give the whole
+                    // reservation back and let the budget go to another tree.
+                    chunk_abort_pass();
+                } else {
+                    chunk_queue_blocked();
+                }
+            } else {
+                cc.depth += depth_offset;
+                chunk_consume(1);
+            }
+            return cc;
+        }
+    }
+}
+
 // Backwards-compatible single collect_one_leaf wrapper (keeps old signature)
 MCTSNode* MCTSTree::collect_one_leaf() {
     CollectCounts cc = collect_one_leaf_tagged();
@@ -399,12 +585,25 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     size_t attempts = 0;
     const size_t try_break = 1000;
 
+    // A pass left live by a previous call (fastpath cap or try_break tripped
+    // mid-cascade) still holds reservations; hand them back before starting.
+    if (!chunk_stack_.empty()) chunk_abort_pass();
+    if (!blocked_queue_.empty()) release_blocked_queue();  // only if a throw escaped
+    chunk_blocked_.clear();   // repeat-block tally is per call
+
+    // Hard cap at n_new. Running the pass to completion would overshoot by up
+    // to chunk-1, because a pass yields `chunk` visits but only some of them
+    // are NEW leaves -- so no request size can make delivery land on target.
+    // Stopping mid-pass is safe: the entry abort above returns the unspent
+    // reservation exactly.
     while ((new_count < n_new) &&
            (n_fastpath == 0 || (cached_count + terminal_count) < n_fastpath) &&
            (attempts < try_break)) {
 
-        // one descent; cc carries per-descent telemetry + tag + leaf pointer
-        CollectCounts cc = collect_one_leaf_tagged();
+        // one descent; cc carries per-descent telemetry + tag + leaf pointer.
+        // the remaining budget sizes any pass this starts
+        CollectCounts cc = collect_one_leaf_tagged(
+            static_cast<int>(n_new - new_count));
         ++attempts;
 
         // roll up per-descent counters into batch totals
@@ -434,9 +633,18 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         } else if (tag == CollectTag::TERMINAL) {
             ++terminal_count;
         } else if (tag == CollectTag::BLOCKED) {
-            break;
+            // Chunked keeps going: the held visits changed N at the frame, so
+            // the retry can pick a different child, and a sibling half-branch
+            // is independent of the blocked one. 1-by-1 still stops on an
+            // empty stack -- the hold would let it retry productively too, but
+            // there is no note_blocked backstop on that path to cap the spin.
+            if (chunk_stack_.empty()) break;
         }
     }
+
+    // Every descent that took visits has finished with them. Release before
+    // returning so the caller never reads a move decision off held counts.
+    release_blocked_queue();
 
     // pack totals into a POD result for pybind return
     CollectResults res;
@@ -1100,6 +1308,11 @@ void MCTSTree::filter_queues_for_new_root(MCTSNode* new_root, uint32_t new_epoch
 bool MCTSTree::advance_root(const std::string& mv) {
     std::lock_guard<std::mutex> g(tree_mutex_);
     last_path_.clear();
+    // hand back outstanding reservations before the root changes: on the reuse
+    // path the promoted subtree keeps its N, so a stranded reservation would be
+    // baked in permanently. Raw frame pointers do not survive this either.
+    chunk_abort_pass();
+    release_blocked_queue();   // raw node pointers do not survive the promotion
     noise_added_ = false;
 
     auto old_root = std::move(root_);
@@ -1499,6 +1712,33 @@ void MCTSTree::set_fpu_reduction(float v) {
 float MCTSTree::fpu_reduction() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     return fpu_reduction_;
+}
+
+void MCTSTree::set_root_chunk_size(int v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    if (v < 1) v = 1;
+    if ((v & (v - 1)) != 0) {
+        throw std::invalid_argument(
+            "root_chunk_size must be a power of two (1 disables chunking)");
+    }
+    // changing mid-pass would leave reservations behind
+    chunk_abort_pass();
+    root_chunk_size_ = v;
+}
+
+int MCTSTree::root_chunk_size() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return root_chunk_size_;
+}
+
+void MCTSTree::set_chunk_warmup_visits(int v) {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    chunk_warmup_visits_ = (v < 0) ? 0 : v;
+}
+
+int MCTSTree::chunk_warmup_visits() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return chunk_warmup_visits_;
 }
 
 void MCTSTree::set_qema_span(float span) {
