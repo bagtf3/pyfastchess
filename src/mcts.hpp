@@ -403,6 +403,11 @@ private:
     // Tiered so long searches (validation runs at high sim budgets) keep the
     // ordering fresh instead of freezing it at the 250-visit picture.
     void maybe_resort_by_visits(MCTSNode* node);
+
+    // Qema / Qdelta_sign / visit_share are maintained only at root+1, so a
+    // subtree promoted by advance_root arrives with none. Seed them from N, W
+    // and Q, which are tracked at every depth. Must run on every reuse.
+    void seed_new_root_plus_one();
     static constexpr int visit_resort_thresholds_[] = {250, 1500, 5000};
     static constexpr uint8_t n_visit_resorts_ = 3;
 

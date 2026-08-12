@@ -290,10 +290,6 @@ CollectCounts MCTSTree::descend_and_resolve(MCTSNode* start) {
             return cc;
         }
 
-        // update visit_share EMA
-        int tick = node->visit_count() - 1;
-        child->update_visit_share(tick, true);
-
         node = child;
         last_path_.push_back(node);
         // increment visit for this node immediately (psuedo virtual loss)
@@ -510,8 +506,6 @@ CollectCounts MCTSTree::collect_one_leaf_chunked(int budget) {
             acc.leaf = fnode;
             return acc;
         }
-
-        child->update_visit_share(fnode->visit_count() - 1, true);
 
         // A child that is unexpanded, prior-less or terminal cannot be chunked
         // into: it absorbs exactly one visit. PUCT creates such children
@@ -762,11 +756,18 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
 
         const float pov = p->get_stm_pov();
 
-        // sign of (v - Q_pre) relative to STM POV
-        const float s = ((v_scalar > q_pre) - (v_scalar < q_pre)) * pov;
-        n->Qdelta_sign = n->Qdelta_sign * qdelta_d_ + qdelta_a_ * s;
-
-        n->Qema = n->Qema * qema_d_ + qema_a_ * v_scalar;
+        // Only root+1 carries these: ChildDetail is the sole consumer and it
+        // reads root's children. Crediting visit_share here rather than at
+        // selection makes the unit one delivered visit, so a chunked pass that
+        // sends r visits through this child credits r times, and a BLOCKED
+        // descent -- which never backs up -- credits nothing.
+        if (p == root_.get()) {
+            // sign of (v - Q_pre) relative to STM POV
+            const float s = ((v_scalar > q_pre) - (v_scalar < q_pre)) * pov;
+            n->Qdelta_sign = n->Qdelta_sign * qdelta_d_ + qdelta_a_ * s;
+            n->Qema = n->Qema * qema_d_ + qema_a_ * v_scalar;
+            n->update_visit_share(p->visit_count() - 1, true);
+        }
 
         if (is_terminal) {
             const bool stm_wins = (pov * v_scalar > 0.0f);
@@ -930,6 +931,31 @@ void MCTSTree::maybe_resort_by_visits(MCTSNode* node) {
                          int nb = b.child ? b.child->visit_count() : 0;
                          return na > nb;
                      });
+}
+
+// A promoted subtree carries N, W and Q -- those are maintained at every depth
+// because PUCT needs Q_eff -- but no EMA history, since Qema, Qdelta_sign and
+// visit_share only accumulate at root+1. Seed them at their natural priors so
+// RSC does not read zeros on the first look after an advance. Qema starts at
+// the current mean, Qdelta_sign has no trend to report yet, and visit_share
+// starts at the empirical share, which is what the EMA estimates anyway.
+void MCTSTree::seed_new_root_plus_one() {
+    MCTSNode* r = root_.get();
+    if (!r) return;
+
+    const int rn = r->visit_count();
+    if (rn <= 0) return;
+    const float inv = 1.0f / static_cast<float>(rn);
+
+    for (auto& ce : r->ordered_children) {
+        MCTSNode* ch = ce.child.get();
+        if (!ch) continue;
+        ch->Qema = ch->Q;
+        ch->Qdelta_sign = 0.0f;
+        ch->visit_share = static_cast<float>(ch->visit_count()) * inv;
+        // match the tick convention used everywhere else: parent N minus one
+        ch->last_visit = rn - 1;
+    }
 }
 
 void MCTSTree::add_root_dirichlet_noise(float eps, float alpha) {
@@ -1339,6 +1365,9 @@ bool MCTSTree::advance_root(const std::string& mv) {
             filter_queues_for_new_root(new_root.get(), tree_epoch_);
 
             root_ = std::move(new_root);
+
+            // promoted children were depth-2 and carry no EMA history
+            seed_new_root_plus_one();
 
             // reused subtree already has priors — apply noise now
             if (root_->children_have_priors && dirichlet_eps_ > 0.0f) {
