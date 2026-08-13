@@ -323,15 +323,6 @@ public:
     void set_qdelta_span(float span);
     float qdelta_span() const;
 
-    // Chunked selection. One PUCT decision reserves w visits for a subtree;
-    // those w visits are still delivered by w ordinary descents, which resume
-    // mid-tree instead of re-deciding at the root. Power of two, 1 = off.
-    void set_root_chunk_size(int v);
-    int root_chunk_size() const;
-    // 1-by-1 until the root reaches this many visits; re-arms on advance_root
-    void set_chunk_warmup_visits(int v);
-    int chunk_warmup_visits() const;
-
     struct NNResult {
         float value = 0.0f;
         WDL wdl{};
@@ -411,47 +402,10 @@ private:
     static constexpr int visit_resort_thresholds_[] = {250, 1500, 5000};
     static constexpr uint8_t n_visit_resorts_ = 3;
 
-    CollectCounts collect_one_leaf_tagged(int budget = 1);
+    CollectCounts collect_one_leaf_tagged();
 
-    // --- chunked selection ---------------------------------------------
-    // One frame per chunked branch point, root included. Frames exist only
-    // for alloc >= 2; an alloc == 1 node is handled by the ordinary descent.
-    // Invariant: every node's N rises by exactly what it dispatches, so
-    // `dispatched - resolved` is its outstanding reservation at all times.
-    struct ChunkFrame {
-        MCTSNode* node = nullptr;
-        int alloc = 0;       // visits reserved for this subtree
-        int round = 0;       // dispatch size per PUCT decision
-        int dispatched = 0;  // reserved so far
-        int resolved = 0;    // completed so far
-    };
-    std::vector<ChunkFrame> chunk_stack_;
-    int root_chunk_size_ = 1;
-
-    // Go 1-by-1 until the root has this many visits. A cold tree has nothing
-    // to chunk into -- the cascade would land on unexpanded nodes and block --
-    // and this also re-arms after every advance_root, so a rebuilt tree is
-    // reconstructed one visit at a time before chunking resumes.
-    int chunk_warmup_visits_ = 100;
-
-    bool chunking_active() const {
-        return root_chunk_size_ > 1 && root_
-            && root_->visit_count() >= chunk_warmup_visits_;
-    }
-
-    // The ordinary descent, from an arbitrary start rather than always root.
-    // With start == root_ this is byte-identical to the pre-chunking body.
+    // The ordinary 1-by-1 descent from the root.
     CollectCounts descend_and_resolve(MCTSNode* start);
-    // `budget` is the caller's remaining n_new. A fresh pass is sized to the
-    // largest power of two that fits, so it can never deliver past target and
-    // the last leaf of a batch costs a plain 1-by-1 descent, not a reservation
-    // that has to be handed back.
-    CollectCounts collect_one_leaf_chunked(int budget);
-
-    void chunk_consume(int v);      // a descent resolved: retire frames
-    void chunk_giveback(int k);     // hand k reserved-but-undeliverable visits back
-    void chunk_queue_blocked();     // same, for a blocked descent: queue instead
-    void chunk_abort_pass();        // hand back every outstanding reservation
 
     // Visits taken by descents that ended BLOCKED, given back at the end of the
     // collect_many_leaves call rather than on the spot. Releasing immediately
@@ -462,20 +416,6 @@ private:
     std::vector<MCTSNode*> blocked_queue_;
     void queue_blocked_path();      // queue last_path_ instead of undoing it
     void release_blocked_queue();   // give the whole queue back
-
-    // Blocked-node tally for the current collect_many_leaves call. Backstop:
-    // the queue above should stop the deterministic repeat, so if a node still
-    // blocks twice its whole subtree is stalled on the NN. Halt, hand the
-    // reservation back, and let the caller's budget go elsewhere.
-    std::vector<std::pair<MCTSNode*, int>> chunk_blocked_;
-    int note_blocked(MCTSNode* n);
-
-    // Can the cascade descend through this node, or is it a leaf that can only
-    // absorb a single visit? Mirrors the ordinary loop's entry condition.
-    static bool chunk_descendable(const MCTSNode* n) {
-        return n && n->is_expanded && !n->ordered_children.empty()
-                 && n->children_have_priors;
-    }
 
     mutable std::mutex tree_mutex_;
 
