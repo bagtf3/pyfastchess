@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <atomic>
@@ -396,6 +398,8 @@ MCTSNode* MCTSTree::collect_one_leaf() {
 // non-cached) and stop early if we've applied `n_fastpath` fast-path results
 // (cached OR terminal). This method fills pending_nodes_
 CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
+    if (es_tripped_) return CollectResults{};  // zero work, zero descents
+
     size_t new_count = 0;
     size_t cached_count = 0;
     size_t terminal_count = 0;
@@ -442,6 +446,22 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
         if (!node) break;
 
+        // Early-stop checkin: root->N increments on every non-blocked
+        // descent regardless of tag (mate-lock TERMINAL runs included),
+        // so this is where the port fixes the batching-jitter problem --
+        // checked every descent, not once per Python tick.
+        if (tag != CollectTag::BLOCKED && es_params_set_) {
+            const int root_n = root_->visit_count();
+            if (root_n >= static_cast<int>(sim_budget_)) {
+                es_tripped_ = true;
+                es_stop_reason_ = "full";
+            } else if (root_n >= es_params_.min_sims &&
+                       root_n - es_last_check_sims_ >= es_params_.es_check_every) {
+                es_last_check_sims_ = root_n;
+                evaluate_early_stop(root_n);
+            }
+        }
+
         // NEW_LEAF: queued for NN eval; CACHED/TERMINAL count toward fastpath
         if (tag == CollectTag::NEW_LEAF) {
             this->queue_pending(node);
@@ -453,6 +473,8 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         } else if (tag == CollectTag::BLOCKED) {
             break;
         }
+
+        if (es_tripped_) break;   // exits mid-mate-lock-run if needed
     }
 
     // Every descent that took visits has finished with them. Release before
@@ -1504,6 +1526,214 @@ std::pair<
     }
 
     return {std::move(rsc), std::move(details)};
+}
+
+// --- tiered early-stop ---
+
+void MCTSTree::set_early_stop_params(const EarlyStopParams& p) {
+    es_params_ = p;
+    es_params_set_ = true;
+}
+
+void MCTSTree::reset_early_stop() {
+    es_tripped_ = false;
+    es_stop_reason_.clear();
+    es_last_check_sims_ = 0;
+    es_window_.clear();
+    es_debug_rows_.clear();
+}
+
+namespace {
+float find_top5_share(const EsCheckinRow& row, const std::string& uci) {
+    for (int i = 0; i < row.top5_n; ++i) {
+        if (row.top5_uci[i] == uci) return row.top5_share[i];
+    }
+    return 0.0f;
+}
+}  // namespace
+
+void MCTSTree::evaluate_early_stop(int sims_done) {
+    auto [rsc, details] = robust_selection_criteria(es_params_.rsc_top_n, es_params_.rsc_min_visits);
+    if (details.size() < 2) return;
+
+    // details is already sorted by N descending (root_child_details).
+    const int top5_n = std::min<int>(5, static_cast<int>(details.size()));
+    long total_n = 0;
+    for (int i = 0; i < top5_n; ++i) total_n += details[i].N;
+
+    EsCheckinRow row;
+    row.sims = sims_done;
+    row.top5_n = top5_n;
+    for (int i = 0; i < top5_n; ++i) {
+        row.top5_uci[i] = details[i].uci;
+        row.top5_share[i] = (total_n > 0)
+            ? static_cast<float>(details[i].N) / static_cast<float>(total_n)
+            : 1.0f / static_cast<float>(top5_n);
+    }
+    row.delta_12 = details[0].N - details[1].N;
+
+    const MCTSNode* r = root_.get();
+    const float flip = (r && r->board.white_to_move()) ? 1.0f : -1.0f;
+    row.Q1 = details[0].Q;
+    row.Qema1 = details[0].Qema;
+    row.dQ12 = flip * (details[0].Q - details[1].Q);
+
+    // JSD reference: previous checkin's top5 (filtered to this checkin's
+    // top5 keys, renormalized), or normalized priors over ALL children on
+    // the first checkin of this move -- same fallback shape as the deleted
+    // Python record_es_check.
+    float ref_vals[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float ref_total = 0.0f;
+
+    if (es_window_.empty()) {
+        float prior_total = 0.0f;
+        for (const auto& d : details) prior_total += d.prior;
+        for (int i = 0; i < top5_n; ++i) {
+            float p = 0.0f;
+            for (const auto& d : details) {
+                if (d.uci == row.top5_uci[i]) { p = d.prior; break; }
+            }
+            ref_vals[i] = (prior_total > 0.0f) ? p / prior_total : 0.0f;
+            ref_total += ref_vals[i];
+        }
+    } else {
+        const EsCheckinRow& prev = es_window_.back();
+        for (int i = 0; i < top5_n; ++i) {
+            ref_vals[i] = find_top5_share(prev, row.top5_uci[i]);
+            ref_total += ref_vals[i];
+        }
+    }
+
+    if (ref_total > 0.0f) {
+        for (int i = 0; i < top5_n; ++i) ref_vals[i] /= ref_total;
+    } else {
+        for (int i = 0; i < top5_n; ++i) ref_vals[i] = 1.0f / static_cast<float>(top5_n);
+    }
+
+    double jsd = 0.0;
+    for (int i = 0; i < top5_n; ++i) {
+        const double pi = ref_vals[i];
+        const double qi = row.top5_share[i];
+        const double mi = 0.5 * (pi + qi);
+        if (pi > 0.0) jsd += 0.5 * pi * std::log(pi / mi);
+        if (qi > 0.0) jsd += 0.5 * qi * std::log(qi / mi);
+    }
+    row.jsd = jsd;
+
+    es_window_.push_back(row);
+    const size_t cap = static_cast<size_t>(
+        std::max(es_params_.es_tier1_consec, es_params_.es_tier2_consec));
+    if (es_window_.size() > cap) es_window_.erase(es_window_.begin());
+    es_debug_rows_.push_back(row);
+
+    if (tier1_check(rsc, details)) {
+        es_tripped_ = true;
+        es_stop_reason_ = "tier1";
+        return;
+    }
+    if (tier2_check(rsc, details)) {
+        es_tripped_ = true;
+        es_stop_reason_ = "tier2";
+        return;
+    }
+}
+
+bool MCTSTree::tier1_check(const std::optional<std::unordered_map<std::string, float>>& rsc,
+                            const std::vector<ChildDetail>& details) {
+    const int n = es_params_.es_tier1_consec;
+    if (static_cast<int>(es_window_.size()) < n) return false;
+
+    const size_t start = es_window_.size() - static_cast<size_t>(n);
+    const std::string top = es_window_.back().top_uci();
+
+    for (size_t i = start; i < es_window_.size(); ++i) {
+        const EsCheckinRow& c = es_window_[i];
+        if (c.top_uci() != top) return false;                                  // cond 1
+        if (c.jsd > es_params_.es_tier1_jsd_thresh) return false;              // cond 2
+        if (i > start && c.jsd > es_window_[i - 1].jsd + 0.001) return false;  // cond 3, epsilon tolerance
+        if (i > start && c.delta_12 < es_window_[i - 1].delta_12) return false; // cond 4
+    }
+
+    // cond 5, stop-time only: top-visited move is also the RSC argmax,
+    // clears the visit-share floor, and beats the runner-up by the margin.
+    if (!rsc || details.empty() || details[0].uci != top) return false;
+
+    std::string rsc_argmax;
+    float rsc_max = -std::numeric_limits<float>::infinity();
+    for (const auto& kv : *rsc) {
+        if (kv.second > rsc_max) { rsc_max = kv.second; rsc_argmax = kv.first; }
+    }
+    if (rsc_argmax != top) return false;
+    if (details[0].visit_share < es_params_.rsc_visit_share_floor) return false;
+
+    std::vector<float> vals;
+    vals.reserve(rsc->size());
+    for (const auto& kv : *rsc) vals.push_back(kv.second);
+    std::sort(vals.begin(), vals.end(), std::greater<float>());
+    if (vals.size() < 2 || (vals[0] - vals[1]) < es_params_.rsc_margin) return false;
+
+    // cond 6, stop-time only
+    const EsCheckinRow& last = es_window_.back();
+    if (last.dQ12 <= es_params_.tier1_dq12_floor) return false;
+
+    // cond 7, stop-time only, veto: Qema has recently dropped and Q (the
+    // slow, large-N average) hasn't caught up to reflect it yet. STM-POV,
+    // same flip convention as the rest of the tree's Q/Qema comparisons.
+    const MCTSNode* r = root_.get();
+    const float flip = (r && r->board.white_to_move()) ? 1.0f : -1.0f;
+    if (flip * (last.Q1 - last.Qema1) >= es_params_.tier1_qema_veto) return false;
+
+    return true;
+}
+
+bool MCTSTree::tier2_check(const std::optional<std::unordered_map<std::string, float>>& rsc,
+                            const std::vector<ChildDetail>& details) {
+    const int n = es_params_.es_tier2_consec;
+    if (static_cast<int>(es_window_.size()) < n) return false;
+
+    const size_t start = es_window_.size() - static_cast<size_t>(n);
+    const EsCheckinRow& last = es_window_.back();
+    if (last.top5_n < 2) return false;
+    const std::string cur_top1 = last.top_uci();
+    const std::string cur_top2 = last.second_uci();
+
+    for (size_t i = start; i < es_window_.size(); ++i) {
+        const EsCheckinRow& c = es_window_[i];
+        if (c.jsd >= es_params_.es_tier2_jsd_thresh) return false;
+        bool has1 = false, has2 = false;
+        for (int k = 0; k < std::min(3, c.top5_n); ++k) {
+            if (c.top5_uci[k] == cur_top1) has1 = true;
+            if (c.top5_uci[k] == cur_top2) has2 = true;
+        }
+        if (!has1 || !has2) return false;
+    }
+
+    if (!rsc || details.size() < 2) return false;
+
+    std::string nominee;
+    float nom_score = -std::numeric_limits<float>::infinity();
+    for (const auto& kv : *rsc) {
+        if (kv.second > nom_score) { nom_score = kv.second; nominee = kv.first; }
+    }
+    if (nominee != cur_top1 && nominee != cur_top2) return false;
+
+    // Nominee must not have the worst Qema or worst trend (Qdelta_sign) of
+    // the up-to-rsc_top_n RSC candidates -- guards against quietly locking
+    // in a poorly-performing-but-recently-visited move.
+    const ChildDetail* nom_detail = nullptr;
+    float worst_qema = std::numeric_limits<float>::infinity();
+    float worst_dq = std::numeric_limits<float>::infinity();
+    const int k = std::min<int>(es_params_.rsc_top_n, static_cast<int>(details.size()));
+    for (int i = 0; i < k; ++i) {
+        if (details[i].uci == nominee) nom_detail = &details[i];
+        worst_qema = std::min(worst_qema, details[i].Qema);
+        worst_dq = std::min(worst_dq, details[i].Qdelta_sign);
+    }
+    if (!nom_detail) return false;
+    if (nom_detail->Qema <= worst_qema) return false;
+    if (nom_detail->Qdelta_sign <= worst_dq) return false;
+
+    return true;
 }
 
 // --- runtime tunables ---

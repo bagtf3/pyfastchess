@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <memory>
 #include <string>
 #include <cstring>
@@ -75,6 +76,53 @@ struct PVItem {
     int   visits;  // child->N
     float P;       // parent's prior for this move
     float Q;       // child->Q (white-POV)
+};
+
+// Tiered early-stop rule params. Per-instance (set via
+// MCTSTree::set_early_stop_params, called from Python's MCTSTree.__init__
+// with the per-game cfg), never process-global.
+struct EarlyStopParams {
+    int   min_sims = 400;
+    int   es_check_every = 100;
+
+    int   es_tier1_consec = 3;
+    float es_tier1_jsd_thresh = 0.005f;
+
+    int   es_tier2_consec = 5;
+    float es_tier2_jsd_thresh = 0.0003f;
+
+    // tier1 cond 5, reuses rsc_performance_stop's existing rule
+    float rsc_visit_share_floor = 0.15f;
+    float rsc_margin = 0.05f;
+    int   rsc_top_n = 5;
+    int   rsc_min_visits = 100;
+
+    // tier1 stop-time-only gates (conds 6/7)
+    float tier1_dq12_floor = -0.25f;   // cond 6: dQ12 must be > this
+    float tier1_qema_veto  = 0.2f;     // cond 7: veto if (Q1-Qema1) >= this
+};
+
+// One early-stop checkin. Recorded every es_check_every sims once min_sims
+// is reached. top5_* holds the current top-5-by-visits distribution (fewer
+// if the root has <5 children), used both as the JSD reference for the
+// *next* checkin and directly for tier1/tier2's top-1/2/3 reads. Keyed by
+// UCI string, matching ChildDetail -- root_child_details() already builds
+// one uci string per child every checkin, so this adds no new allocation
+// class, just a handful more short-lived copies.
+struct EsCheckinRow {
+    int sims = 0;
+    double jsd = 0.0;
+    int top5_n = 0;
+    std::array<std::string, 5> top5_uci{};
+    std::array<float, 5>       top5_share{};   // normalized over just these top5
+    int delta_12 = 0;
+    float dQ12 = 0.0f;    // STM-POV, (Q1-Q2) * flip
+    float Q1 = 0.0f;      // white-POV
+    float Qema1 = 0.0f;   // white-POV
+
+    const std::string& top_uci()    const { static const std::string e; return top5_n > 0 ? top5_uci[0] : e; }
+    const std::string& second_uci() const { static const std::string e; return top5_n > 1 ? top5_uci[1] : e; }
+    const std::string& third_uci()  const { static const std::string e; return top5_n > 2 ? top5_uci[2] : e; }
 };
 
 // Forward decl
@@ -323,6 +371,16 @@ public:
     void set_qdelta_span(float span);
     float qdelta_span() const;
 
+    // Tiered early-stop rule. Evaluated inside collect_many_leaves's own
+    // loop (not once per Python tick), so checkins land on exact sim
+    // multiples and can interrupt a mate-lock run instead of only being
+    // observed after it exhausts try_break.
+    void set_early_stop_params(const EarlyStopParams& p);
+    void reset_early_stop();
+    bool es_tripped() const { return es_tripped_; }
+    std::string es_stop_reason() const { return es_stop_reason_; }
+    const std::vector<EsCheckinRow>& es_debug_rows() const { return es_debug_rows_; }
+
     struct NNResult {
         float value = 0.0f;
         WDL wdl{};
@@ -370,7 +428,23 @@ private:
     float qema_d_    = 1.0f - 2.0f / 41.0f;
     float qdelta_a_  = 2.0f / 101.0f;
     float qdelta_d_  = 1.0f - 2.0f / 101.0f;
-    
+
+    // Tiered early-stop state (per-instance, reset each move by
+    // reset_early_stop -- called from Python's advance()/reset_for_new_move())
+    EarlyStopParams es_params_;
+    bool es_params_set_ = false;
+    bool es_tripped_ = false;
+    std::string es_stop_reason_;              // "", "full", "tier1", "tier2"
+    int  es_last_check_sims_ = 0;
+    std::vector<EsCheckinRow> es_window_;      // capped sliding window
+    std::vector<EsCheckinRow> es_debug_rows_;  // uncapped, full-move history
+
+    void evaluate_early_stop(int sims_done);
+    bool tier1_check(const std::optional<std::unordered_map<std::string, float>>& rsc,
+                      const std::vector<ChildDetail>& details);
+    bool tier2_check(const std::optional<std::unordered_map<std::string, float>>& rsc,
+                      const std::vector<ChildDetail>& details);
+
     // Backprop WDL along path (white-POV). Updates p_win/p_draw/p_loss and recomputes Q.
     // Visit increments happen during selection-time; backprop DOES NOT modify N.
     void back_up_along_path(MCTSNode* leaf, WDL wdl);           // locks internally

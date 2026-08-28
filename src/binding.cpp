@@ -389,6 +389,18 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("P", &PVItem::P)
           .def_readonly("Q", &PVItem::Q);
      
+     py::class_<EsCheckinRow>(m, "EsCheckinRow")
+          .def_readonly("sims",      &EsCheckinRow::sims)
+          .def_readonly("jsd",       &EsCheckinRow::jsd)
+          .def_readonly("delta_12",  &EsCheckinRow::delta_12)
+          .def_readonly("dQ12",      &EsCheckinRow::dQ12)
+          .def_readonly("Q1",        &EsCheckinRow::Q1)
+          .def_readonly("Qema1",     &EsCheckinRow::Qema1)
+          .def_property_readonly("top_uci",    [](const EsCheckinRow& r){ return r.top_uci(); })
+          .def_property_readonly("second_uci", [](const EsCheckinRow& r){ return r.second_uci(); })
+          .def_property_readonly("third_uci",  [](const EsCheckinRow& r){ return r.third_uci(); });
+
+     
      py::class_<MCTSNode>(m, "MCTSNode")
           .def("__repr__", [](const MCTSNode& n) {
                std::ostringstream oss;
@@ -646,6 +658,43 @@ PYBIND11_MODULE(_core, m) {
           .def("tempscale_entropy_target",     &MCTSTree::tempscale_entropy_target)
           .def("set_tempscale_trigger_q",      &MCTSTree::set_tempscale_trigger_q, py::arg("v"))
           .def("tempscale_trigger_q",          &MCTSTree::tempscale_trigger_q)
+
+          .def("set_early_stop_params",
+               [](MCTSTree& t,
+                  int min_sims, int es_check_every,
+                  int tier1_consec, float tier1_jsd_thresh,
+                  int tier2_consec, float tier2_jsd_thresh,
+                  float rsc_visit_share_floor, float rsc_margin,
+                  int rsc_top_n, int rsc_min_visits,
+                  float tier1_dq12_floor, float tier1_qema_veto) {
+                    EarlyStopParams p;
+                    p.min_sims = min_sims;
+                    p.es_check_every = es_check_every;
+                    p.es_tier1_consec = tier1_consec;
+                    p.es_tier1_jsd_thresh = tier1_jsd_thresh;
+                    p.es_tier2_consec = tier2_consec;
+                    p.es_tier2_jsd_thresh = tier2_jsd_thresh;
+                    p.rsc_visit_share_floor = rsc_visit_share_floor;
+                    p.rsc_margin = rsc_margin;
+                    p.rsc_top_n = rsc_top_n;
+                    p.rsc_min_visits = rsc_min_visits;
+                    p.tier1_dq12_floor = tier1_dq12_floor;
+                    p.tier1_qema_veto = tier1_qema_veto;
+                    t.set_early_stop_params(p);
+               },
+               py::arg("min_sims"), py::arg("es_check_every"),
+               py::arg("tier1_consec"), py::arg("tier1_jsd_thresh"),
+               py::arg("tier2_consec"), py::arg("tier2_jsd_thresh"),
+               py::arg("rsc_visit_share_floor") = 0.15f,
+               py::arg("rsc_margin") = 0.05f,
+               py::arg("rsc_top_n") = 5,
+               py::arg("rsc_min_visits") = 100,
+               py::arg("tier1_dq12_floor") = -0.25f,
+               py::arg("tier1_qema_veto") = 0.2f)
+          .def("reset_early_stop", &MCTSTree::reset_early_stop)
+          .def_property_readonly("es_tripped", &MCTSTree::es_tripped)
+          .def_property_readonly("es_stop_reason", &MCTSTree::es_stop_reason)
+          .def("es_debug_rows", &MCTSTree::es_debug_rows)
 
           .def_property_readonly("epoch", &MCTSTree::epoch);
 
