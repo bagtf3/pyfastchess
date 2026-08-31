@@ -446,16 +446,14 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
 
         if (!node) break;
 
-        // Early-stop checkin: root->N increments on every non-blocked
-        // descent regardless of tag (mate-lock TERMINAL runs included),
-        // so this is where the port fixes the batching-jitter problem --
-        // checked every descent, not once per Python tick.
+        // checked every descent (not once per Python tick), so this lands
+        // on exact sim counts even through a mate-lock TERMINAL run
         if (tag != CollectTag::BLOCKED && es_params_set_) {
             const int root_n = root_->visit_count();
             if (root_n >= static_cast<int>(sim_budget_)) {
                 es_tripped_ = true;
                 es_stop_reason_ = "full";
-            } else if (root_n >= es_params_.min_sims &&
+            } else if (root_n >= es_collect_start_ &&
                        root_n - es_last_check_sims_ >= es_params_.es_check_every) {
                 es_last_check_sims_ = root_n;
                 evaluate_early_stop(root_n);
@@ -1532,6 +1530,8 @@ std::pair<
 
 void MCTSTree::set_early_stop_params(const EarlyStopParams& p) {
     es_params_ = p;
+    const int span = std::max(p.es_tier1_consec, p.es_tier2_consec) * p.es_check_every;
+    es_collect_start_ = std::max(0, p.min_sims - span);
     es_params_set_ = true;
 }
 
@@ -1626,6 +1626,8 @@ void MCTSTree::evaluate_early_stop(int sims_done) {
     if (es_window_.size() > cap) es_window_.erase(es_window_.begin());
     es_debug_rows_.push_back(row);
 
+    if (sims_done < es_params_.min_sims) return;  // recorded, not eligible yet
+
     if (tier1_check(rsc, details)) {
         es_tripped_ = true;
         es_stop_reason_ = "tier1";
@@ -1658,19 +1660,30 @@ bool MCTSTree::tier1_check(const std::optional<std::unordered_map<std::string, f
     // clears the visit-share floor, and beats the runner-up by the margin.
     if (!rsc || details.empty() || details[0].uci != top) return false;
 
-    std::string rsc_argmax;
-    float rsc_max = -std::numeric_limits<float>::infinity();
-    for (const auto& kv : *rsc) {
-        if (kv.second > rsc_max) { rsc_max = kv.second; rsc_argmax = kv.first; }
-    }
-    if (rsc_argmax != top) return false;
-    if (details[0].visit_share < es_params_.rsc_visit_share_floor) return false;
+    const MCTSNode* r5 = root_.get();
+    const float flip5 = (r5 && r5->board.white_to_move()) ? 1.0f : -1.0f;
 
-    std::vector<float> vals;
-    vals.reserve(rsc->size());
-    for (const auto& kv : *rsc) vals.push_back(kv.second);
-    std::sort(vals.begin(), vals.end(), std::greater<float>());
-    if (vals.size() < 2 || (vals[0] - vals[1]) < es_params_.rsc_margin) return false;
+    if (rsc->size() < 2) {
+        // A mega-runaway: everything but the leader stayed under
+        // rsc_min_visits, so there's nothing to margin-compare against.
+        // That's maximum confidence, not missing evidence -- fall back to
+        // "has d0's own Q converged with its recent-form Qema" instead.
+        if (flip5 * (details[0].Q - details[0].Qema) >= 0.15f) return false;
+    } else {
+        std::string rsc_argmax;
+        float rsc_max = -std::numeric_limits<float>::infinity();
+        for (const auto& kv : *rsc) {
+            if (kv.second > rsc_max) { rsc_max = kv.second; rsc_argmax = kv.first; }
+        }
+        if (rsc_argmax != top) return false;
+        if (details[0].visit_share < es_params_.rsc_visit_share_floor) return false;
+
+        std::vector<float> vals;
+        vals.reserve(rsc->size());
+        for (const auto& kv : *rsc) vals.push_back(kv.second);
+        std::sort(vals.begin(), vals.end(), std::greater<float>());
+        if ((vals[0] - vals[1]) < es_params_.rsc_margin) return false;
+    }
 
     // cond 6, stop-time only
     const EsCheckinRow& last = es_window_.back();

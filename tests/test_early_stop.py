@@ -63,6 +63,7 @@ def run_search(fen, infer_fn, es_params, sim_budget=4000, batch=8,
         tier1_jsd_thresh=es_params["tier1_jsd_thresh"],
         tier2_consec=es_params["tier2_consec"],
         tier2_jsd_thresh=es_params["tier2_jsd_thresh"],
+        rsc_min_visits=es_params.get("rsc_min_visits", 100),
     )
     forest = pf.MCTSForest()
     forest.add_tree(tree)
@@ -132,6 +133,34 @@ def test_tier1_fires_on_a_clear_runaway():
     top_uci, _ = tree.best()
     assert top_uci == best_move
     assert sims < 2000  # actually stopped early, didn't run to the ceiling
+
+
+def test_tier1_fires_on_a_mega_runaway_with_degenerate_rsc():
+    """Regression: a runaway so extreme that every other candidate stays
+    under rsc_min_visits collapses robust_selection_criteria's rsc map to a
+    single entry. tier1's margin check used to treat that as "can't confirm,
+    keep going" and ran to the ceiling instead -- exactly backwards, since a
+    degenerate rsc map is maximum confidence, not missing evidence.
+    """
+    zobrists = root_child_zobrists(KPK_FEN)
+    best_move = "e3e4"
+    values = jittered_neutral(zobrists, exclude={best_move})
+    values[zobrists[best_move]] = (0.001, 0.001, 0.998)
+
+    # force the degenerate case regardless of streak-timing noise: with a
+    # 4000-sim ceiling and 8 candidates, nothing but the leader can plausibly
+    # reach 3000 visits.
+    es = dict(KPK_ES, rsc_min_visits=3000)
+    tree, sims = run_search(KPK_FEN, make_stub_infer(values), es, sim_budget=4000)
+
+    rsc, details = tree.robust_selection_criteria(5, 3000)
+    assert rsc is not None and len(rsc) < 2  # confirms this test hits the case
+
+    assert tree.es_tripped
+    assert tree.es_stop_reason == "tier1"
+    top_uci, _ = tree.best()
+    assert top_uci == best_move
+    assert sims < 4000
 
 
 def test_full_fires_with_no_signal():

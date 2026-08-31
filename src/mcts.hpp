@@ -436,6 +436,8 @@ private:
     bool es_tripped_ = false;
     std::string es_stop_reason_;              // "", "full", "tier1", "tier2"
     int  es_last_check_sims_ = 0;
+    // recording starts this early so the window is already full at min_sims
+    int  es_collect_start_ = 0;
     std::vector<EsCheckinRow> es_window_;      // capped sliding window
     std::vector<EsCheckinRow> es_debug_rows_;  // uncapped, full-move history
 
