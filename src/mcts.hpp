@@ -356,6 +356,7 @@ public:
 
     void set_sim_budget(float v);
     float sim_budget() const;
+    int min_sims() const;
 
     void set_uniform_eps(float v);
     float uniform_eps() const;

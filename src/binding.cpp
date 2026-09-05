@@ -504,6 +504,7 @@ PYBIND11_MODULE(_core, m) {
           .def("cpuct", &MCTSTree::cpuct)
           .def("set_sim_budget", &MCTSTree::set_sim_budget, py::arg("sim_budget"))
           .def("sim_budget", &MCTSTree::sim_budget)
+          .def("min_sims", &MCTSTree::min_sims)
           .def("set_uniform_eps", &MCTSTree::set_uniform_eps, py::arg("uniform_eps"))
           .def("uniform_eps", &MCTSTree::uniform_eps)
           .def("set_prior_clip_max", &MCTSTree::set_prior_clip_max, py::arg("prior_clip_max"))

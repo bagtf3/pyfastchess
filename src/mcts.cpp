@@ -1748,6 +1748,11 @@ float MCTSTree::sim_budget() const {
     return sim_budget_;
 }
 
+int MCTSTree::min_sims() const {
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    return es_params_.min_sims;
+}
+
 void MCTSTree::set_uniform_eps(float v) {
     std::lock_guard<std::mutex> g(tree_mutex_);
     uniform_eps_ = v;
