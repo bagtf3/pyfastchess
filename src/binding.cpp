@@ -426,6 +426,14 @@ PYBIND11_MODULE(_core, m) {
           .def_property_readonly("value", [](const MCTSNode& n){
                return py::make_tuple(n.value.win, n.value.draw, n.value.loss);
           })
+          .def_property_readonly("nn_wdl_white", [](const MCTSNode& n){
+               return py::make_tuple(n.value.win, n.value.draw, n.value.loss);
+          }, "Raw NN leaf WDL (win,draw,loss), white-POV.")
+          .def_property_readonly("nn_wdl_stm", [](const MCTSNode& n){
+               if (n.get_stm_pov() < 0.0f)
+                   return py::make_tuple(n.value.loss, n.value.draw, n.value.win);
+               return py::make_tuple(n.value.win, n.value.draw, n.value.loss);
+          }, "Raw NN leaf WDL (win,draw,loss), STM-POV (win/loss swapped for black).")
           .def_property_readonly("board",[](const MCTSNode& n){ return n.board; },
                                    py::return_value_policy::copy,
                "Position at this node. Its move history is TRIMMED to what "

@@ -995,43 +995,21 @@ MCTSTree::build_priors(MCTSNode* node, const RawEntry* re, float q_stm) const
     for (auto& mp : built_priors) mp.raw_prior = mp.prior;
 
     if (k > 0.0f) {
-        // uniform_eps mixing
-        if (uniform_eps_ > 0.0f) {
-            const float u = 1.0f / k;
-            const float one_minus = 1.0f - uniform_eps_;
-            for (auto& mp : built_priors)
-                mp.prior = one_minus * mp.prior + uniform_eps_ * u;
+        // Unified uniform_eps + prior_clip_max: one blend toward uniform. eps is
+        // the larger of uniform_eps and the amount needed to pull the top mass
+        // down to prior_clip_max (only when k >= 5). Convex blend keeps sum = 1.
+        const float u = 1.0f / k;
+        float eps = uniform_eps_;
+        if (prior_clip_max_ < 1.0f && k >= 5.0f) {
+            float top = 0.0f;
+            for (const auto& mp : built_priors) top = std::max(top, mp.prior);
+            if (top > prior_clip_max_ && top > u)
+                eps = std::max(eps, (top - prior_clip_max_) / (top - u));
         }
-
-        // capture/check floors: 3/k if both, 1.5/k if either
-        // const float floor_either = 1.5f / k;
-        // const float floor_both   = 3.0f / k;
-        // for (auto& mp : built_priors) {
-        //     if (mp.prior >= floor_both) continue;
-        //     const bool cap = node->board.is_capture(mp.uci);
-        //     if (cap) {
-        //         const bool chk = node->board.gives_check(mp.uci);
-        //         mp.prior = std::max(mp.prior, chk ? floor_both : floor_either);
-        //     } else if (mp.prior < floor_either) {
-        //         const bool chk = node->board.gives_check(mp.uci);
-        //         if (chk) mp.prior = floor_either;
-        //     }
-        // }
-
-        // prior_clip_max clip then renorm
-        if (prior_clip_max_ < 1.0f) {
+        if (eps > 0.0f) {
+            const float one_minus = 1.0f - eps;
             for (auto& mp : built_priors)
-                mp.prior = std::min(mp.prior, prior_clip_max_);
-        }
-
-        double s = 0.0;
-        for (const auto& mp : built_priors) s += std::max(0.0f, mp.prior);
-        if (s > 0.0) {
-            const float inv = static_cast<float>(1.0 / s);
-            for (auto& mp : built_priors) mp.prior = std::max(0.0f, mp.prior) * inv;
-        } else {
-            const float u = 1.0f / k;
-            for (auto& mp : built_priors) mp.prior = u;
+                mp.prior = one_minus * mp.prior + eps * u;
         }
 
         // Prior temperature scaling: sharpen high-entropy distributions toward target
