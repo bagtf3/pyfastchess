@@ -6,15 +6,18 @@ set(PYBIND11_FINDPYTHON ON)
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 REQUIRED CONFIG)
 
+# Build the python extension module (explicit, no variables hiding sources)
 pybind11_add_module(pyfastchess._core
     src/backend.cpp
     src/binding.cpp
     src/mcts.cpp
-    src/evaluator.cpp 
+    src/cache.cpp
+    src/singleton_registry.cpp
 )
 
+# Explicit include dirs (same style as your working file)
 target_include_directories(pyfastchess._core PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/extern/chess-library/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
@@ -23,10 +26,10 @@ if (MSVC)
   target_compile_options(pyfastchess._core PRIVATE /permissive- /Zc:__cplusplus)
 endif()
 
-# Make the binary name be _core*.pyd (so import pyfastchess._core works)
+# Keep the module name stable so "import pyfastchess._core" works
 set_target_properties(pyfastchess._core PROPERTIES OUTPUT_NAME "_core")
 
-# Install the extension into the pyfastchess package directory
+# Install the extension into the pyfastchess package directory (same as your original)
 if (WIN32)
   install(TARGETS pyfastchess._core
     RUNTIME DESTINATION pyfastchess
