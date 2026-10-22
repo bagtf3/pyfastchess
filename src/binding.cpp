@@ -381,7 +381,8 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("draw",           &ChildDetail::draw)
           .def_readonly("loss",           &ChildDetail::loss)
           .def_readonly("visit_share",    &ChildDetail::visit_share)
-          .def_readonly("last_visit",     &ChildDetail::last_visit);
+          .def_readonly("last_visit",     &ChildDetail::last_visit)
+          .def_readonly("boosted_N",      &ChildDetail::boosted_N);
      
      py::class_<PVItem>(m, "PVItem")
           .def_readonly("uci", &PVItem::uci)
@@ -511,6 +512,9 @@ PYBIND11_MODULE(_core, m) {
           .def("prior_clip_max", &MCTSTree::prior_clip_max)
 
           .def("set_fpu_reduction", &MCTSTree::set_fpu_reduction, py::arg("fpu_reduction"))
+          .def("set_sharp_boost", &MCTSTree::set_sharp_boost,
+               py::arg("window_lo"), py::arg("window_hi"), py::arg("M"), py::arg("boost"))
+          .def("sharp_by_depth", &MCTSTree::sharp_by_depth)
           .def("fpu_reduction", &MCTSTree::fpu_reduction)
           .def("set_qema_span", &MCTSTree::set_qema_span, py::arg("span"))
           .def("qema_span", &MCTSTree::qema_span)
@@ -721,7 +725,8 @@ PYBIND11_MODULE(_core, m) {
           .def_readonly("total_puct", &CollectResults::total_puct)
           .def_readonly("total_penalty", &CollectResults::total_penalty)
 
-          .def_readonly("total_depth", &CollectResults::total_depth);
+          .def_readonly("total_depth", &CollectResults::total_depth)
+          .def_readonly("total_sharp", &CollectResults::total_sharp);
 
 
      py::class_<MCTSForest>(m, "MCTSForest")

@@ -62,7 +62,8 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     CollectCounts* cc,
     float sim_budget,
     float pruning_factor,
-    float fpu_reduction)
+    float fpu_reduction,
+    const SharpBoostParams& sharp)
 {
     if (ordered_children.empty()) return nullptr;
 
@@ -106,6 +107,16 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
     const float u_scale = c_puct * std::sqrt(parentN);
     const float pov_sign = this->get_stm_pov();
     const float parent_q = pov_sign * this->Q_eff;
+
+    const bool sharp_on = sharp.boost > 0.0f &&
+                          parent_vis >= sharp.window_lo && parent_vis <= sharp.window_hi;
+    if (sharp_on && !sharp_tagged) tag_sharp_children();
+    const float sharp_u = u_scale * sharp.boost;
+    const float inv_m = 1.0f / sharp.M;
+
+    // winner without the boost, so a boost-decided pick can be counted
+    size_t plain_idx = SIZE_MAX;
+    float plain_score = -INFINITY;
 
     bool do_prune = (pruning_factor > 0.0f) && (cap_sz == n_child) && (parent == nullptr);
 
@@ -180,6 +191,15 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
             }
         }
 
+        if (sharp_on) {
+            if (score > plain_score) {
+                plain_score = score;
+                plain_idx = i;
+            }
+            if (ce.sharp && n < sharp.M)
+                score += sharp_u * ce.sharp * (1.0f - n * inv_m) / (1.0f + n);
+        }
+
         if (score > best_score) {
             best_score = score;
             best_idx = i;
@@ -203,7 +223,22 @@ MCTSNode* MCTSNode::select_child_lazy_ptr(
         best_child = get_or_create_child(ce);
     }
 
+    if (sharp_on && best_child && best_idx != plain_idx) {
+        ++best_child->boosted_N;
+        ++cc->count_sharp;
+    }
+
     return best_child;
+}
+
+void MCTSNode::tag_sharp_children() {
+    const chess::Board& b = board.raw_board();
+    for (auto& ce : ordered_children) {
+        const chess::Move m(ce.packed_move);
+        ce.sharp = static_cast<uint8_t>(b.isCapture(m)) +
+                   static_cast<uint8_t>(b.givesCheck(m) != chess::CheckType::NO_CHECK);
+    }
+    sharp_tagged = true;
 }
 
 // ------------------------- MCTSTree -------------------------
@@ -267,8 +302,12 @@ CollectCounts MCTSTree::descend_and_resolve(MCTSNode* start) {
         }
 
         // pass &cc so select_child_lazy_ptr increments count_puct
+        const uint32_t sharp_before = cc.count_sharp;
         MCTSNode* child = node->select_child_lazy_ptr(
-            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_, this->fpu_reduction_);
+            this->c_puct_, &cc, this->sim_budget_, this->pruning_factor_,
+            this->fpu_reduction_, this->sharp_);
+        if (cc.count_sharp != sharp_before)
+            ++sharp_by_depth_[std::min(last_path_.size() - 1, kSharpDepths - 1)];
 
         // Selection failed on a node that is expanded and has children, so it
         // does not need expanding. Breaking here would fall through to
@@ -414,6 +453,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     uint64_t total_penalty = 0;
 
     uint64_t total_depth = 0;
+    uint64_t total_sharp = 0;
 
     size_t attempts = 0;
     const size_t try_break = 1000;
@@ -439,6 +479,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
         total_penalty += cc.count_penalty;
 
         total_depth += cc.depth;
+        total_sharp += cc.count_sharp;
 
         // leaf can be null if we hit an unexpected stop condition
         MCTSNode* node = cc.leaf;
@@ -495,6 +536,7 @@ CollectResults MCTSTree::collect_many_leaves(size_t n_new, size_t n_fastpath) {
     res.total_penalty = total_penalty;
 
     res.total_depth = total_depth;
+    res.total_sharp = total_sharp;
 
     return res;
 }
@@ -1152,6 +1194,7 @@ bool MCTSTree::advance_root(const std::string& mv) {
     last_path_.clear();
     release_blocked_queue();   // raw node pointers do not survive the promotion
     noise_added_ = false;
+    sharp_by_depth_.fill(0);
 
     auto old_root = std::move(root_);
     if (!old_root) return false;
@@ -1271,6 +1314,7 @@ std::vector<ChildDetail> MCTSTree::root_child_details() {
         if (ch) {
             // need to do this first to capture true last visit
             cd.last_visit = ch->last_visit;
+            cd.boosted_N = ch->boosted_N;
             ch->update_visit_share(tick, false);
             cd.N = ch->visit_count();
             cd.Q = ch->Q;
@@ -1630,7 +1674,7 @@ bool MCTSTree::tier1_check(const std::optional<std::unordered_map<std::string, f
         const EsCheckinRow& c = es_window_[i];
         if (c.top_uci() != top) return false;                                  // cond 1
         if (c.jsd > es_params_.es_tier1_jsd_thresh) return false;              // cond 2
-        if (i > start && c.jsd > es_window_[i - 1].jsd + 0.001) return false;  // cond 3, epsilon tolerance
+        if (i > start && c.jsd > es_window_[i - 1].jsd + 0.0005) return false; // cond 3, epsilon tolerance
         if (i > start && c.delta_12 < es_window_[i - 1].delta_12) return false; // cond 4
     }
 
@@ -1710,18 +1754,21 @@ bool MCTSTree::tier2_check(const std::optional<std::unordered_map<std::string, f
 
     // Nominee must not have the worst Qema or worst trend (Qdelta_sign) of
     // the up-to-rsc_top_n RSC candidates -- guards against quietly locking
-    // in a poorly-performing-but-recently-visited move.
+    // in a poorly-performing-but-recently-visited move. Qema is white-POV,
+    // Qdelta_sign is already STM-POV.
+    const MCTSNode* r = root_.get();
+    const float flip = (r && r->board.white_to_move()) ? 1.0f : -1.0f;
     const ChildDetail* nom_detail = nullptr;
     float worst_qema = std::numeric_limits<float>::infinity();
     float worst_dq = std::numeric_limits<float>::infinity();
     const int k = std::min<int>(es_params_.rsc_top_n, static_cast<int>(details.size()));
     for (int i = 0; i < k; ++i) {
         if (details[i].uci == nominee) nom_detail = &details[i];
-        worst_qema = std::min(worst_qema, details[i].Qema);
+        worst_qema = std::min(worst_qema, flip * details[i].Qema);
         worst_dq = std::min(worst_dq, details[i].Qdelta_sign);
     }
     if (!nom_detail) return false;
-    if (nom_detail->Qema <= worst_qema) return false;
+    if (flip * nom_detail->Qema <= worst_qema) return false;
     if (nom_detail->Qdelta_sign <= worst_dq) return false;
 
     return true;
@@ -1771,6 +1818,12 @@ void MCTSTree::set_prior_clip_max(float v) {
 float MCTSTree::prior_clip_max() const {
     std::lock_guard<std::mutex> g(tree_mutex_);
     return prior_clip_max_;
+}
+
+void MCTSTree::set_sharp_boost(int window_lo, int window_hi, float M, float boost) {
+    if (!(M > 0.0f)) throw std::invalid_argument("sharp_boost: M must be > 0");
+    std::lock_guard<std::mutex> g(tree_mutex_);
+    sharp_ = SharpBoostParams{window_lo, window_hi, M, boost};
 }
 
 void MCTSTree::set_fpu_reduction(float v) {

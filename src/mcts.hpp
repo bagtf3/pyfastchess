@@ -34,6 +34,7 @@ struct CollectCounts {
     uint32_t count_puct = 0;        // times PUCT branch was evaluated during this descent
     uint32_t count_penalty = 0;     // times performance (soft skip) penalty was applied
     uint32_t depth = 0;             // plies from root to the leaf (0 for a blocked descent)
+    uint32_t count_sharp = 0;       // selections the sharp boost changed
 };
 
 struct CollectResults {
@@ -51,6 +52,18 @@ struct CollectResults {
     uint64_t total_penalty = 0;
 
     uint64_t total_depth = 0;   // summed leaf depth over non-blocked descents
+    uint64_t total_sharp = 0;
+};
+
+// Sharp-move boost. While a node's visit count is inside [window_lo, window_hi],
+// each capture/check child gets an additive prior bonus of
+// boost * sharp * (1 - N/M) for N < M, where sharp is capture + check (0..2).
+// boost = 0 disables it.
+struct SharpBoostParams {
+    int   window_lo = 100;
+    int   window_hi = 250;
+    float M = 10.0f;
+    float boost = 0.0f;
 };
 
 // ChildDetail — used for introspection / Python bindings
@@ -69,6 +82,7 @@ struct ChildDetail {
     float loss = 0.0f;
     float visit_share = 0.0f;
     int   last_visit = 0;
+    int   boosted_N = 0;   // visits the sharp boost decided
 };
 
 struct PVItem {
@@ -199,6 +213,7 @@ struct MCTSNode {
     struct ChildEntry {
         uint16_t move_idx = 0xFFFF;         // policy-space index (1858 domain); 0xFFFF = unset
         uint16_t packed_move = 0;           // chess-space; feeds makeMove with no parsing
+        uint8_t sharp = 0;                  // capture + check, 0..2; set by tag_sharp_children
         std::unique_ptr<MCTSNode> child;    // nullable; lazy-instantiated child
         float prior = 0.0f;                 // fudged prior (post uniform_eps, floors, clip)
         float raw_prior = 0.0f;             // raw softmax prior (post softmax, pre fudging)
@@ -222,8 +237,10 @@ struct MCTSNode {
     bool is_expanded = false;
     bool children_have_priors = false;
     uint8_t resort_stage = 0;   // how many visit-resort thresholds this node has crossed
+    bool sharp_tagged = false;  // ordered_children[].sharp has been filled in
     WDL value{};             // NN leaf WDL (white-POV); set on expansion, never updated by backprop
     int cache_misses = 0;
+    int boosted_N = 0;       // visits to this node that the parent's sharp boost decided
     uint32_t queued_epoch = 0;
 
     // Disallow copying (because we hold unique_ptr children)
@@ -245,7 +262,12 @@ struct MCTSNode {
         CollectCounts* cc,
         float sim_budget,
         float pruning_factor,
-        float fpu_reduction);
+        float fpu_reduction,
+        const SharpBoostParams& sharp);
+
+    // Fill ordered_children[].sharp from the board. Runs once per node, the
+    // first time it enters the sharp window.
+    void tag_sharp_children();
 
     // safe, convenient accessors for the atomic visit counter
     int visit_count() const noexcept {
@@ -367,6 +389,14 @@ public:
     void set_fpu_reduction(float v);
     float fpu_reduction() const;
 
+    void set_sharp_boost(int window_lo, int window_hi, float M, float boost);
+    const SharpBoostParams& sharp_boost() const { return sharp_; }
+
+    // Boost-decided selections this move, bucketed by the depth of the node
+    // doing the selecting (0 = root). Last bucket collects everything deeper.
+    static constexpr size_t kSharpDepths = 8;
+    std::array<uint32_t, kSharpDepths> sharp_by_depth() const { return sharp_by_depth_; }
+
     void set_qema_span(float span);
     float qema_span() const;
     void set_qdelta_span(float span);
@@ -403,6 +433,9 @@ private:
     float uniform_eps_ = 0.05f;
     float prior_clip_max_ = 0.65f;
     float fpu_reduction_ = 0.1f;
+
+    SharpBoostParams sharp_;
+    std::array<uint32_t, kSharpDepths> sharp_by_depth_{};
 
     // Automatic Dirichlet noise params (eps=0 disables)
     float dirichlet_eps_ = 0.0f;
