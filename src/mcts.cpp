@@ -619,18 +619,9 @@ void MCTSTree::back_up_along_path_nolock(MCTSNode* leaf, WDL wdl) {
         const int nv = n->visit_count();
         n->Q = (nv > 0) ? (n->W / static_cast<float>(nv)) : 0.0f;
 
-        if (n->is_terminal) {
-            n->Q_eff = n->Q;
-        } else if (nv > 0) {
-            const float pd = n->p_draw / static_cast<float>(nv);
-            const float span = contempt_full_q_ - contempt_zero_q_;
-            const float t = (span > 0.0f)
-                ? std::min(1.0f, std::max(0.0f, (n->Q - contempt_zero_q_) / span))
-                : (n->Q >= contempt_full_q_ ? 1.0f : 0.0f);
-            n->Q_eff = n->Q - contempt_fight_c_ * t * pd;
-        } else {
-            n->Q_eff = n->Q;
-        }
+        if (n == root_.get() && !contempt_latched_ && latch_contempt_nolock())
+            refresh_contempt_nolock();
+        n->Q_eff = contempt_q_eff(n);
 
         MCTSNode* p = n->parent;
         if (!p) continue;  // root: skip parent-dependent updates
@@ -861,7 +852,56 @@ void MCTSTree::set_contempt(float zero_q, float full_q, float fight_c) {
     contempt_zero_q_  = zero_q;
     contempt_full_q_  = full_q;
     contempt_fight_c_ = fight_c;
+    latch_contempt_nolock();
+    refresh_contempt_nolock();
 }
+
+float MCTSTree::contempt_q_eff(const MCTSNode* n) const {
+    const int nv = n->visit_count();
+    // terminals included: decisive ones carry no draw mass, so only terminal
+    // draws (repetition, stalemate, 50-move) pick up the penalty
+    if (nv <= 0) return n->Q;
+    const float pd = n->p_draw / static_cast<float>(nv);
+    return n->Q - contempt_dir_ * contempt_fight_c_ * contempt_t_ * pd;
+}
+
+// Reads the root's Q once enough results have landed and holds the decision
+// until the root moves. Until then direction and strength stay zero, so
+// selection is neutral, and backprop retries on each root update. Completed
+// results are counted from the WDL sums: visit_count includes in-flight sims.
+bool MCTSTree::latch_contempt_nolock() {
+    contempt_dir_ = 0.0f;
+    contempt_t_ = 0.0f;
+    MCTSNode* r = root_.get();
+    const float completed = r ? r->p_win + r->p_draw + r->p_loss : 0.0f;
+    contempt_latched_ = completed >= kContemptMinCompleted;
+    if (!contempt_latched_) return false;
+
+    const float q = r->Q;
+    const float aq = std::abs(q);
+    const float span = contempt_full_q_ - contempt_zero_q_;
+    contempt_t_ = (span > 0.0f)
+        ? std::clamp((aq - contempt_zero_q_) / span, 0.0f, 1.0f)
+        : (aq >= contempt_full_q_ ? 1.0f : 0.0f);
+    contempt_dir_ = (q > 0.0f) ? 1.0f : (q < 0.0f ? -1.0f : 0.0f);
+    return true;
+}
+
+// Restamps every visited node's Q_eff with the current decision, so a reused
+// subtree or a settings change does not keep a stale bias.
+void MCTSTree::refresh_contempt_nolock() {
+    MCTSNode* r = root_.get();
+    if (!r) return;
+    std::vector<MCTSNode*> stack{r};
+    while (!stack.empty()) {
+        MCTSNode* n = stack.back();
+        stack.pop_back();
+        if (n->visit_count() > 0) n->Q_eff = contempt_q_eff(n);
+        for (auto& ce : n->ordered_children)
+            if (ce.child) stack.push_back(ce.child.get());
+    }
+}
+
 float MCTSTree::contempt_zero_q()  const { return contempt_zero_q_; }
 float MCTSTree::contempt_full_q()  const { return contempt_full_q_; }
 float MCTSTree::contempt_fight_c() const { return contempt_fight_c_; }
@@ -1220,6 +1260,8 @@ bool MCTSTree::advance_root(const std::string& mv) {
             filter_queues_for_new_root(new_root.get(), tree_epoch_);
 
             root_ = std::move(new_root);
+            latch_contempt_nolock();
+            refresh_contempt_nolock();
 
             // promoted children were depth-2 and carry no EMA history
             seed_new_root_plus_one();
@@ -1251,6 +1293,7 @@ bool MCTSTree::advance_root(const std::string& mv) {
 
     root_ = std::make_unique<MCTSNode>(nb, nullptr, uint16_t(0));
     root_->zobrist = nb.hash();
+    latch_contempt_nolock();   // fresh root: resets to neutral until warmed up
     return true;
 }
 

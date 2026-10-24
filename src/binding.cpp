@@ -662,7 +662,7 @@ PYBIND11_MODULE(_core, m) {
 
           .def("set_contempt", &MCTSTree::set_contempt,
                py::arg("zero_q"), py::arg("full_q"), py::arg("fight_c"),
-               "Smooth contempt: factor ramps linearly from 0 at zero_q to fight_c at full_q, flat above. Q_eff = Q - factor*p_draw.")
+               "Root-latched contempt: once the root has 100 completed results, its Q decides the favoured side and a factor ramping from 0 at |Q|=zero_q to fight_c at |Q|=full_q. Every node then gets Q_eff = Q - sign(root Q)*factor*p_draw: the favoured side fights for wins, the other seeks draws. Re-decided on advance_root. zero_q must be >= 0.")
           .def("contempt_zero_q",  &MCTSTree::contempt_zero_q)
           .def("contempt_full_q",  &MCTSTree::contempt_full_q)
           .def("contempt_fight_c", &MCTSTree::contempt_fight_c)

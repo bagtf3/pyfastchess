@@ -448,10 +448,18 @@ private:
     // Value scale: multiplied into (win-loss) during backprop so Q stays in [-vscale, vscale].
     float vscale_ = 1.0f;
 
-    // Contempt: smooth draw penalty ramping from zero_q to full_q then flat at fight_c.
-    float contempt_zero_q_  = 0.0f;  // Q below this: no penalty
-    float contempt_full_q_  = 0.5f;  // Q above this: full fight_c penalty
+    // Contempt: decided once per search from the root's Q, then held fixed.
+    // The side the root says is winning fights for wins; the other seeks draws.
+    float contempt_zero_q_  = 0.0f;  // root |Q| below this: no penalty
+    float contempt_full_q_  = 0.5f;  // root |Q| above this: full fight_c penalty
     float contempt_fight_c_ = 0.0f;  // max draw penalty (0 = disabled)
+    float contempt_dir_     = 0.0f;  // white-POV sign of the side the root favours
+    float contempt_t_       = 0.0f;  // ramp factor latched from root |Q|
+    bool  contempt_latched_ = false;
+    static constexpr float kContemptMinCompleted = 100.0f;  // root results before latching
+    bool latch_contempt_nolock();
+    void refresh_contempt_nolock();
+    float contempt_q_eff(const MCTSNode* n) const;
 
     // Prior temperature scaling: binary search to target normed entropy.
     float tempscale_entropy_target_ = 0.0f;  // 0 = disabled
