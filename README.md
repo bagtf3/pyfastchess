@@ -7,7 +7,7 @@ It is designed as a drop-in replacement for slower pure-Python libraries (like [
 ---
 
 ## 🚀 Features
-- Wraps [Disservin’s `chess-library`](https://github.com/Disservin/chess-library) (C++17) for high-performance board and move operations.  
+- Uses [Disservin’s `chess-library`](https://github.com/Disservin/chess-library) (C++17) for high-performance board and move operations (vendored in `vendor/chess.hpp`).  
 - Exposes a Pythonic API for:
   - Creating boards from FEN
   - Generating legal moves
@@ -19,18 +19,11 @@ It is designed as a drop-in replacement for slower pure-Python libraries (like [
 ---
 
 ## 📦 Installation
-Clone this repo with submodules (to pull in the chess-library dependency):
 
 ```bash
-git clone --recursive https://github.com/yourname/pyfastchess.git
+git clone https://github.com/yourname/pyfastchess.git
 cd pyfastchess
 pip install -e .
-```
-
-If you already cloned without `--recursive`, run:
-
-```bash
-git submodule update --init --recursive
 ```
 
 ---
@@ -58,8 +51,7 @@ print(planes.shape)   # (6, 8, 8)
 ## 📜 License
 
 - **pyfastchess bindings (this repo):** MIT License © 2025 bagtf3
-- **chess-library (submodule):** MIT License © 2021–present Disservin.  
-- The `chess-library` code is included here as a **git submodule**. You can find its source and license at [github.com/Disservin/chess-library](https://github.com/Disservin/chess-library).  
+- **chess-library (vendored):** MIT License © 2021–present Disservin. Vendored as `vendor/chess.hpp` from [github.com/Disservin/chess-library](https://github.com/Disservin/chess-library).  
 
 ---
 
